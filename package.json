@@ -1,0 +1,17 @@
+{
+  "name": "opencc",
+  "version": "1.0.0",
+  "description": "Minimal proxy that lets Claude Code talk to any OpenAI-compatible API",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "opencc": "src/cli.js"
+  },
+  "scripts": {
+    "start": "npm install -g . && node src/postinstall.js",
+    "server": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
