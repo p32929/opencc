@@ -1,166 +1,111 @@
 # opencc
 
-**opencc** lets you use [Claude Code](https://code.claude.com) with almost
-any AI model — not just Anthropic's own Claude models. That includes
-OpenAI's models, OpenRouter (which gives you access to tons of models,
-including free ones), or a model running on your own computer.
+Lets you use [Claude Code](https://code.claude.com) for free (or cheap) by
+connecting it to any **free or paid OpenAI-compatible API** — OpenRouter,
+a local model, whatever — instead of paying for Anthropic's own API.
 
-Claude Code normally only talks to Anthropic's servers. opencc runs quietly
-in the background and translates the conversation both ways, so Claude Code
-thinks it's talking to Claude, but it's really talking to whatever model you
-picked.
+It works by running a tiny local server that sits between Claude Code and
+your chosen AI provider, translating the conversation between them. Claude
+Code doesn't know the difference.
 
-It's kept intentionally small — no dashboard, no accounts to sign up for, no
-extra apps. Just one small program that runs on your own computer.
+## How it works, step by step
 
-## Before you start, make sure you have
-
-1. **Node.js** (version 18 or newer). Check by typing `node -v` in your
-   terminal. If that doesn't work, get it free from
-   [nodejs.org](https://nodejs.org).
-2. **Claude Code** installed. Check by typing `claude --version`. If you
-   don't have it yet:
-   ```bash
-   npm install -g @anthropic-ai/claude-code
-   ```
-3. **An API key** from an AI provider. A couple of easy options:
-   - [OpenRouter](https://openrouter.ai/keys) — one key gives you access to
-     many different models, including some free ones.
-   - [OpenAI](https://platform.openai.com/api-keys) — if you want to use
-     OpenAI's own models directly.
-
-## Step 1 — Get the code
+### 1. Clone it
 
 ```bash
 git clone https://github.com/p32929/opencc.git
 cd opencc
 ```
 
-## Step 2 — Install it
+### 2. Run it once to install
 
 ```bash
 npm start
 ```
 
-This is the only install step, and you only run it once. It makes the
-`opencc` command work from anywhere on your computer — not just inside this
-folder. Once it finishes, you can leave this folder and never come back to
-it; `opencc` will just work from now on.
+No `npm install` needed first — opencc has zero dependencies. This one
+command makes the `opencc` command available anywhere on your computer, not
+just inside this folder. You only ever run this once.
 
-## Step 3 — Tell opencc which AI model to use
+### 3. Set your config
 
 ```bash
 opencc init
 ```
 
-This asks a few simple questions, right in your terminal:
+Run this from anywhere — you don't need to be inside the `opencc` folder.
+It asks a few questions in your terminal:
 
-| Question | What to put |
-|---|---|
-| Base URL | The provider's web address. OpenRouter: `https://openrouter.ai/api/v1`. OpenAI: `https://api.openai.com/v1`. |
-| API key | The secret key you got from that provider. |
-| Model for normal requests | The model that does the real work, e.g. `openai/gpt-4o` (OpenRouter) or `gpt-4o` (OpenAI). |
-| Model for background requests | A cheaper/faster model for small background tasks. You can leave this blank to just reuse the model above. |
-| Port | Press Enter to accept the default (`3000`) unless you already have something else using that port. |
+- **Base URL** of your AI provider, e.g. `https://openrouter.ai/api/v1`
+- **API key** for that provider
+- **Model name** to use (and optionally a second, cheaper one for small
+  background tasks)
 
-Here's what it looks like filled in, using OpenRouter as an example:
+Your answers are saved so you won't be asked again. Run `opencc init` again
+any time you want to change them.
 
-```
-OpenAI-compatible base URL (e.g. https://api.openai.com/v1): https://openrouter.ai/api/v1
-OpenAI-compatible API key: sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-Model for normal Sonnet/Opus-tier requests: openai/gpt-4o
-Model for cheap Haiku-tier background requests (blank = same as above):
-Port: 3000
-```
-
-Your answers are saved on your computer, so you won't need to type them
-again. Want to change something later? Just run `opencc init` again — it
-shows you what's already saved and lets you update just the parts you want.
-
-## Step 4 — Start the proxy
-
-Open a terminal and run:
+### 4. Start the server
 
 ```bash
 opencc
 ```
 
-Leave this terminal open — this is your proxy running, quietly translating
-in the background. You'll see something like this:
+**Why this is needed:** Claude Code normally talks directly to Anthropic's
+servers. opencc gives it a local server to talk to *instead* — this
+command starts that server. It's what actually forwards your messages to
+the AI provider you set up in step 3, and translates the response back.
+Without this running, Claude Code has nothing to connect to.
 
-```
-opencc listening on http://localhost:3000
+Leave this terminal open — this is your server running.
 
-  Sonnet/Opus requests -> openai/gpt-4o
-  Haiku requests       -> openai/gpt-4o
+### 5. Start Claude Code
 
-In another terminal, run: opencc claude
-```
-
-## Step 5 — Start Claude Code
-
-Open a **second, separate terminal** (keep the first one open and running)
-and type:
+Open a **second terminal** (leave the first one running) and run:
 
 ```bash
 opencc claude
 ```
 
-Claude Code opens exactly like it normally would — except now it's using
-the model you chose in Step 3 instead of Anthropic's own Claude models.
+This launches Claude Code, pointed at the server from step 4, instead of
+Anthropic's real API.
 
-Want to use Claude Code's own options, like `--continue`? Just add them
-after `claude`:
+Any of Claude Code's own flags work too — just add them after `claude`:
 
 ```bash
 opencc claude --continue
+opencc claude --resume
 ```
 
-## When you're done
+## Stopping it
 
-Close both terminals (or press `Ctrl+C` in each one). That's it — nothing
-keeps running in the background. opencc only exists for as long as those
-two commands are open.
+Close both terminals (or `Ctrl+C`). Nothing runs in the background — opencc
+only exists while those two commands are open.
 
 ## Changing your settings later
 
-Run `opencc init` again, any time, from anywhere on your computer. It shows
-you what's currently saved and lets you change just the parts you want.
+```bash
+opencc init
+```
 
-## A couple of good-to-know details
+Run it again any time, from anywhere. It shows your current values and
+lets you update them.
 
-- **Your API key stays on your computer.** opencc only ever sends it
-  straight to the AI provider you picked in Step 3 — nowhere else. And
-  opencc itself can only be reached from your own computer, never from
-  other devices on your network.
-- **"Sonnet/Opus" vs. "Haiku" models, explained:** Claude Code normally uses
-  a big model for real thinking and a smaller, cheaper model for quick
-  background tasks (like naming a conversation). opencc keeps that same
-  idea — your "normal" model (from Step 3) handles the real work, and your
-  "background" model (or the same one, if you left it blank) handles the
-  small stuff.
+## Good to know
 
-## If something goes wrong
-
-- **"opencc's proxy isn't running"** when you run `opencc claude` — you
-  need `opencc` running in another terminal first (Step 4). This message
-  tells you exactly that.
-- **"opencc is not configured yet"** when you run `opencc` — run
-  `opencc init` first (Step 3).
-- **A port is already in use** — run `opencc init` again and pick a
-  different port, like `3001`.
+- **Your API key never leaves your computer**, except to talk directly to
+  the AI provider you picked. opencc's server only listens on your own
+  computer — it's never reachable from your network.
+- **If `opencc claude` says the server isn't running** — go do step 4 first.
+- **If `opencc` says it's "not configured yet"** — go do step 3 first.
+- **Two models, explained:** Claude Code normally uses a big model for real
+  work and a small, cheap one for quick background tasks. opencc keeps that
+  idea — whichever model you set as the "normal" one in step 3 does the real
+  work; the "background" model (or the same one, if you left it blank)
+  handles the small stuff.
 
 ## For developers running from a local clone
 
-If you'd rather keep settings inside this folder instead of using
-`opencc init`, copy `.env.example` to `.env` and fill it in — a
-project-local `.env` always takes priority over the global settings
-`opencc init` saves. `npm run server` starts just the proxy directly
-(bypassing the "are you configured?" check), handy for debugging.
-
-## How model routing works, under the hood
-
-Claude Code doesn't directly tell opencc whether a request is for the "big"
-model or the "small" one — it just sends a model name. opencc looks at that
-name: if it contains the word `haiku`, the request goes to your background
-model; otherwise it goes to your normal model.
+Prefer a project-local `.env` over `opencc init`? Copy `.env.example` to
+`.env` and fill it in — it takes priority over the global settings
+`opencc init` saves. `npm run server` starts just the server directly,
+skipping the "are you configured?" check, useful for debugging.
