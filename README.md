@@ -8,6 +8,17 @@ It works by running a tiny local server that sits between Claude Code and
 your chosen AI provider, translating the conversation between them. Claude
 Code doesn't know the difference.
 
+## Why this exists
+
+There are already a bunch of proxies out there that do basically this same
+thing. Most of them do *way* too much: dozens of supported providers, admin
+dashboards, multiple coding agents, messaging bot integrations, desktop
+apps with tray icons — entire platforms, when all I actually wanted was one
+small thing. I don't need 99 providers to use Claude Code for free. I just
+wanted something simple that does exactly this, one job, and is easy enough
+to set up that it takes a minute or two, not an afternoon of reading docs.
+That's what opencc is — nothing more.
+
 ## How it works, step by step
 
 ### 1. Clone it
