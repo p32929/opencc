@@ -34,12 +34,17 @@ opencc init
 ```
 
 Run this from anywhere — you don't need to be inside the `opencc` folder.
-It asks a few questions in your terminal:
+It asks these questions, in order:
 
-- **Base URL** of your AI provider, e.g. `https://openrouter.ai/api/v1`
-- **API key** for that provider
-- **Model name** to use (and optionally a second, cheaper one for small
-  background tasks)
+1. **`OpenAI-compatible base URL`** — your AI provider's address, e.g.
+   `https://openrouter.ai/api/v1`
+2. **`OpenAI-compatible API key`** — the key you got from that provider
+3. **`Model for normal Sonnet/Opus-tier requests`** — the model that does
+   the real work, e.g. `openai/gpt-4o`
+4. **`Model for cheap Haiku-tier background requests`** — a smaller/cheaper
+   model for quick background tasks. You can leave this blank to just reuse
+   the model from the question above
+5. **`Port`** — just press enter to accept the default (`3000`)
 
 Your answers are saved so you won't be asked again. Run `opencc init` again
 any time you want to change them.
