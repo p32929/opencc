@@ -65,14 +65,17 @@ Leave this terminal open — this is your server running.
 
 ### 5. Start Claude Code
 
-Open a **second terminal** (leave the first one running) and run:
+Open a **second terminal** (leave the first one running), `cd` into the
+project you want Claude Code to work on, and run:
 
 ```bash
 opencc claude
 ```
 
-This launches Claude Code, pointed at the server from step 4, instead of
-Anthropic's real API.
+Just like running `claude` normally, it works on whatever folder you're
+in — so navigate to your project first, the same way you always would.
+This launches Claude Code from there, pointed at the server from step 4
+instead of Anthropic's real API.
 
 Any of Claude Code's own flags work too — just add them after `claude`:
 
