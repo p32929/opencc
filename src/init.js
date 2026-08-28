@@ -24,7 +24,7 @@ async function testModel(baseUrl, apiKey, model) {
         messages: [{ role: "user", content: "Hi" }],
         max_tokens: 10,
       }),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(60000),
     });
 
     if (!res.ok) {
@@ -69,7 +69,7 @@ export async function runInit() {
     existing = { OPENAI_BASE_URL: baseUrl, OPENAI_API_KEY: apiKey, BIG_MODEL: bigModel, SMALL_MODEL: smallModel, PORT: port };
 
     console.log("");
-    console.log('Testing — sending "Hi" to each model...');
+    console.log('Testing — sending "Hi" to each model (can take up to a minute)...');
 
     const effectiveSmallModel = smallModel || bigModel;
     const bigResult = await testModel(baseUrl, apiKey, bigModel);
