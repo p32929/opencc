@@ -8,6 +8,15 @@ async function ask(rl, label, def) {
   return answer || def || "";
 }
 
+async function askYesNo(label, defaultYes = true) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const suffix = defaultYes ? "[Y/n]" : "[y/N]";
+  const answer = (await rl.question(`${label} ${suffix}: `)).trim().toLowerCase();
+  rl.close();
+  if (!answer) return defaultYes;
+  return answer === "y" || answer === "yes";
+}
+
 // Sends a minimal real request ("Hi") to confirm the base URL, key, and
 // model actually work together — rather than only finding out later, mid
 // Claude Code session, that something was typed wrong.
@@ -24,7 +33,7 @@ async function testModel(baseUrl, apiKey, model) {
         messages: [{ role: "user", content: "Hi" }],
         max_tokens: 10,
       }),
-      signal: AbortSignal.timeout(60000),
+      signal: AbortSignal.timeout(300000),
     });
 
     if (!res.ok) {
@@ -35,6 +44,12 @@ async function testModel(baseUrl, apiKey, model) {
   } catch (err) {
     return { ok: false, error: err.message };
   }
+}
+
+function printSavedAndDone() {
+  console.log("");
+  console.log(`Saved to ${GLOBAL_CONFIG_PATH}`);
+  console.log('Run "opencc" to start the proxy, then "opencc claude" in another terminal.');
 }
 
 export async function runInit() {
@@ -69,7 +84,15 @@ export async function runInit() {
     existing = { OPENAI_BASE_URL: baseUrl, OPENAI_API_KEY: apiKey, BIG_MODEL: bigModel, SMALL_MODEL: smallModel, PORT: port };
 
     console.log("");
-    console.log('Testing — sending "Hi" to each model (can take up to a minute)...');
+    const wantsTest = await askYesNo("Test this configuration now (sends \"Hi\" to each model)?");
+
+    if (!wantsTest) {
+      printSavedAndDone();
+      return;
+    }
+
+    console.log("");
+    console.log("Testing — this can take a few minutes on a slow backend...");
 
     const effectiveSmallModel = smallModel || bigModel;
     const bigResult = await testModel(baseUrl, apiKey, bigModel);
@@ -86,9 +109,7 @@ export async function runInit() {
     }
 
     if (bigResult.ok && smallResult.ok) {
-      console.log("");
-      console.log(`Saved to ${GLOBAL_CONFIG_PATH}`);
-      console.log('Run "opencc" to start the proxy, then "opencc claude" in another terminal.');
+      printSavedAndDone();
       return;
     }
 
@@ -98,11 +119,8 @@ export async function runInit() {
     console.log("from those values.");
     console.log("");
 
-    const retryRl = createInterface({ input: process.stdin, output: process.stdout });
-    const retry = (await retryRl.question("Try again? [Y/n]: ")).trim().toLowerCase();
-    retryRl.close();
-
-    if (retry === "n" || retry === "no") {
+    const retry = await askYesNo("Try again?");
+    if (!retry) {
       console.log("");
       console.log('Left as-is. Run "opencc init" again any time to fix it.');
       return;

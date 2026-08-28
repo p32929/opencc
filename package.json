@@ -1,6 +1,6 @@
 {
   "name": "opencc",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Minimal proxy that lets Claude Code talk to any OpenAI-compatible API",
   "type": "module",
   "main": "src/server.js",
