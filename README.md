@@ -128,3 +128,11 @@ Prefer a project-local `.env` over `opencc init`? Copy `.env.example` to
 `.env` and fill it in — it takes priority over the global settings
 `opencc init` saves. `npm run server` starts just the server directly,
 skipping the "are you configured?" check, useful for debugging.
+
+---
+
+## Support
+
+If this saved you time, you can buy me a coffee — it keeps these projects maintained and free.
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-%E2%98%95-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/p32929)
