@@ -1,30 +1,38 @@
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_PATH } from "./paths.js";
+import { parseEnvFile } from "./config.js";
 
 export function readStoredConfig() {
-  if (!existsSync(GLOBAL_CONFIG_PATH)) return {};
-  const values = {};
-  for (const line of readFileSync(GLOBAL_CONFIG_PATH, "utf8").split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq === -1) continue;
-    values[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
-  }
-  return values;
+  return parseEnvFile(GLOBAL_CONFIG_PATH);
 }
 
-// values: { OPENAI_BASE_URL, OPENAI_API_KEY, BIG_MODEL, SMALL_MODEL, PORT }
-export function writeStoredConfig(values) {
+const joinModels = (models) => (Array.isArray(models) ? models.join(", ") : models || "");
+
+// providers: [{ name, baseUrl, apiKey, bigModels, smallModels }, ...] in
+// priority order. `name` is optional; the model fields take an array (a
+// priority list) or a plain string. `streaming` defaults to on, so it only
+// gets written when it's switched off.
+export function writeStoredConfig({ providers, port, streaming = true }) {
   mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
 
-  const lines = [
-    `OPENAI_BASE_URL=${values.OPENAI_BASE_URL || ""}`,
-    `OPENAI_API_KEY=${values.OPENAI_API_KEY || ""}`,
-    `BIG_MODEL=${values.BIG_MODEL || ""}`,
-    values.SMALL_MODEL ? `SMALL_MODEL=${values.SMALL_MODEL}` : null,
-    `PORT=${values.PORT || "3000"}`,
-  ].filter(Boolean);
+  const lines = [];
+  providers.forEach((provider, i) => {
+    // First provider keeps the unsuffixed key names, so a file written here
+    // is still readable by an older opencc (it just sees provider 1).
+    const suffix = i === 0 ? "" : `_${i + 1}`;
+    if (i > 0) lines.push("");
+    if (provider.name) lines.push(`PROVIDER_NAME${suffix}=${provider.name}`);
+    if (provider.disabled) lines.push(`PROVIDER_DISABLED${suffix}=true`);
+    lines.push(`OPENAI_BASE_URL${suffix}=${provider.baseUrl}`);
+    lines.push(`OPENAI_API_KEY${suffix}=${provider.apiKey || ""}`);
+    lines.push(`BIG_MODEL${suffix}=${joinModels(provider.bigModels)}`);
+    const small = joinModels(provider.smallModels);
+    if (small) lines.push(`SMALL_MODEL${suffix}=${small}`);
+  });
+
+  lines.push("");
+  lines.push(`PORT=${port || "3000"}`);
+  if (!streaming) lines.push("STREAMING=off");
 
   writeFileSync(GLOBAL_CONFIG_PATH, lines.join("\n") + "\n", { mode: 0o600 });
 }

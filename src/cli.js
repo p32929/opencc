@@ -16,7 +16,7 @@ if (subcommand === "claude") {
 }
 
 async function runServer() {
-  const { isConfigured, config } = await import("./config.js");
+  const { isConfigured, config, displayName } = await import("./config.js");
 
   if (!isConfigured()) {
     console.error("opencc is not configured yet.");
@@ -29,8 +29,28 @@ async function runServer() {
 
   console.log(`opencc listening on http://localhost:${config.port}`);
   console.log("");
-  console.log(`  Sonnet/Opus requests -> ${config.bigModel}`);
-  console.log(`  Haiku requests       -> ${config.smallModel}`);
+  config.providers.forEach((provider, i) => {
+    if (provider.disabled) {
+      console.log(`  ${i + 1}. ${displayName(provider)} (disabled — skipped)`);
+      return;
+    }
+    console.log(`  ${i + 1}. ${displayName(provider)}`);
+    console.log(`       Big (Opus, Sonnet) -> ${provider.bigModels.join(" → ")}`);
+    const small = provider.smallModels.length ? provider.smallModels : provider.bigModels;
+    console.log(`       Small (Haiku)      -> ${small.join(" → ")}`);
+  });
+  if (!config.streaming) {
+    console.log("");
+    console.log("  Streaming is off — replies arrive complete instead of token by token.");
+  }
+  if (config.providers.every((provider) => provider.disabled)) {
+    console.log("");
+    console.log('  Every provider is disabled — run "opencc init" to enable one.');
+  }
+  if (config.providers.filter((p) => !p.disabled).length > 1) {
+    console.log("");
+    console.log("  Tried in order — if one fails, the next one takes over.");
+  }
   console.log("");
   console.log("In another terminal, run: opencc claude");
   console.log('(Arguments after "claude" are passed through to Claude Code.)');

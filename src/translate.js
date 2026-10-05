@@ -1,14 +1,14 @@
 import { generateId } from "./ids.js";
-import { config } from "./config.js";
 
-// Claude Code sends its cheap background/classification calls on the Haiku
-// tier. There's no other signal in the request to distinguish them, so we
-// route by model name: anything mentioning "haiku" goes to SMALL_MODEL,
-// everything else goes to BIG_MODEL.
-export function pickModel(requestedModel = "") {
-  return requestedModel.toLowerCase().includes("haiku")
-    ? config.smallModel
-    : config.bigModel;
+// Claude Code asks for a Haiku-class model for its cheap background work
+// (titles, classification) and a Sonnet/Opus-class one for everything else.
+// The requested model name is the only signal, so anything mentioning
+// "haiku" routes to the provider's SMALL list and everything else to its BIG
+// list. Each provider names its models differently, so this resolves per
+// provider at call time, returning the whole list in priority order.
+export function pickModels(requestedModel = "", provider) {
+  const small = provider.smallModels.length ? provider.smallModels : provider.bigModels;
+  return requestedModel.toLowerCase().includes("haiku") ? small : provider.bigModels;
 }
 
 function systemToOpenAI(system) {
@@ -64,7 +64,28 @@ function convertUserMessage(content) {
   return messages;
 }
 
-function convertAssistantMessage(content) {
+// Gemini 3.x issues a thought_signature alongside every function call and
+// rejects any later turn that doesn't echo it back ("Function call is missing
+// a thought_signature"). Anthropic's message format has nowhere to carry it,
+// so remember it per tool-call id and re-attach it when that call comes back
+// in the history. Scoped by provider: a signature minted by one backend is
+// meaningless to another, and some reject unknown fields outright.
+const toolExtras = new Map();
+const MAX_TOOL_EXTRAS = 2000;
+
+export function rememberToolExtra(id, extra, baseUrl) {
+  if (!id || !extra) return;
+  // Map keeps insertion order, so the first key is the oldest.
+  if (toolExtras.size >= MAX_TOOL_EXTRAS) toolExtras.delete(toolExtras.keys().next().value);
+  toolExtras.set(id, { extra, baseUrl });
+}
+
+function toolExtraFor(id, baseUrl) {
+  const found = toolExtras.get(id);
+  return found && found.baseUrl === baseUrl ? found.extra : undefined;
+}
+
+function convertAssistantMessage(content, baseUrl) {
   let text = "";
   const toolCalls = [];
 
@@ -72,11 +93,14 @@ function convertAssistantMessage(content) {
     if (block.type === "text") {
       text += block.text;
     } else if (block.type === "tool_use") {
-      toolCalls.push({
+      const call = {
         id: block.id,
         type: "function",
         function: { name: block.name, arguments: JSON.stringify(block.input ?? {}) },
-      });
+      };
+      const extra = toolExtraFor(block.id, baseUrl);
+      if (extra) call.extra_content = extra;
+      toolCalls.push(call);
     }
     // "thinking" / "redacted_thinking" blocks have no OpenAI equivalent.
   }
@@ -86,12 +110,12 @@ function convertAssistantMessage(content) {
   return [message];
 }
 
-function convertMessage(msg) {
+function convertMessage(msg, baseUrl) {
   if (typeof msg.content === "string") {
     return [{ role: msg.role, content: msg.content }];
   }
   if (msg.role === "user") return convertUserMessage(msg.content);
-  if (msg.role === "assistant") return convertAssistantMessage(msg.content);
+  if (msg.role === "assistant") return convertAssistantMessage(msg.content, baseUrl);
   return [{ role: msg.role, content: JSON.stringify(msg.content) }];
 }
 
@@ -118,12 +142,14 @@ function convertToolChoice(toolChoice) {
   return "auto";
 }
 
-export function toOpenAIRequest(anthropicReq, model) {
+// baseUrl identifies which provider this request is being built for, so any
+// remembered thought_signature is only replayed to the backend that issued it.
+export function toOpenAIRequest(anthropicReq, model, baseUrl, stream = undefined) {
   const messages = [];
   const system = systemToOpenAI(anthropicReq.system);
   if (system) messages.push({ role: "system", content: system });
   for (const msg of anthropicReq.messages) {
-    messages.push(...convertMessage(msg));
+    messages.push(...convertMessage(msg, baseUrl));
   }
 
   const request = {
@@ -133,7 +159,9 @@ export function toOpenAIRequest(anthropicReq, model) {
     temperature: anthropicReq.temperature,
     top_p: anthropicReq.top_p,
     stop: anthropicReq.stop_sequences,
-    stream: Boolean(anthropicReq.stream),
+    // Forced false when streaming is switched off globally, even though the
+    // client asked for one — the finished reply gets re-streamed instead.
+    stream: stream === undefined ? Boolean(anthropicReq.stream) : Boolean(stream),
     tools: convertTools(anthropicReq.tools),
     tool_choice: convertToolChoice(anthropicReq.tool_choice),
   };
@@ -167,7 +195,7 @@ function safeParseJSON(text) {
   }
 }
 
-export function toAnthropicResponse(openaiResp, requestedModel) {
+export function toAnthropicResponse(openaiResp, requestedModel, baseUrl) {
   const choice = openaiResp.choices[0];
   const msg = choice.message;
   const content = [];
@@ -175,6 +203,7 @@ export function toAnthropicResponse(openaiResp, requestedModel) {
   if (msg.content) content.push({ type: "text", text: msg.content });
   if (msg.tool_calls) {
     for (const call of msg.tool_calls) {
+      rememberToolExtra(call.id, call.extra_content, baseUrl);
       content.push({
         type: "tool_use",
         id: call.id,
@@ -184,13 +213,25 @@ export function toAnthropicResponse(openaiResp, requestedModel) {
     }
   }
 
+  // Reasoning models (gpt-oss, Gemini thinking) can spend the whole output
+  // budget on reasoning and return no content at all. The Anthropic API never
+  // replies with an empty content array, so fall back to the reasoning text
+  // if there is any, and to an empty text block otherwise.
+  if (content.length === 0) {
+    content.push({ type: "text", text: typeof msg.reasoning === "string" ? msg.reasoning : "" });
+  }
+
   return {
     id: generateId("msg"),
     type: "message",
     role: "assistant",
     content,
     model: requestedModel,
-    stop_reason: mapFinishReason(choice.finish_reason),
+    // Same reasoning as the streaming path: a message carrying a tool_use block
+    // must report "tool_use", whatever finish_reason the backend claimed.
+    stop_reason: content.some((block) => block.type === "tool_use")
+      ? "tool_use"
+      : mapFinishReason(choice.finish_reason),
     stop_sequence: null,
     usage: {
       input_tokens: openaiResp.usage?.prompt_tokens ?? 0,

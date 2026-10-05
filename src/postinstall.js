@@ -1,10 +1,10 @@
 console.log("");
 console.log('opencc installed — the "opencc" command is now available anywhere.');
 console.log("");
-console.log("  opencc init             Configure settings (one-time, from the terminal)");
+console.log("  opencc init             Add providers and settings (arrow-key menu)");
 console.log("  opencc                  Start the proxy server");
 console.log("  opencc claude [args]    Launch Claude Code, pointed at the proxy");
 console.log("");
-console.log('First run: "opencc init" to set up your API key and model, then run');
+console.log('First run: "opencc init" to add a provider, then run');
 console.log('"opencc" in one terminal and "opencc claude" in another.');
 console.log("");

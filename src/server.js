@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
-import { config, isConfigured } from "./config.js";
-import { pickModel, toOpenAIRequest, toAnthropicResponse, toAnthropicError } from "./translate.js";
-import { streamOpenAIToAnthropic } from "./stream.js";
+import { config, getConfig, isConfigured, displayName } from "./config.js";
+import { pickModels, toOpenAIRequest, toAnthropicResponse, toAnthropicError } from "./translate.js";
+import { streamOpenAIToAnthropic, sendAnthropicAsStream } from "./stream.js";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -44,64 +44,153 @@ function sendJson(res, status, data) {
   res.end(body);
 }
 
+// Walks every provider/model pair in priority order until one accepts the
+// request: each provider's models are tried left to right before moving to the
+// next provider, so a provider that works stays in use even if its preferred
+// model is rate-limited. A pair that's exhausted, down, or unrecognised is
+// skipped; the last error is reported if every pair fails.
+//
+// Note this can only fail over on the *response status*, which arrives
+// before any bytes are written to the client. Once a stream has started
+// there's no way to retract it, so a mid-stream failure is still fatal.
+// 5xx means the provider broke, not that the request was wrong, so it's worth
+// one quick retry before giving up on a model. 429 is deliberately excluded —
+// that needs backoff, not an immediate retry.
+const RETRYABLE = new Set([500, 502, 503, 504]);
+const RETRY_DELAY_MS = 400;
+const UPSTREAM_TIMEOUT_MS = 600000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export async function callUpstream(anthropicReq, providers = config.providers, streaming = config.streaming) {
+  const failures = [];
+  let lastStatus = 502;
+
+  // Flattened up front so the log can show "attempt 3/7" rather than a
+  // provider index that says nothing about how much runway is left.
+  const attempts = providers
+    .filter((provider) => !provider.disabled)
+    .flatMap((provider) =>
+      pickModels(anthropicReq.model, provider).map((model) => ({ provider, model })),
+    );
+
+  if (attempts.length === 0) {
+    return {
+      status: 503,
+      message: `No provider is available: all ${providers.length} are disabled. Run "opencc init" to enable one.`,
+    };
+  }
+
+  // With streaming off we ask upstream for the whole reply at once, then
+  // re-stream it ourselves if the client wanted a stream.
+  const streamUpstream = Boolean(anthropicReq.stream) && streaming;
+
+  for (const [i, { provider, model }] of attempts.entries()) {
+    const label = `attempt ${i + 1}/${attempts.length} (${displayName(provider)}, ${model})`;
+
+    const headers = { "Content-Type": "application/json" };
+    // Omitted entirely when blank — a local backend may reject an empty bearer.
+    if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
+
+    const body = JSON.stringify(
+      toOpenAIRequest(anthropicReq, model, provider.baseUrl, streamUpstream),
+    );
+
+    let upstream;
+    let networkError;
+    let errorText;
+
+    // Two passes at most: the second only happens for a transient failure.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt > 0) await sleep(RETRY_DELAY_MS);
+
+      upstream = undefined;
+      networkError = undefined;
+      errorText = undefined;
+
+      try {
+        upstream = await fetch(`${provider.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers,
+          body,
+          signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+        });
+      } catch (err) {
+        // Unreachable host, DNS failure, connection reset, timeout, ...
+        networkError = err;
+      }
+
+      if (upstream?.ok) break;
+
+      if (!networkError) errorText = await upstream.text();
+      // Only a 5xx is worth retrying. A refused connection or DNS failure
+      // won't heal in 400ms, and retrying just doubles a dead provider's
+      // latency before we move on.
+      const transient = !networkError && RETRYABLE.has(upstream.status);
+
+      const reason = networkError
+        ? `unreachable: ${networkError.message}`
+        : `failed ${upstream.status}: ${errorText.slice(0, 300)}`;
+
+      if (transient && attempt === 0) {
+        console.error(`[opencc]   ${label} ${reason} — retrying once`);
+        continue;
+      }
+
+      console.error(`[opencc]   ${label} ${reason}`);
+      break;
+    }
+
+    if (upstream?.ok) {
+      console.log(`[opencc]   ${label} -> ${upstream.status}`);
+      return { upstream, provider, model, streamed: streamUpstream };
+    }
+
+    // Anything still failing moves to the next pair. Providers disagree wildly
+    // about what they reject and with which status (a 400 from one often
+    // succeeds on another), so there's no status worth special-casing.
+    if (networkError) {
+      failures.push(`${displayName(provider)}/${model}: ${networkError.message}`);
+    } else {
+      failures.push(`${displayName(provider)}/${model} ${upstream.status}: ${errorText.slice(0, 300)}`);
+      lastStatus = upstream.status;
+    }
+  }
+
+  return {
+    status: lastStatus,
+    message: `All ${attempts.length} provider/model attempt(s) failed:\n${failures.join("\n")}`,
+  };
+}
+
 async function handleMessages(anthropicReq, res) {
-  if (!isConfigured()) {
+  // Read fresh each request so edits in `opencc init` apply without a restart.
+  const live = getConfig();
+
+  if (!isConfigured(live)) {
     sendJson(res, 503, toAnthropicError(503, 'opencc is not configured. Run "opencc init" first.'));
     return;
   }
 
-  const model = pickModel(anthropicReq.model);
-  const openaiReq = toOpenAIRequest(anthropicReq, model);
+  const result = await callUpstream(anthropicReq, live.providers, live.streaming);
 
-  const upstream = await fetch(`${config.openaiBaseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.openaiApiKey}`,
-    },
-    body: JSON.stringify(openaiReq),
-  });
-
-  if (!upstream.ok) {
-    const text = await upstream.text();
-    console.error(`[opencc]   upstream ${upstream.status}: ${text}`);
-    sendJson(res, upstream.status, toAnthropicError(upstream.status, text));
+  if (!result.upstream) {
+    sendJson(res, result.status, toAnthropicError(result.status, result.message));
     return;
   }
 
-  if (anthropicReq.stream) {
-    await streamOpenAIToAnthropic(upstream, res, anthropicReq.model);
-  } else {
-    const data = await upstream.json();
-    sendJson(res, 200, toAnthropicResponse(data, anthropicReq.model));
-  }
-}
-
-// Claude Code calls this to estimate a request's size before sending it.
-// A precise Anthropic-compatible tokenizer isn't available here, so this
-// returns a rough character-based estimate instead.
-function handleCountTokens(body, res) {
-  let chars = 0;
-
-  const system = body.system;
-  if (typeof system === "string") chars += system.length;
-  else if (Array.isArray(system)) {
-    chars += system.filter((b) => b.type === "text").reduce((sum, b) => sum + b.text.length, 0);
+  if (result.streamed) {
+    await streamOpenAIToAnthropic(result.upstream, res, anthropicReq.model, result.provider.baseUrl);
+    return;
   }
 
-  for (const msg of body.messages ?? []) {
-    if (typeof msg.content === "string") {
-      chars += msg.content.length;
-    } else if (Array.isArray(msg.content)) {
-      for (const block of msg.content) {
-        if (block.type === "text") chars += block.text.length;
-        else if (block.type === "tool_use") chars += JSON.stringify(block.input ?? {}).length;
-        else if (block.type === "tool_result") chars += JSON.stringify(block.content ?? "").length;
-      }
-    }
-  }
+  const data = await result.upstream.json();
+  const message = toAnthropicResponse(data, anthropicReq.model, result.provider.baseUrl);
 
-  sendJson(res, 200, { input_tokens: Math.ceil(chars / 4) });
+  // The client asked for a stream but streaming is off, so hand it the
+  // finished message as a one-shot stream rather than a plain JSON body.
+  if (anthropicReq.stream) sendAnthropicAsStream(res, message);
+  else sendJson(res, 200, message);
 }
 
 const server = createServer(async (req, res) => {
@@ -121,12 +210,6 @@ const server = createServer(async (req, res) => {
       const body = await readJsonBody(req);
       console.log(`[opencc]   model=${body.model} stream=${Boolean(body.stream)}`);
       await handleMessages(body, res);
-      return;
-    }
-
-    if (req.method === "POST" && path === "/v1/messages/count_tokens") {
-      const body = await readJsonBody(req);
-      handleCountTokens(body, res);
       return;
     }
 

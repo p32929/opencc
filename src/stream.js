@@ -1,13 +1,64 @@
 import { generateId } from "./ids.js";
-import { mapFinishReason } from "./translate.js";
+import { mapFinishReason, rememberToolExtra } from "./translate.js";
 
 function sendEvent(res, event, data) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+// Emits an already-complete Anthropic message as an SSE stream. Used when
+// streaming is switched off: the client still asked for a stream, so it still
+// gets well-formed events — just all at once, after the whole reply arrived.
+export function sendAnthropicAsStream(res, message) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+
+  sendEvent(res, "message_start", {
+    type: "message_start",
+    message: { ...message, content: [], stop_reason: null, stop_sequence: null },
+  });
+
+  message.content.forEach((block, index) => {
+    if (block.type === "text") {
+      sendEvent(res, "content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: { type: "text", text: "" },
+      });
+      sendEvent(res, "content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "text_delta", text: block.text },
+      });
+    } else if (block.type === "tool_use") {
+      sendEvent(res, "content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: { type: "tool_use", id: block.id, name: block.name, input: {} },
+      });
+      sendEvent(res, "content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input ?? {}) },
+      });
+    }
+    sendEvent(res, "content_block_stop", { type: "content_block_stop", index });
+  });
+
+  sendEvent(res, "message_delta", {
+    type: "message_delta",
+    delta: { stop_reason: message.stop_reason, stop_sequence: message.stop_sequence ?? null },
+    usage: { output_tokens: message.usage?.output_tokens ?? 0 },
+  });
+  sendEvent(res, "message_stop", { type: "message_stop" });
+  res.end();
+}
+
 // Reads an OpenAI-compatible SSE stream and re-emits it as an Anthropic
 // Messages API SSE stream on `res`.
-export async function streamOpenAIToAnthropic(upstream, res, requestedModel) {
+export async function streamOpenAIToAnthropic(upstream, res, requestedModel, baseUrl) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -89,6 +140,9 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel) {
             content_block: { type: "tool_use", id: entry.id, name: call.function?.name || "", input: {} },
           });
         }
+        // The thought_signature can arrive on any chunk of the call, not just
+        // the one that opened it, so check every delta.
+        if (call.extra_content) rememberToolExtra(entry.id, call.extra_content, baseUrl);
         if (call.function?.arguments) {
           sendEvent(res, "content_block_delta", {
             type: "content_block_delta",
@@ -129,11 +183,32 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel) {
     }
   }
 
+  const emittedToolUse = toolBlocksByOpenAIIndex.size > 0;
+
+  // Same reason as the non-streaming path: a reply that produced no blocks at
+  // all (reasoning model that spent its whole budget thinking) would leave the
+  // client with zero content blocks, which the Anthropic API never does.
+  if (!emittedToolUse && textBlockIndex === null) {
+    textBlockIndex = nextIndex++;
+    sendEvent(res, "content_block_start", {
+      type: "content_block_start",
+      index: textBlockIndex,
+      content_block: { type: "text", text: "" },
+    });
+  }
+
   closeOpenBlocks();
+
+  // Anthropic always reports "tool_use" when the message contains a tool_use
+  // block, and Claude Code relies on that to decide whether to run the tool —
+  // "end_turn" makes it treat the turn as finished and silently drop the call.
+  // Plenty of OpenAI-compatible backends send finish_reason "stop" (or omit it)
+  // even while streaming tool calls, so trust the content over the upstream.
+  const stopReason = emittedToolUse ? "tool_use" : mapFinishReason(finishReason);
 
   sendEvent(res, "message_delta", {
     type: "message_delta",
-    delta: { stop_reason: mapFinishReason(finishReason), stop_sequence: null },
+    delta: { stop_reason: stopReason, stop_sequence: null },
     usage: { output_tokens: outputTokens },
   });
   sendEvent(res, "message_stop", { type: "message_stop" });

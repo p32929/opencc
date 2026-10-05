@@ -1,12 +1,13 @@
 # opencc
 
-Lets you use [Claude Code](https://code.claude.com) for free (or cheap) by
-connecting it to any **free or paid OpenAI-compatible API** — OpenRouter,
-a local model, whatever — instead of paying for Anthropic's own API.
+Use [Claude Code](https://code.claude.com) with any OpenAI-compatible API —
+OpenRouter, Gemini, a local model — instead of paying for Anthropic's. A tiny
+local proxy translates between them; Claude Code can't tell the difference.
 
-It works by running a tiny local server that sits between Claude Code and
-your chosen AI provider, translating the conversation between them. Claude
-Code doesn't know the difference.
+Zero dependencies. Stack several providers and it falls back automatically
+when a free tier runs dry.
+
+![The opencc provider list](docs/screenshots/init-providers.png)
 
 ## Why this exists
 
@@ -19,115 +20,171 @@ wanted something simple that does exactly this, one job, and is easy enough
 to set up that it takes a minute or two, not an afternoon of reading docs.
 That's what opencc is — nothing more.
 
-## How it works, step by step
-
-### 1. Clone it
+## Setup
 
 ```bash
 git clone https://github.com/p32929/opencc.git
 cd opencc
+npm start      # makes `opencc` available everywhere — run once
+opencc init    # add your providers
 ```
 
-### 2. Run it once to install
+Then two terminals:
 
 ```bash
-npm start
+opencc         # the proxy — leave it running
+opencc claude  # cd to your project first
 ```
 
-No `npm install` needed first — opencc has zero dependencies. This one
-command makes the `opencc` command available anywhere on your computer, not
-just inside this folder. You only ever run this once.
+Claude Code's own flags pass straight through: `opencc claude --continue`.
 
-### 3. Set your config
+## opencc init
 
-```bash
-opencc init
+```
+  opencc — providers
+  Tried top to bottom — if one fails, the next takes over.
+
+❯ 1. work openrouter
+    Big (Opus, Sonnet):  openai/gpt-4o, openai/gpt-5
+    Small (Haiku):       openai/gpt-4o-mini
+  2. my ollama
+    Big (Opus, Sonnet):  llama3
+    Small (Haiku):       llama3  (same as big)
+  ────────────────────
+  + Add provider      tried after the ones above
+  Port                3000
+  Streaming           on  replies arrive as they're generated
+  Test all providers  sends "Hi" to each model
+  ────────────────────
+  Save and exit
+
+  ↑↓ move · enter open · u/d reorder · space on/off · x delete · a add · q save
 ```
 
-Run this from anywhere — you don't need to be inside the `opencc` folder.
-It asks these questions, in order:
+| Key | Does |
+|---|---|
+| `↑` `↓` | move the cursor |
+| `enter` | open a provider / edit a field |
+| `u` `d` | move this provider up / down the chain |
+| `space` | turn this provider off / on |
+| `x` | delete it (asks first) |
+| `a` | add a provider |
+| `t` | test every model · `p` change port |
+| `q` `esc` | save and quit, or back out of anything |
 
-1. **`OpenAI-compatible base URL`** — your AI provider's address, e.g.
-   `https://openrouter.ai/api/v1`
-2. **`OpenAI-compatible API key`** — the key you got from that provider
-3. **`Model for normal Sonnet/Opus-tier requests`** — the model that does
-   the real work, e.g. `openai/gpt-4o`
-4. **`Model for cheap Haiku-tier background requests`** — a smaller/cheaper
-   model for quick background tasks. You can leave this blank to just reuse
-   the model from the question above
-5. **`Port`** — just press enter to accept the default (`3000`)
+**Big** models do the real work, **Small** models handle Claude Code's cheap
+background calls (naming a conversation, classification). Comma-separate
+either to get a priority list, tried left to right. Changes save immediately.
 
-Your answers are saved so you won't be asked again. Run `opencc init` again
-any time you want to change them.
+![Editing a provider](docs/screenshots/init-provider-detail.png)
 
-### 4. Start the server
+- **Disable** (`space`) parks a provider that's out of credits — keeps its
+  key and position, just skips it. Delete throws the key away.
+- **Test** (`t`) sends one real "Hi" to every model, six at a time.
+- **Streaming** off makes opencc wait for the full reply before passing it on.
+  Worth trying if a backend's SSE is flaky.
 
-```bash
-opencc
+![Testing every model](docs/screenshots/init-testing.png)
+
+## Fallback
+
+Providers are tried top to bottom, and each provider's models left to right.
+Rate-limited, out of credits, down, unknown model — opencc moves to the next
+combination and the request still goes through.
+
+Model lists matter because free tiers throttle *per model*: when your first
+choice starts 429ing, the next one on the same provider often still works.
+
+```
+[opencc]   attempt 1/3 (work openrouter, openai/gpt-4o) failed 429: rate limit exceeded
+[opencc]   attempt 2/3 (work openrouter, openai/gpt-5) failed 429: rate limit exceeded
+[opencc]   attempt 3/3 (my ollama, llama3) -> 200
 ```
 
-**Why this is needed:** Claude Code normally talks directly to Anthropic's
-servers. opencc gives it a local server to talk to *instead* — this
-command starts that server. It's what actually forwards your messages to
-the AI provider you set up in step 3, and translates the response back.
-Without this running, Claude Code has nothing to connect to.
+![The startup banner](docs/screenshots/server-banner.png)
 
-Leave this terminal open — this is your server running.
+- A 5xx is retried once on the same model. A 429 isn't — that needs backoff.
+- Failover only works *before* a reply starts arriving. If a provider dies
+  mid-stream that one message fails; retry and the chain picks another.
+- Config is re-read every request, so `opencc init` changes apply without
+  restarting the proxy. Except **Port** — the socket is already bound.
+- Your API key only ever goes to the provider you picked. The proxy listens
+  on localhost only.
 
-### 5. Start Claude Code
+## Config file
 
-Open a **second terminal** (leave the first one running), `cd` into the
-project you want Claude Code to work on, and run:
+`opencc init` writes `~/.opencc/.env`. A project-local `.env` overrides it
+(copy `.env.example`). Providers are numbered — first unsuffixed, then `_2`,
+`_3`:
 
-```bash
-opencc claude
-```
+| Key | Meaning |
+|---|---|
+| `OPENAI_BASE_URL` | the provider's address |
+| `OPENAI_API_KEY` | optional — omit if the backend needs none |
+| `BIG_MODEL` | comma-separated priority list, real work |
+| `SMALL_MODEL` | comma-separated priority list, background work |
+| `PROVIDER_NAME` | optional label; defaults to the host |
+| `PROVIDER_DISABLED` | `true` to park it |
+| `PORT` `STREAMING` | global; `STREAMING=off` disables streaming |
 
-Just like running `claude` normally, it works on whatever folder you're
-in — so navigate to your project first, the same way you always would.
-This launches Claude Code from there, pointed at the server from step 4
-instead of Anthropic's real API.
+`npm run server` runs the proxy alone; `npm test` runs the suite. Configs from
+older single-provider versions still work — they read as provider 1.
 
-Any of Claude Code's own flags work too — just add them after `claude`:
+![Claude Code running through opencc](docs/screenshots/claude-running.png)
 
-```bash
-opencc claude --continue
-opencc claude --resume
-```
+## Changelog
 
-## Stopping it
+### 2.0.0 — 2026-10-05
 
-Close both terminals (or `Ctrl+C`). Nothing runs in the background — opencc
-only exists while those two commands are open.
+**Breaking**
 
-## Changing your settings later
+- `POST /v1/messages/count_tokens` is gone. Claude Code copes — it falls back
+  to its own estimate — but anything calling that route gets a 404.
+- Module API changed, if you import from `src/`: `config.providers[]` replaces
+  `config.bigModel` / `smallModel` / `openaiBaseUrl` / `openaiApiKey`;
+  `pickModels()` replaces `pickModel()`; `toOpenAIRequest()` and
+  `writeStoredConfig()` take different arguments.
+- **Your existing `.env` keeps working** — it reads as provider 1.
 
-```bash
-opencc init
-```
+**Added**
 
-Run it again any time, from anywhere. It shows your current values and
-lets you update them.
+- Multiple providers, tried in order, with a priority list of models inside
+  each. Automatic fallback when one is rate-limited, broke, or out of credits.
+- `opencc init` is now an arrow-key menu: reorder, rename, enable/disable,
+  edit and test providers in place.
+- Disable a provider without deleting its key.
+- Global streaming toggle, for backends with unreliable SSE.
+- Config is re-read every request — no restarting the proxy after `opencc init`
+  (except for `PORT`).
+- Model testing runs six at a time instead of one after another.
+- One retry on a 5xx before falling through to the next model.
+- A timeout on upstream requests, so a provider that hangs can't hang you.
+- `npm test` — a test suite, no dependencies.
 
-## Good to know
+**Fixed**
 
-- **Your API key never leaves your computer**, except to talk directly to
-  the AI provider you picked. opencc's server only listens on your own
-  computer — it's never reachable from your network.
-- **If `opencc claude` says the server isn't running** — go do step 4 first.
-- **If `opencc` says it's "not configured yet"** — go do step 3 first.
-- **Two models, explained:** Claude Code normally uses a big model for real
-  work and a small, cheap one for quick background tasks. opencc keeps that
-  idea — whichever model you set as the "normal" one in step 3 does the real
-  work; the "background" model (or the same one, if you left it blank)
-  handles the small stuff.
+- A reply containing a tool call now always reports `stop_reason: tool_use`.
+  Backends that reported plain `stop` made Claude Code treat the turn as
+  finished and silently skip the tool.
+- Gemini 3.x `thought_signature` is carried across turns, which that family
+  requires — multi-turn tool use used to fail with a 500 on the second turn.
+- Replies are never an empty `content` array. Reasoning models can spend their
+  whole output budget thinking and return nothing visible.
+- The API key is optional, for local backends that don't want one.
 
-## For developers running from a local clone
+### 1.0.2 — 2026-08-28
 
-Prefer a project-local `.env` over `opencc init`? Copy `.env.example` to
-`.env` and fill it in — it takes priority over the global settings
-`opencc init` saves. `npm run server` starts just the server directly,
-skipping the "are you configured?" check, useful for debugging.
+Model testing in `opencc init` became opt-in, and its timeout went from 15s to
+300s for slow backends.
+
+### 1.0.1 — 2026-08-26
+
+`opencc init` sends a real request to each model before finishing, so a typo
+in a URL, key or model name surfaces during setup instead of mid-session.
+
+### 1.0.0 — 2026-08-25
+
+First release. Single provider, Big and Small model, streaming and tool calls.
 
 ## Contributing
 
