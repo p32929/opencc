@@ -557,3 +557,61 @@ test("nothing capable gives a 503 naming what was needed", async (t) => {
   assert.match(result.message, /blind\/text-only/);
   assert.equal(seen.length, 0, "no request is sent at all");
 });
+
+// --- capability probing ---------------------------------------------------
+
+import { probeVision } from "./capabilities.js";
+
+function stubStatuses(statuses) {
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    const status = statuses[seen.length] ?? 200;
+    seen.push({ url, body: JSON.parse(init.body) });
+    if (status < 400) {
+      return { ok: true, status, json: async () => ({ choices: [{ message: { content: "ok" } }] }) };
+    }
+    return { ok: false, status, text: async () => `status ${status}` };
+  };
+  return seen;
+}
+
+test("a rate-limited model is left unknown, not marked incapable", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  // 429 twice: the probe and its one retry. 429 sits in the 4xx range but is
+  // purely load — concluding "no vision" from it would permanently route
+  // images away from a model that handles them.
+  const seen = stubStatuses([429, 429]);
+  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), undefined);
+  assert.equal(seen.length, 2, "tried once, retried once, then gave up");
+});
+
+test("a real rejection is conclusive once the plain request succeeds", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  // 400 for the image request, then 200 for the same request without it.
+  const seen = stubStatuses([400, 200]);
+  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), false);
+  assert.equal(seen.length, 2);
+  assert.equal(JSON.stringify(seen[0].body).includes("image_url"), true, "first carried the image");
+  assert.equal(JSON.stringify(seen[1].body).includes("image_url"), false, "second was the control");
+});
+
+test("a 400 on both requests is inconclusive, not a capability answer", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  // The plain request fails too, so the image was never shown to be the cause.
+  stubStatuses([400, 400]);
+  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), undefined);
+});
+
+test("accepting an image is enough to conclude vision", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  stubStatuses([200]);
+  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), true);
+});

@@ -148,13 +148,19 @@ async function once(provider, model, body, timeoutMs) {
   }
 }
 
-// A 429 or 5xx says nothing about capability, so take one more swing before
-// calling the answer unknown.
+// Load, not capability: a busy or unreachable backend tells us nothing about
+// what the model can do, however many times we ask.
+const isLoad = (status) => status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
+
+// Only a client error that isn't load can mean "this feature is unsupported".
+// 429 is the trap: it sits in the 4xx range but is purely about load, and
+// treating it as an answer marks a rate-limited vision model permanently
+// blind.
+const isCapabilitySignal = (status) => status >= 400 && status < 500 && !isLoad(status);
+
 async function attempt(provider, model, body, timeoutMs) {
   const first = await once(provider, model, body, timeoutMs);
-  if (first.ok) return first;
-  const transient = first.status === 0 || first.status === 429 || first.status >= 500;
-  if (!transient) return first;
+  if (first.ok || !isLoad(first.status)) return first;
   await new Promise((r) => setTimeout(r, 1500));
   return once(provider, model, body, timeoutMs);
 }
@@ -169,8 +175,7 @@ async function differential(provider, model, withFeature, timeoutMs) {
   const used = await attempt(provider, model, withFeature, timeoutMs);
   if (used.ok) return { supported: true, json: used.json };
 
-  // Only a client error can mean "unsupported"; anything else is a bad moment.
-  if (!(used.status >= 400 && used.status < 500)) return { supported: undefined };
+  if (!isCapabilitySignal(used.status)) return { supported: undefined };
 
   const plain = await attempt(
     provider,
