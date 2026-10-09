@@ -18,6 +18,18 @@ const PIXEL =
 
 const key = (baseUrl, model) => `${baseUrl}|${model}`;
 
+// OpenRouter addresses the same model under routing variants — ":free",
+// ":nitro", ":floor" and so on — and its catalogue lists only some of them.
+// Capabilities belong to the model, not to the routing choice, so a miss on
+// the exact id falls back to the base name. Without this, qwen3.8-27b:free
+// looked entirely unknown while qwen3.8-27b was published as a 1M-context
+// vision model.
+const baseModelName = (model) => model.replace(/:(free|nitro|floor|extended|beta|online|thinking)$/i, "");
+
+function catalogueEntry(catalogue, model) {
+  return catalogue[model] ?? catalogue[baseModelName(model)] ?? undefined;
+}
+
 export function readCapabilities() {
   if (!existsSync(CAPABILITIES_PATH)) return {};
   try {
@@ -162,11 +174,20 @@ const isLoad = (status) => status === 0 || status === 408 || status === 425 || s
 // blind.
 const isCapabilitySignal = (status) => status >= 400 && status < 500 && !isLoad(status);
 
+// Free tiers hand out 429s constantly, and one extra try wasn't enough: two
+// of seventeen models came back entirely unknown purely because they were
+// busy at the wrong moment. Three attempts with a growing pause turns most of
+// those into real answers, and still gives up quickly on a settled error.
+const LOAD_RETRY_DELAYS_MS = [1500, 5000];
+
 async function attempt(provider, model, body, timeoutMs) {
-  const first = await once(provider, model, body, timeoutMs);
-  if (first.ok || !isLoad(first.status)) return first;
-  await new Promise((r) => setTimeout(r, 1500));
-  return once(provider, model, body, timeoutMs);
+  let last = await once(provider, model, body, timeoutMs);
+  for (const delay of LOAD_RETRY_DELAYS_MS) {
+    if (last.ok || !isLoad(last.status)) return last;
+    await new Promise((r) => setTimeout(r, delay));
+    last = await once(provider, model, body, timeoutMs);
+  }
+  return last;
 }
 
 // Differential probe. Asking "did the error message mention images?" means
@@ -217,7 +238,7 @@ export async function probeVision(provider, model, timeoutMs = PROBE_TIMEOUT_MS)
 // and falling back to probing. `catalogue` is passed in so a run over many
 // models fetches it once per provider.
 export async function detectCapabilities(provider, model, catalogue = {}) {
-  const published = catalogue[model];
+  const published = catalogueEntry(catalogue, model);
   if (published && published.tools !== undefined && published.vision !== undefined) {
     return { ...published, detectedAt: new Date().toISOString() };
   }

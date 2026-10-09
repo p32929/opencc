@@ -560,7 +560,7 @@ test("nothing capable gives a 503 naming what was needed", async (t) => {
 
 // --- capability probing ---------------------------------------------------
 
-import { probeVision } from "./capabilities.js";
+import { probeVision, fetchCatalogue, detectCapabilities } from "./capabilities.js";
 
 function stubStatuses(statuses) {
   const seen = [];
@@ -579,12 +579,12 @@ test("a rate-limited model is left unknown, not marked incapable", async (t) => 
   const realFetch = globalThis.fetch;
   t.after(() => (globalThis.fetch = realFetch));
 
-  // 429 twice: the probe and its one retry. 429 sits in the 4xx range but is
-  // purely load — concluding "no vision" from it would permanently route
-  // images away from a model that handles them.
-  const seen = stubStatuses([429, 429]);
+  // 429 throughout. It sits in the 4xx range but is purely load, so
+  // concluding "no vision" from it would permanently route images away from a
+  // model that handles them.
+  const seen = stubStatuses([429, 429, 429]);
   assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), undefined);
-  assert.equal(seen.length, 2, "tried once, retried once, then gave up");
+  assert.equal(seen.length, 3, "three attempts, then unknown rather than a verdict");
 });
 
 test("a real rejection is conclusive once the plain request succeeds", async (t) => {
@@ -614,4 +614,33 @@ test("accepting an image is enough to conclude vision", async (t) => {
 
   stubStatuses([200]);
   assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), true);
+});
+
+
+test("a routing variant falls back to the base model in the catalogue", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  // OpenRouter publishes "qwen/qwen3.8-27b" but serves "qwen/qwen3.8-27b:free",
+  // and the variant is absent from the catalogue.
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      data: [{
+        id: "qwen/qwen3.8-27b",
+        architecture: { input_modalities: ["text", "image", "video"] },
+        supported_parameters: ["tools", "temperature"],
+        context_length: 1000000,
+      }],
+    }),
+  });
+
+  const provider = { baseUrl: "https://openrouter.test/v1", apiKey: "k" };
+  const catalogue = await fetchCatalogue(provider);
+  const caps = await detectCapabilities(provider, "qwen/qwen3.8-27b:free", catalogue);
+
+  assert.equal(caps.tools, true);
+  assert.equal(caps.vision, true, "resolved without probing the variant");
+  assert.equal(caps.contextLength, 1000000);
+  assert.equal(caps.source, "catalogue");
 });
