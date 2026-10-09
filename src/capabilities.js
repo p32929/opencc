@@ -168,11 +168,24 @@ async function once(provider, model, body, timeoutMs) {
 // what the model can do, however many times we ask.
 const isLoad = (status) => status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
 
-// Only a client error that isn't load can mean "this feature is unsupported".
-// 429 is the trap: it sits in the 4xx range but is purely about load, and
-// treating it as an answer marks a rate-limited vision model permanently
-// blind.
-const isCapabilitySignal = (status) => status >= 400 && status < 500 && !isLoad(status);
+// An allowlist, not "any 4xx that isn't load". Treating the whole 4xx range as
+// an answer is how gemini-3.5-flash — which serves tool calls all day — got
+// recorded as tools=false: Google's frontend answered one probe with a 403
+// HTML error page, which is quota or WAF, not a statement about the model.
+// 401 and 403 are about credentials and permission; only these say a feature
+// isn't supported.
+//   400  "does not support image input", "content.type is invalid"
+//   404  OpenRouter's "No endpoints found that support image input"
+//   413/422  the request shape was rejected outright
+const CAPABILITY_STATUSES = new Set([400, 404, 413, 422]);
+
+// A real API error is JSON. An HTML body means something in front of the API
+// answered — a load balancer, a WAF, an interstitial — and it knows nothing
+// about model capabilities.
+const looksLikeHtml = (text) => /^\s*<(!doctype|html)/i.test(text ?? "");
+
+const isCapabilitySignal = (status, text) =>
+  CAPABILITY_STATUSES.has(status) && !looksLikeHtml(text);
 
 // Free tiers hand out 429s constantly, and one extra try wasn't enough: two
 // of seventeen models came back entirely unknown purely because they were
@@ -200,15 +213,26 @@ async function differential(provider, model, withFeature, timeoutMs) {
   const used = await attempt(provider, model, withFeature, timeoutMs);
   if (used.ok) return { supported: true, json: used.json };
 
-  if (!isCapabilitySignal(used.status)) return { supported: undefined };
+  if (!isCapabilitySignal(used.status, used.text)) return { supported: undefined };
 
+  // Control: the same request without the feature. Only if that works has the
+  // feature been shown to be the cause.
   const plain = await attempt(
     provider,
     model,
     { messages: [{ role: "user", content: "Reply with: ok" }] },
     timeoutMs,
   );
-  return { supported: plain.ok ? false : undefined, evidence: used.text };
+  if (!plain.ok) return { supported: undefined };
+
+  // One more swing at the feature before recording a negative. "Unsupported"
+  // is the verdict that takes a model out of rotation for good, so it has to
+  // survive being asked twice — and a flaky rejection usually doesn't.
+  const confirm = await attempt(provider, model, withFeature, timeoutMs);
+  if (confirm.ok) return { supported: true, json: confirm.json };
+  if (!isCapabilitySignal(confirm.status, confirm.text)) return { supported: undefined };
+
+  return { supported: false, evidence: confirm.text };
 }
 
 // True once the backend accepts tool definitions — that's what decides whether

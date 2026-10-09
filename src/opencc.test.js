@@ -591,12 +591,14 @@ test("a real rejection is conclusive once the plain request succeeds", async (t)
   const realFetch = globalThis.fetch;
   t.after(() => (globalThis.fetch = realFetch));
 
-  // 400 for the image request, then 200 for the same request without it.
-  const seen = stubStatuses([400, 200]);
+  // image -> 400, control -> 200, then the negative is confirmed with a
+  // second image request that also fails.
+  const seen = stubStatuses([400, 200, 400]);
   assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), false);
-  assert.equal(seen.length, 2);
+  assert.equal(seen.length, 3);
   assert.equal(JSON.stringify(seen[0].body).includes("image_url"), true, "first carried the image");
   assert.equal(JSON.stringify(seen[1].body).includes("image_url"), false, "second was the control");
+  assert.equal(JSON.stringify(seen[2].body).includes("image_url"), true, "third re-tested the feature");
 });
 
 test("a 400 on both requests is inconclusive, not a capability answer", async (t) => {
@@ -643,4 +645,33 @@ test("a routing variant falls back to the base model in the catalogue", async (t
   assert.equal(caps.vision, true, "resolved without probing the variant");
   assert.equal(caps.contextLength, 1000000);
   assert.equal(caps.source, "catalogue");
+});
+
+
+test("a 403 is never a capability answer, even an HTML one", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  // Google's frontend answers an over-quota probe with a 403 HTML page. Read
+  // as a verdict it marked gemini-3.5-flash — which serves tool calls all
+  // day — as tools=false, taking it out of rotation for every request.
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return { ok: false, status: 403, text: async () => "<!DOCTYPE html><html><title>Error 403</title>" };
+  };
+
+  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), undefined);
+  assert.equal(calls, 1, "403 isn't load either, so it isn't retried — just inconclusive");
+});
+
+test("a flaky rejection does not become a negative", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  // image -> 400, control -> 200, confirmation -> 200. The first rejection
+  // didn't hold up, so the answer is yes rather than no.
+  const seen = stubStatuses([400, 200, 200]);
+  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), true);
+  assert.equal(seen.length, 3);
 });
