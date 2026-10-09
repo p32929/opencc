@@ -155,6 +155,13 @@ export async function callUpstream(
       networkError = undefined;
       errorText = undefined;
 
+      // Printed before the call, not after. A single request can sit for two
+      // minutes on a slow backend, and without this the log goes quiet with no
+      // indication of which model it's waiting on.
+      console.log(`[opencc]   ${label}${attempt > 0 ? " (retry)" : ""} …`);
+      const startedAt = Date.now();
+      const took = () => `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+
       try {
         upstream = await fetch(`${provider.baseUrl}/chat/completions`, {
           method: "POST",
@@ -167,7 +174,10 @@ export async function callUpstream(
         networkError = err;
       }
 
-      if (upstream?.ok) break;
+      if (upstream?.ok) {
+        console.log(`[opencc]   ${label} -> ${upstream.status} in ${took()}`);
+        break;
+      }
 
       if (!networkError) errorText = await upstream.text();
       // A dropped connection isn't retried either: a refused or timed-out
@@ -176,8 +186,8 @@ export async function callUpstream(
       const serverFault = !networkError && upstream.status >= 500;
 
       const reason = networkError
-        ? `unreachable: ${networkError.message}`
-        : `failed ${upstream.status}: ${errorText.slice(0, 300)}`;
+        ? `unreachable after ${took()}: ${networkError.message}`
+        : `failed ${upstream.status} after ${took()}: ${errorText.slice(0, 300)}`;
 
       if (serverFault && attempt === 0) {
         console.error(`[opencc]   ${label} ${reason} — retrying once`);
@@ -189,7 +199,6 @@ export async function callUpstream(
     }
 
     if (upstream?.ok) {
-      console.log(`[opencc]   ${label} -> ${upstream.status}`);
       return { upstream, provider, model, streamed: streamUpstream };
     }
 
