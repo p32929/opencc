@@ -7,10 +7,14 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { CAPABILITIES_PATH, GLOBAL_CONFIG_DIR } from "./paths.js";
 
-// A 1x1 transparent PNG — the smallest thing that makes a backend admit
-// whether it accepts images at all.
+// A 16x16 solid grey PNG. Deliberately not a 1x1: Gemini rejects a single
+// pixel with "Unable to process input image", and the differential probe would
+// read that as "this model has no vision" — a false negative that would route
+// every image away from a model that handles them perfectly well. The image
+// has to be unremarkable enough that a rejection can only mean the backend
+// doesn't take images at all.
 const PIXEL =
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=";
+  "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFElEQVR4nGNoIBEwjGoY1TB8NQAAJYSAEGy7FvQAAAAASUVORK5CYII=";
 
 const key = (baseUrl, model) => `${baseUrl}|${model}`;
 
