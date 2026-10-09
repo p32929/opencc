@@ -36,6 +36,11 @@ opencc         # the proxy — leave it running
 opencc claude  # cd to your project first
 ```
 
+Both `opencc` and `opencc init` ask which port to use, showing the current one
+as the default — press enter to accept. The proxy remembers your answer, so
+`opencc claude` and the panel keep pointing at the right place. `--port 9753`
+skips the question, and so does running without a terminal.
+
 Claude Code's own flags pass straight through: `opencc claude --continue`.
 
 ## opencc init
@@ -146,7 +151,8 @@ choice starts 429ing, the next one on the same provider often still works.
 - Failover only works *before* a reply starts arriving. If a provider dies
   mid-stream that one message fails; retry and the chain picks another.
 - Config is re-read every request, so `opencc init` changes apply without
-  restarting the proxy. Except **Port** — the socket is already bound.
+  restarting the proxy. Except the proxy's **port** — the socket is already
+  bound, and restarting asks you for it anyway.
 - Your API key only ever goes to the provider you picked. The proxy listens
   on localhost only.
 
