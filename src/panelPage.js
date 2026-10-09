@@ -117,10 +117,12 @@ export const page = () => `<!doctype html>
     <div>
       <h1>opencc</h1>
       <p class="sub">Providers are tried top to bottom, models left to right. Changes save as you make them.</p>
+      <p class="sub" id="where"></p>
     </div>
     <div class="globals">
-      <span class="chip tier">Port</span>
-      <input type="number" id="port" style="width:90px" min="1" max="65535">
+      <span class="chip tier" title="The port the proxy will listen on when you run opencc — not this panel's port">Proxy port</span>
+      <input type="number" id="port" style="width:90px" min="1" max="65535"
+             title="Used by the proxy when you run opencc. Editing it here changes that setting; it does not start anything.">
       <button id="streaming"></button>
       <button id="detectAll">Detect all capabilities</button>
       <button id="clearCaps">Clear capabilities</button>
@@ -234,6 +236,10 @@ function modelRow(p, index, model, tier) {
 }
 
 function render() {
+  $("where").textContent =
+    "This panel is on localhost:" + (location.port || "80") +
+    " and only edits settings. The proxy listens on " + state.port +
+    " when you run opencc separately — nothing here starts it.";
   $("port").value = state.port;
   $("streaming").textContent = "Streaming: " + (state.streaming ? "on" : "off");
 
