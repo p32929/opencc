@@ -216,7 +216,7 @@ async function save() {
     providers: state.providers.map((p) => ({
       name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey,
       bigModels: p.bigModels, smallModels: p.smallModels,
-      disabled: p.disabled, retry: p.retry,
+      disabled: p.disabled,
     })),
     port: state.port,
     streaming: state.streaming,
@@ -280,7 +280,6 @@ function render() {
         '<button class="tiny" data-act="up" data-i="' + i + '"' + (i === 0 ? " disabled" : "") + ">↑</button>" +
         '<button class="tiny" data-act="down" data-i="' + i + '"' + (i === state.providers.length - 1 ? " disabled" : "") + ">↓</button>" +
         '<button class="tiny" data-act="toggle" data-i="' + i + '">' + (p.disabled ? "Enable" : "Disable") + "</button>" +
-        '<button class="tiny" data-act="retry" data-i="' + i + '">Retry: ' + (p.retry ? "on" : "off") + "</button>" +
         '<button class="tiny" data-act="detect" data-i="' + i + '">Detect</button>' +
         '<button class="tiny danger" data-act="del" data-i="' + i + '">Delete</button>' +
       "</div>" +
@@ -352,7 +351,7 @@ document.addEventListener("click", async (e) => {
   const act = btn.dataset.act;
 
   if (btn.id === "add") {
-    state.providers.push({ name: "", baseUrl: "", apiKey: "", bigModels: [], smallModels: [], disabled: false, retry: false });
+    state.providers.push({ name: "", baseUrl: "", apiKey: "", bigModels: [], smallModels: [], disabled: false });
     render();
     return;
   }
@@ -400,7 +399,6 @@ document.addEventListener("click", async (e) => {
     return;
   }
   if (act === "toggle") { state.providers[i].disabled = !state.providers[i].disabled; await save(); return; }
-  if (act === "retry") { state.providers[i].retry = !state.providers[i].retry; await save(); return; }
   if (act === "del") {
     if (!confirm("Delete provider " + (i + 1) + "? Its API key goes with it — Disable keeps it.")) return;
     state.providers.splice(i, 1);

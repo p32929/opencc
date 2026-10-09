@@ -54,14 +54,10 @@ function sendJson(res, status, data) {
 // Note this can only fail over on the *response status*, which arrives
 // before any bytes are written to the client. Once a stream has started
 // there's no way to retract it, so a mid-stream failure is still fatal.
-// 5xx means the provider broke, not that the request was wrong, so it's worth
-// one quick retry before giving up on a model. 429 is deliberately excluded —
-// that needs backoff, not an immediate retry.
-// Only for providers with retry switched on, and only for failures that could
-// plausibly go the other way a moment later: a 5xx, a dropped connection, or a
-// 429 (the key rotator in front of some providers may land on a fresh key).
-// A 400/401/403/404 is settled — retrying it just wastes the budget.
-const NOT_WORTH_RETRYING = new Set([400, 401, 403, 404, 413, 422]);
+// 5xx is the provider breaking, which is worth one more try on the same model.
+// Anything in the 4xx range is a decision about this request — wrong model,
+// no quota, bad shape — and asking the same model again cannot change it, so
+// the walk moves on instead.
 const RETRY_DELAY_MS = 400;
 
 // Per attempt, and for the whole walk. The deadline is what actually prevents
@@ -151,10 +147,8 @@ export async function callUpstream(
     let networkError;
     let errorText;
 
-    // One pass unless this provider has retry switched on, and even then the
-    // second pass only happens for a failure worth retrying.
-    const maxTries = provider.retry ? 2 : 1;
-    for (let attempt = 0; attempt < maxTries; attempt++) {
+    // Two passes at most, and the second only for a 5xx.
+    for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt > 0) await sleep(RETRY_DELAY_MS);
 
       upstream = undefined;
@@ -176,13 +170,16 @@ export async function callUpstream(
       if (upstream?.ok) break;
 
       if (!networkError) errorText = await upstream.text();
-      const transient = networkError ? true : !NOT_WORTH_RETRYING.has(upstream.status);
+      // A dropped connection isn't retried either: a refused or timed-out
+      // request won't heal in 400ms, and the next model is a better bet than
+      // waiting out a second timeout.
+      const serverFault = !networkError && upstream.status >= 500;
 
       const reason = networkError
         ? `unreachable: ${networkError.message}`
         : `failed ${upstream.status}: ${errorText.slice(0, 300)}`;
 
-      if (transient && attempt + 1 < maxTries) {
+      if (serverFault && attempt === 0) {
         console.error(`[opencc]   ${label} ${reason} — retrying once`);
         continue;
       }

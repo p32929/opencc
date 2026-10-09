@@ -65,9 +65,9 @@ Each provider takes:
 - **Name** — optional; defaults to the host
 
 **Disable** parks a provider that's out of credits — it keeps its key and
-position and is just skipped. **Delete** throws the key away. **Retry** is per
-provider and off by default. **Streaming** off makes opencc wait for the whole
-reply before passing it on, worth trying if a backend's SSE is flaky.
+position and is just skipped. **Delete** throws the key away. **Streaming** off
+makes opencc wait for the whole reply before passing it on, worth trying if a
+backend's SSE is flaky.
 
 ### Terminal menu
 
@@ -134,10 +134,11 @@ choice starts 429ing, the next one on the same provider often still works.
 
 ![The startup banner](docs/screenshots/server-banner.png)
 
-- **Retry same model** is per provider and **off by default**: a failure goes
-  straight to the next model. Turn it on for a provider whose failures tend to
-  be momentary and it gets one more try first. A settled 4xx (400/401/403/404)
-  is never retried either way — there's nothing to gain.
+- Failures are handled by status. **5xx** is the provider breaking, so the same
+  model gets one more try. Anything **4xx** is a decision about this request —
+  wrong model, no quota, bad shape — and asking again can't change it, so the
+  walk moves to the next model. An unreachable host moves on too: it won't heal
+  in 400ms, and the next model beats waiting out a second timeout.
 - `max_tokens` is **not** forwarded. Anthropic requires it so Claude Code
   always sends one (128000 as of Opus 5.5), but it's optional upstream and
   several backends reject a budget bigger than their own cap instead of just
@@ -170,7 +171,6 @@ choice starts 429ing, the next one on the same provider often still works.
 | `SMALL_MODEL` | comma-separated priority list, background work |
 | `PROVIDER_NAME` | optional label; defaults to the host |
 | `PROVIDER_DISABLED` | `true` to park it |
-| `PROVIDER_RETRY` | `true` to retry the same model once before moving on (default off) |
 | `PORT` `STREAMING` | global; `STREAMING=off` disables streaming |
 
 Detected capabilities are cached in `~/.opencc/capabilities.json`, keyed by
@@ -228,8 +228,8 @@ older single-provider versions still work — they read as provider 1.
 - Attempts are bounded: 5 minutes each, 10 minutes for the whole walk. There
   was no overall bound before, so a bad run could work through every model at
   10 minutes apiece, which looked like a hang rather than a failure.
-- Retrying a failed model is now opt-in per provider and off by default, so a
-  failure moves on immediately instead of doubling the wait.
+- Failures are handled by status: a 5xx gets one retry on the same model, a 4xx
+  moves straight to the next one.
 - The request log shows the incoming size (`tools=`, `chars=`), which is what
   you need when a backend complains about length.
 - `opencc init` opens a browser admin panel; `opencc init --tui` keeps the

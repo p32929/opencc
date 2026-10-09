@@ -166,7 +166,7 @@ async function addProvider() {
   console.log("");
   console.log(bold("  New provider"));
 
-  const provider = { name: "", baseUrl: "", apiKey: "", bigModels: [], smallModels: [], disabled: false, retry: false };
+  const provider = { name: "", baseUrl: "", apiKey: "", bigModels: [], smallModels: [], disabled: false };
   for (const field of FIELDS) {
     const answer = await prompt(field.label, "", field.hint, { keep: true });
     if (answer === null) {
@@ -211,14 +211,6 @@ async function providerScreen(provider, position, total) {
     });
 
     items.push({ separator: true });
-    items.push({
-      id: "retry",
-      label: "Retry same model",
-      value: provider.retry ? green("on") : dim("off"),
-      hint: provider.retry
-        ? "one more try before moving on"
-        : "a failure moves straight to the next model",
-    });
     items.push(
       provider.disabled
         ? { id: "toggle", label: green("Enable provider"), hint: "start using it again" }
@@ -252,11 +244,6 @@ async function providerScreen(provider, position, total) {
 
     if (choice === "toggle") {
       provider.disabled = !provider.disabled;
-      return "toggled";
-    }
-
-    if (choice === "retry") {
-      provider.retry = !provider.retry;
       return "toggled";
     }
 

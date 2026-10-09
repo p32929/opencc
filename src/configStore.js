@@ -23,7 +23,6 @@ export function writeStoredConfig({ providers, port, streaming = true }) {
     if (i > 0) lines.push("");
     if (provider.name) lines.push(`PROVIDER_NAME${suffix}=${provider.name}`);
     if (provider.disabled) lines.push(`PROVIDER_DISABLED${suffix}=true`);
-    if (provider.retry) lines.push(`PROVIDER_RETRY${suffix}=true`);
     lines.push(`OPENAI_BASE_URL${suffix}=${provider.baseUrl}`);
     lines.push(`OPENAI_API_KEY${suffix}=${provider.apiKey || ""}`);
     lines.push(`BIG_MODEL${suffix}=${joinModels(provider.bigModels)}`);

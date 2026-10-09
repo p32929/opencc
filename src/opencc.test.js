@@ -349,14 +349,14 @@ test("a finished message re-streams as well-formed Anthropic SSE", () => {
 
 // --- one retry on a transient upstream failure ----------------------------
 
-test("retries a 5xx once on the same model when retry is on", async (t) => {
+test("retries a 5xx once on the same model", async (t) => {
   const realFetch = globalThis.fetch;
   t.after(() => (globalThis.fetch = realFetch));
 
   const seen = stubFetch([503, 200]);
 
   const result = await callUpstream(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", retry: true },
+    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
 
@@ -372,7 +372,7 @@ test("gives up on a model after two 5xx and moves to the next", async (t) => {
   const seen = stubFetch([500, 500, 200]);
 
   const result = await callUpstream(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", retry: true },
+    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
 
@@ -380,44 +380,48 @@ test("gives up on a model after two 5xx and moves to the next", async (t) => {
   assert.deepEqual(seen.map((s) => s.body.model), ["m1", "m1", "m2"]);
 });
 
-test("with retry on, a 429 and an unreachable host are both retried", async (t) => {
+test("a 429 moves to the next model rather than being retried", async (t) => {
   const realFetch = globalThis.fetch;
   t.after(() => (globalThis.fetch = realFetch));
 
+  // 429 is a 4xx: asking the same model again can't change it, and the key
+  // rotator in front of some providers is a separate concern.
   const seen = stubFetch([429, 200]);
-
-  const result = await callUpstream(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", retry: true },
-    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
-  ]);
-
-  assert.equal(result.provider.name, "one", "the retry landed on a fresh key");
-  assert.deepEqual(seen.map((s) => s.body.model), ["m1", "m1"]);
-});
-
-test("retry is off by default — one try per model", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  const seen = stubFetch([503, 200]);
 
   const result = await callUpstream(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
 
-  assert.equal(result.provider.name, "two", "a 5xx moves straight on");
+  assert.equal(result.provider.name, "two");
   assert.deepEqual(seen.map((s) => s.body.model), ["m1", "m2"], "m1 tried once only");
 });
 
-test("a settled 4xx is never retried, even with retry on", async (t) => {
+test("an unreachable host moves on without a retry", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  // A refused or timed-out request won't heal in 400ms, and the next model is
+  // a better bet than waiting out a second timeout.
+  const seen = stubFetch(["connect ECONNREFUSED", 200]);
+
+  const result = await callUpstream(REQ, [
+    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
+  ]);
+
+  assert.equal(result.provider.name, "two");
+  assert.equal(seen.length, 2);
+});
+
+test("a 400 is never retried", async (t) => {
   const realFetch = globalThis.fetch;
   t.after(() => (globalThis.fetch = realFetch));
 
   const seen = stubFetch([400, 200]);
 
   const result = await callUpstream(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", retry: true },
+    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
 
