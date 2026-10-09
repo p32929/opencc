@@ -6,6 +6,7 @@
 // interchangeable.
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 import { readStoredConfig, writeStoredConfig } from "./configStore.js";
 import { providersFromEnv, displayName } from "./config.js";
 import {
@@ -39,6 +40,11 @@ function readBody(req) {
     req.on("error", reject);
   });
 }
+
+// Detection can take minutes across a dozen models, so the run publishes
+// where it's up to and the page polls it. Module state is fine: the panel is
+// a single local process serving one person.
+let detection = null;
 
 const streamingOf = (stored) =>
   !["off", "false", "0", "no"].includes((stored.STREAMING || "on").trim().toLowerCase());
@@ -83,7 +89,26 @@ function openBrowser(url) {
   }
 }
 
-export function runPanel() {
+const DEFAULT_PANEL_PORT = 3450;
+
+async function askPort(fallback) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = (await rl.question(`  Port for the admin panel [${fallback}]: `)).trim();
+  rl.close();
+  if (!answer) return fallback;
+  const n = Number(answer);
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : fallback;
+}
+
+function listen(server, port) {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    // localhost only — this edits your API keys.
+    server.listen(port, "localhost", () => resolve(server));
+  });
+}
+
+export async function runPanel({ port, ask = true } = {}) {
   const server = createServer(async (req, res) => {
     const path = req.url.split("?")[0];
 
@@ -123,22 +148,55 @@ export function runPanel() {
         return;
       }
 
+      if (req.method === "GET" && path === "/api/detect/progress") {
+        json(res, 200, detection ?? { running: false });
+        return;
+      }
+
       if (req.method === "POST" && path === "/api/detect") {
+        if (detection?.running) {
+          json(res, 409, { error: "a detection run is already going" });
+          return;
+        }
+
         const { index } = await readBody(req);
         const { providers } = loadState();
-        const chosen = typeof index === "number" ? [providers[index]] : providers;
+        const chosen = (typeof index === "number" ? [providers[index]] : providers).filter(Boolean);
+        const jobs = chosen.flatMap((provider) =>
+          [...new Set([...provider.bigModels, ...provider.smallModels])].map((model) => ({ provider, model })),
+        );
 
+        detection = { running: true, done: 0, total: jobs.length, current: "", results: [] };
         let all = readCapabilities();
-        for (const provider of chosen.filter(Boolean)) {
-          const catalogue = await fetchCatalogue(provider);
-          const models = [...new Set([...provider.bigModels, ...provider.smallModels])];
-          // Sequential per provider so a detection run can't hammer one key.
-          for (const model of models) {
-            all = setCapability(all, provider.baseUrl, model, await detectCapabilities(provider, model, catalogue));
+
+        try {
+          const catalogues = new Map();
+          for (const { provider, model } of jobs) {
+            detection.current = `${displayName(provider)} · ${model}`;
+            if (!catalogues.has(provider.baseUrl)) {
+              catalogues.set(provider.baseUrl, await fetchCatalogue(provider));
+            }
+            // Sequential so a run can't hammer one key, and so the progress
+            // the page shows means something.
+            const caps = await detectCapabilities(provider, model, catalogues.get(provider.baseUrl));
+            all = setCapability(all, provider.baseUrl, model, caps);
+            detection.done += 1;
+            detection.results.push({ model, tools: caps.tools, vision: caps.vision });
           }
+          writeCapabilities(all);
+        } finally {
+          detection = { ...detection, running: false, current: "" };
         }
-        writeCapabilities(all);
-        json(res, 200, { capabilities: all });
+
+        json(res, 200, { capabilities: all, results: detection.results });
+        return;
+      }
+
+      // Forgetting everything detected, for when a provider's models change
+      // or a run cached something wrong.
+      if (req.method === "POST" && path === "/api/capability/clear") {
+        writeCapabilities({});
+        json(res, 200, { capabilities: {} });
         return;
       }
 
@@ -184,18 +242,27 @@ export function runPanel() {
     }
   });
 
-  return new Promise((resolve) => {
-    // Port 0 picks a free one, so the panel can never collide with the proxy,
-    // and localhost only — this edits your API keys.
-    server.listen(0, "localhost", () => {
-      const { port } = server.address();
-      const url = `http://localhost:${port}`;
-      console.log("");
-      console.log(`  opencc admin panel → ${url}`);
-      console.log("  Changes save as you make them. Ctrl+C when you're done.");
-      console.log("");
-      openBrowser(url);
-      resolve(server);
-    });
-  });
+  // Asked for rather than grabbed, so the panel never lands on the port the
+  // proxy is using and you always know where it is.
+  let chosen = port ?? (ask ? await askPort(DEFAULT_PANEL_PORT) : DEFAULT_PANEL_PORT);
+
+  while (true) {
+    try {
+      await listen(server, chosen);
+      break;
+    } catch (err) {
+      if (err.code !== "EADDRINUSE") throw err;
+      console.log(`  Port ${chosen} is already in use.`);
+      if (!ask) throw err;
+      chosen = await askPort(chosen + 1);
+    }
+  }
+
+  const url = `http://localhost:${server.address().port}`;
+  console.log("");
+  console.log(`  opencc admin panel → ${url}`);
+  console.log("  Changes save as you make them. Ctrl+C when you're done.");
+  console.log("");
+  openBrowser(url);
+  return server;
 }

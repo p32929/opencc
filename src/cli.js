@@ -14,7 +14,10 @@ if (subcommand === "init") {
   }
 
   const { runPanel } = await import("./panel.js");
-  await runPanel();
+  // --port skips the question, for scripting.
+  const flag = args.indexOf("--port");
+  const given = flag !== -1 ? Number(args[flag + 1]) : undefined;
+  await runPanel(Number.isInteger(given) ? { port: given, ask: false } : {});
   // The listening server keeps this process alive; Ctrl+C stops it.
 }
 

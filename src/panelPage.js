@@ -26,7 +26,8 @@ export const page = () => `<!doctype html>
     margin: 0; background: var(--bg); color: var(--ink-2);
     font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif;
   }
-  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; }
+  .wrap { width: 100%; margin: 0; padding: 28px 28px 80px; }
+  @media (max-width: 600px) { .wrap { padding: 20px 16px 60px; } }
   h1 { font-size: 22px; color: var(--ink); margin: 0; letter-spacing: -.01em; }
   .sub { color: var(--ink-3); margin: 6px 0 0; }
   header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
@@ -83,6 +84,31 @@ export const page = () => `<!doctype html>
   }
   .toast.show { opacity: 1; }
   .empty { color: var(--ink-3); padding: 24px; text-align: center; }
+
+  /* Detection can run for minutes, so it gets a real dialog rather than a
+     disabled button, and the dialog reports which model it's on. */
+  .scrim {
+    position: fixed; inset: 0; background: rgba(0,0,0,.45);
+    display: none; align-items: center; justify-content: center; padding: 20px;
+    backdrop-filter: blur(2px);
+  }
+  .scrim.show { display: flex; }
+  .dialog {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 8px;
+    padding: 22px 24px; width: 100%; max-width: 460px;
+  }
+  .dialog h2 { font-size: 16px; color: var(--ink); margin: 0 0 6px; }
+  .dialog p { margin: 0; color: var(--ink-3); font-size: 13px; }
+  .bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin: 16px 0 8px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .25s; }
+  .now { font: 12.5px ui-monospace, monospace; color: var(--ink); word-break: break-all; min-height: 18px; }
+  .spin {
+    display: inline-block; width: 13px; height: 13px; vertical-align: -2px; margin-right: 7px;
+    border: 2px solid var(--rule); border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 2.4s; } }
 </style>
 </head>
 <body>
@@ -97,6 +123,7 @@ export const page = () => `<!doctype html>
       <input type="number" id="port" style="width:90px" min="1" max="65535">
       <button id="streaming"></button>
       <button id="detectAll">Detect all capabilities</button>
+      <button id="clearCaps">Clear capabilities</button>
       <button class="primary" id="add">+ Add provider</button>
     </div>
   </header>
@@ -105,12 +132,46 @@ export const page = () => `<!doctype html>
   <div id="list"></div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="scrim" id="scrim" role="dialog" aria-modal="true" aria-labelledby="dlgTitle">
+  <div class="dialog">
+    <h2 id="dlgTitle"><span class="spin"></span>Detecting capabilities</h2>
+    <p>Each model gets a tiny real request. A slow backend can take a while — this
+       only has to run once per model.</p>
+    <div class="bar"><i id="bar"></i></div>
+    <p class="status" id="count"></p>
+    <p class="now" id="now"></p>
+  </div>
+</div>
 
 <script>
 let state = { providers: [], port: "3000", streaming: true, capabilities: {} };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const capKey = (baseUrl, model) => baseUrl + "|" + model;
+
+function showDialog() {
+  $("bar").style.width = "0%";
+  $("count").textContent = "Starting…";
+  $("now").textContent = "";
+  $("scrim").classList.add("show");
+}
+
+function hideDialog() {
+  $("scrim").classList.remove("show");
+}
+
+async function pollProgress() {
+  try {
+    const p = await (await fetch("/api/detect/progress")).json();
+    if (!p || !p.total) return;
+    const pct = Math.round((p.done / p.total) * 100);
+    $("bar").style.width = pct + "%";
+    $("count").textContent = p.done + " of " + p.total + " done";
+    $("now").textContent = p.current || "";
+  } catch {
+    // The dialog is cosmetic; a dropped poll shouldn't surface an error.
+  }
+}
 
 let toastTimer;
 function toast(msg) {
@@ -177,8 +238,10 @@ function render() {
   $("streaming").textContent = "Streaming: " + (state.streaming ? "on" : "off");
 
   const active = state.providers.filter((p) => !p.disabled).length;
+  const detected = Object.keys(state.capabilities).length;
   $("status").textContent = state.providers.length
-    ? state.providers.length + " provider(s), " + active + " active"
+    ? state.providers.length + " provider(s), " + active + " active · " +
+      (detected ? detected + " model(s) with detected capabilities" : "no capabilities detected yet — everything gets tried")
     : "";
 
   if (!state.providers.length) {
@@ -246,22 +309,34 @@ document.addEventListener("click", async (e) => {
   if (btn.id === "streaming") { state.streaming = !state.streaming; await save(); return; }
 
   if (btn.id === "detectAll" || act === "detect") {
-    const label = btn.textContent;
-    btn.textContent = "Detecting…";
-    btn.disabled = true;
+    const body = act === "detect" ? { index: i } : {};
+    showDialog();
+    // The run is one long POST, so progress comes from polling alongside it.
+    const poll = setInterval(pollProgress, 500);
     try {
-      const body = act === "detect" ? { index: i } : {};
-      state.capabilities = (await api("/api/detect", {
+      const out = await api("/api/detect", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-      })).capabilities;
+      });
+      state.capabilities = out.capabilities;
       render();
-      toast("Capabilities updated");
+      const n = (out.results || []).length;
+      toast(n ? "Detected " + n + " model(s)" : "Nothing to detect");
     } catch (err) {
       toast("Detection failed: " + err.message);
     } finally {
-      btn.textContent = label;
-      btn.disabled = false;
+      clearInterval(poll);
+      hideDialog();
     }
+    return;
+  }
+
+  if (btn.id === "clearCaps") {
+    if (!Object.keys(state.capabilities).length) { toast("Nothing saved"); return; }
+    if (!confirm("Forget all " + Object.keys(state.capabilities).length +
+                 " saved capabilities? Every model goes back to untested, which means they all get tried again until you re-detect.")) return;
+    state.capabilities = (await api("/api/capability/clear", { method: "POST" })).capabilities;
+    render();
+    toast("Capabilities cleared");
     return;
   }
 
@@ -302,7 +377,7 @@ document.addEventListener("click", async (e) => {
     const model = btn.dataset.m;
     const current = state.capabilities[capKey(state.providers[i].baseUrl, model)] || {};
     const answer = prompt(
-      "Capabilities for " + model + "\\n\\nType: tools, image — whichever it supports, comma separated.\\nEmpty means neither.",
+      "Capabilities for " + model + "\ \ Type: tools, image — whichever it supports, comma separated.\ Empty means neither.",
       [current.tools ? "tools" : "", current.vision ? "image" : ""].filter(Boolean).join(", "),
     );
     if (answer === null) return;
