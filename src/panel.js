@@ -197,6 +197,23 @@ export async function runPanel({ port, ask = true } = {}) {
         return;
       }
 
+      // Any model the provider offers, whether or not it's in the routing
+      // lists — otherwise checking whether a model is worth adding means
+      // adding it first.
+      if (req.method === "POST" && path === "/api/probe") {
+        const { index, model } = await readBody(req);
+        const provider = loadState().providers[index];
+        if (!provider || !model) {
+          json(res, 404, { error: "no such provider or model" });
+          return;
+        }
+        const caps = await detectCapabilities(provider, model, await fetchCatalogue(provider));
+        const all = setCapability(readCapabilities(), provider.baseUrl, model, caps);
+        writeCapabilities(all);
+        json(res, 200, { caps, capabilities: all });
+        return;
+      }
+
       if (req.method === "POST" && path === "/api/test") {
         const { index, model } = await readBody(req);
         const provider = loadState().providers[index];

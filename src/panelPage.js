@@ -136,12 +136,12 @@ export const page = () => `<!doctype html>
 <div class="toast" id="toast"></div>
 <div class="scrim" id="scrim" role="dialog" aria-modal="true" aria-labelledby="dlgTitle">
   <div class="dialog">
-    <h2 id="dlgTitle"><span class="spin"></span>Detecting capabilities</h2>
-    <p>Each model gets a tiny real request. A slow backend can take a while — this
-       only has to run once per model.</p>
-    <div class="bar"><i id="bar"></i></div>
+    <h2 id="dlgTitle"><span class="spin"></span>Working</h2>
+    <p id="dlgNote"></p>
+    <div class="bar" id="bar"><i id="barFill"></i></div>
     <p class="status" id="count"></p>
     <p class="now" id="now"></p>
+    <p class="status">Elapsed <span id="elapsed">0s</span></p>
   </div>
 </div>
 
@@ -151,14 +151,29 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const capKey = (baseUrl, model) => baseUrl + "|" + model;
 
-function showDialog() {
-  $("bar").style.width = "0%";
-  $("count").textContent = "Starting…";
+let dialogTimer;
+
+function showDialog(title, note, { bar = true } = {}) {
+  $("dlgTitle").innerHTML = '<span class="spin"></span>' + esc(title);
+  $("dlgNote").textContent = note;
+  $("bar").style.display = bar ? "" : "none";
+  $("barFill").style.width = "0%";
+  $("count").textContent = bar ? "Starting…" : "";
   $("now").textContent = "";
   $("scrim").classList.add("show");
+
+  // Elapsed time, because a slow backend can take minutes and a spinner alone
+  // gives you no way to tell working from stuck.
+  const started = Date.now();
+  clearInterval(dialogTimer);
+  dialogTimer = setInterval(() => {
+    $("elapsed").textContent = Math.round((Date.now() - started) / 1000) + "s";
+  }, 500);
+  $("elapsed").textContent = "0s";
 }
 
 function hideDialog() {
+  clearInterval(dialogTimer);
   $("scrim").classList.remove("show");
 }
 
@@ -167,7 +182,7 @@ async function pollProgress() {
     const p = await (await fetch("/api/detect/progress")).json();
     if (!p || !p.total) return;
     const pct = Math.round((p.done / p.total) * 100);
-    $("bar").style.width = pct + "%";
+    $("barFill").style.width = pct + "%";
     $("count").textContent = p.done + " of " + p.total + " done";
     $("now").textContent = p.current || "";
   } catch {
@@ -255,6 +270,7 @@ function render() {
     return;
   }
 
+  queueMicrotask(fillCatalogues);
   $("list").innerHTML = state.providers.map((p, i) => {
     const models = [...new Set([...p.bigModels, ...p.smallModels])];
     return '<div class="card' + (p.disabled ? " off" : "") + '">' +
@@ -278,6 +294,16 @@ function render() {
         "<div><label>Small models (Haiku) — empty reuses the big ones</label>" +
         '<input type="text" data-f="smallModels" data-i="' + i + '" value="' + esc(p.smallModels.join(", ")) + '"></div>' +
       "</div>" +
+      '<div class="models">' +
+        '<div class="m">' +
+          '<span class="chip tier">any</span>' +
+          '<input type="text" list="cat' + i + '" placeholder="check another model, e.g. GLM-4.6V-Flash" ' +
+                 'data-pick="' + i + '" style="flex:1;min-width:220px">' +
+          '<datalist id="cat' + i + '"></datalist>' +
+          '<button class="tiny" data-act="probe" data-i="' + i + '">Check capabilities</button>' +
+          '<button class="tiny" data-act="testpick" data-i="' + i + '">Test</button>' +
+        "</div>" +
+      "</div>" +
       (models.length ? '<div class="models">' + models.map((m) =>
           modelRow(p, i, m, p.bigModels.includes(m) ? (p.smallModels.includes(m) ? "both" : "big") : "small")
         ).join("") + "</div>" : "") +
@@ -286,6 +312,24 @@ function render() {
 }
 
 // --- events ---------------------------------------------------------------
+
+// Model names are long and easy to mistype, so each provider's own catalogue
+// backs an autocomplete. Fetched once and reused.
+const catalogues = {};
+async function fillCatalogues() {
+  for (let i = 0; i < state.providers.length; i++) {
+    const list = document.getElementById("cat" + i);
+    if (!list) continue;
+    if (!catalogues[i]) {
+      try {
+        catalogues[i] = (await api("/api/catalogue?index=" + i)).models || [];
+      } catch {
+        catalogues[i] = [];
+      }
+    }
+    list.innerHTML = catalogues[i].map((m) => '<option value="' + esc(m) + '"></option>').join("");
+  }
+}
 
 document.addEventListener("change", async (e) => {
   const field = e.target.dataset.f;
@@ -316,7 +360,10 @@ document.addEventListener("click", async (e) => {
 
   if (btn.id === "detectAll" || act === "detect") {
     const body = act === "detect" ? { index: i } : {};
-    showDialog();
+    showDialog(
+      "Detecting capabilities",
+      "Each model gets a tiny real request. A slow backend can take a while — this only has to run once per model.",
+    );
     // The run is one long POST, so progress comes from polling alongside it.
     const poll = setInterval(pollProgress, 500);
     try {
@@ -361,20 +408,57 @@ document.addEventListener("click", async (e) => {
     return;
   }
 
+  if (act === "probe" || act === "testpick") {
+    const input = document.querySelector('[data-pick="' + i + '"]');
+    const model = (input && input.value || "").trim();
+    if (!model) { toast("Type or pick a model first"); return; }
+
+    if (act === "testpick") {
+      showDialog("Testing " + model, 'Sending one real "Hi" through the provider.', { bar: false });
+      $("now").textContent = model;
+      try {
+        const r = await api("/api/test", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ index: i, model }),
+        });
+        hideDialog();
+        alert(r.ok ? model + "\u2003OK — the provider answered." : model + "\u2003FAILED\u2003" + r.error);
+      } catch (err) { hideDialog(); alert("Test failed: " + err.message); }
+      return;
+    }
+
+    showDialog("Checking " + model, "Probing for tool calling and image support.", { bar: false });
+    $("now").textContent = model;
+    try {
+      const out = await api("/api/probe", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ index: i, model }),
+      });
+      state.capabilities = out.capabilities;
+      render();
+      hideDialog();
+      const say = (v) => (v === true ? "yes" : v === false ? "no" : "could not tell");
+      alert(model + "\u2003tools: " + say(out.caps.tools) + "\u2003images: " + say(out.caps.vision) +
+            (out.caps.contextLength ? "\u2003context: " + out.caps.contextLength.toLocaleString() : "") +
+            "\u2003(saved — add it to a model list above to route to it)");
+    } catch (err) { hideDialog(); alert("Check failed: " + err.message); }
+    return;
+  }
+
   if (act === "test") {
-    btn.textContent = "…";
-    btn.disabled = true;
+    const model = btn.dataset.m;
+    showDialog("Testing " + model, 'Sending one real "Hi" through the provider.', { bar: false });
+    $("now").textContent = model;
     try {
       const r = await api("/api/test", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ index: i, model: btn.dataset.m }),
+        body: JSON.stringify({ index: i, model }),
       });
-      toast(r.ok ? btn.dataset.m + ": OK" : btn.dataset.m + ": " + r.error);
+      hideDialog();
+      alert(r.ok ? model + "\u2003OK — the provider answered." : model + "\u2003FAILED\u2003" + r.error);
     } catch (err) {
-      toast("Test failed: " + err.message);
-    } finally {
-      btn.textContent = "Test";
-      btn.disabled = false;
+      hideDialog();
+      alert("Test failed: " + err.message);
     }
     return;
   }
