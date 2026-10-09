@@ -112,8 +112,11 @@ choice starts 429ing, the next one on the same provider often still works.
   several backends reject a budget bigger than their own cap instead of just
   capping it — z.ai allows at most 98304. Leaving it out lets each provider
   decide how long a reply to produce.
-- The walk is bounded: 2 minutes per attempt, 5 minutes overall. Past that it
+- The walk is bounded: 5 minutes per attempt, 10 minutes overall. Past that it
   returns the error instead of quietly working through the rest of the list.
+  A request carrying a large tool set genuinely runs to several minutes on
+  some backends, so the per-attempt limit is deliberately loose — the overall
+  deadline is what stops a bad run looking like a hang.
 - Failover only works *before* a reply starts arriving. If a provider dies
   mid-stream that one message fails; retry and the chain picks another.
 - Config is re-read every request, so `opencc init` changes apply without
@@ -186,9 +189,9 @@ older single-provider versions still work — they read as provider 1.
   (Anthropic requires it) and asks for 128000, which z.ai rejects outright —
   its cap is 98304. It's optional for OpenAI-compatible backends, so each
   provider now decides how long a reply to produce.
-- Attempts are bounded: 2 minutes each, 5 minutes for the whole walk. A bad
-  run used to be able to sit on a 10-minute timeout per attempt, which looked
-  like a hang rather than a failure.
+- Attempts are bounded: 5 minutes each, 10 minutes for the whole walk. There
+  was no overall bound before, so a bad run could work through every model at
+  10 minutes apiece, which looked like a hang rather than a failure.
 - Retrying a failed model is now opt-in per provider and off by default, so a
   failure moves on immediately instead of doubling the wait.
 - The request log shows the incoming size (`tools=`, `chars=`), which is what

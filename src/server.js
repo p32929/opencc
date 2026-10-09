@@ -63,11 +63,13 @@ function sendJson(res, status, data) {
 const NOT_WORTH_RETRYING = new Set([400, 401, 403, 404, 413, 422]);
 const RETRY_DELAY_MS = 400;
 
-// Per attempt, and for the whole walk. Without the deadline a bad run could
-// spend 13 models x 2 tries x the per-attempt timeout before answering, which
-// reads as a hang rather than a failure — so stop trying and report instead.
-const UPSTREAM_TIMEOUT_MS = 120000;
-const TOTAL_DEADLINE_MS = 300000;
+// Per attempt, and for the whole walk. The deadline is what actually prevents
+// a hang — without it a bad run could work through every model before
+// answering — so the per-attempt timeout can afford to be generous. It needs
+// to be: a request carrying a large tool set runs to several minutes on some
+// backends, and cutting those off fails requests that would have succeeded.
+const UPSTREAM_TIMEOUT_MS = 300000;
+const TOTAL_DEADLINE_MS = 600000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
