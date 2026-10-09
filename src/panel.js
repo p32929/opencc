@@ -8,7 +8,7 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { readStoredConfig, writeStoredConfig } from "./configStore.js";
-import { providersFromEnv, displayName } from "./config.js";
+import { providersFromEnv, displayName, streamingFromEnv } from "./config.js";
 import {
   readCapabilities,
   writeCapabilities,
@@ -46,15 +46,12 @@ function readBody(req) {
 // a single local process serving one person.
 let detection = null;
 
-const streamingOf = (stored) =>
-  !["off", "false", "0", "no"].includes((stored.STREAMING || "on").trim().toLowerCase());
-
 function loadState() {
   const stored = readStoredConfig();
   return {
     providers: providersFromEnv(stored).map((p) => ({ ...p, label: displayName(p) })),
     port: stored.PORT || "3000",
-    streaming: streamingOf(stored),
+    streaming: streamingFromEnv(stored),
     capabilities: readCapabilities(),
   };
 }

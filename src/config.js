@@ -80,18 +80,22 @@ export function providersFromEnv(values) {
     .filter((provider) => provider.baseUrl && provider.bigModels.length > 0);
 }
 
+// Streaming is on unless explicitly turned off. Some OpenAI-compatible
+// backends have flaky SSE — truncated streams, missing usage, malformed
+// tool-call deltas — and turning this off makes opencc fetch the whole reply
+// first, then hand it to Claude Code as a single-shot stream.
+// Exported so anything rewriting the config preserves the setting rather than
+// guessing at it.
+export function streamingFromEnv(values) {
+  return !["off", "false", "0", "no"].includes((values.STREAMING || "on").trim().toLowerCase());
+}
+
 function readConfig() {
   // A project-local .env (running from inside a clone of this repo) always
   // wins over the global config `opencc init` writes.
   const merged = { ...parseEnvFile(GLOBAL_CONFIG_PATH), ...parseEnvFile(".env") };
 
-  // Streaming is on unless explicitly turned off. Some OpenAI-compatible
-  // backends have flaky SSE — truncated streams, missing usage, malformed
-  // tool-call deltas — and turning this off makes opencc fetch the whole
-  // reply first, then hand it to Claude Code as a single-shot stream.
-  const streaming = !["off", "false", "0", "no"].includes(
-    (merged.STREAMING || "on").trim().toLowerCase(),
-  );
+  const streaming = streamingFromEnv(merged);
 
   return {
     providers: providersFromEnv(merged),

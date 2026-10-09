@@ -26,6 +26,35 @@ if (subcommand === "init") {
   await runServer();
 }
 
+// Asked every time the proxy starts, so you always know which port it's on and
+// can move it without editing config first. Skipped when there's no terminal
+// to ask (a script, a process manager) or when --port already said.
+async function askPort(label, fallback) {
+  if (!process.stdin.isTTY) return Number(fallback);
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = (await rl.question(`  ${label} [${fallback}]: `)).trim();
+  rl.close();
+  if (!answer) return Number(fallback);
+  const n = Number(answer);
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : Number(fallback);
+}
+
+// The chosen port is written back, because "opencc claude" and the panel both
+// read it from config. A proxy listening somewhere the config doesn't know
+// about is how you get "proxy isn't running" while it plainly is.
+async function rememberPort(port) {
+  const { readStoredConfig, writeStoredConfig } = await import("./configStore.js");
+  const { providersFromEnv, streamingFromEnv } = await import("./config.js");
+  const stored = readStoredConfig();
+  if (String(stored.PORT ?? "") === String(port)) return;
+  writeStoredConfig({
+    providers: providersFromEnv(stored),
+    port: String(port),
+    streaming: streamingFromEnv(stored),
+  });
+}
+
 async function runServer() {
   const { isConfigured, config, displayName } = await import("./config.js");
 
@@ -35,10 +64,25 @@ async function runServer() {
     process.exit(1);
   }
 
-  const { startServer } = await import("./server.js");
-  await startServer();
+  const flag = args.indexOf("--port");
+  const given = flag !== -1 ? Number(args[flag + 1]) : undefined;
+  let port = Number.isInteger(given) ? given : await askPort("Port for the proxy", config.port);
 
-  console.log(`opencc listening on http://localhost:${config.port}`);
+  const { startServer } = await import("./server.js");
+  while (true) {
+    try {
+      await startServer(port);
+      break;
+    } catch (err) {
+      if (err.code !== "EADDRINUSE") throw err;
+      console.log(`  Port ${port} is already in use.`);
+      if (!process.stdin.isTTY || Number.isInteger(given)) process.exit(1);
+      port = await askPort("Port for the proxy", port + 1);
+    }
+  }
+  await rememberPort(port);
+
+  console.log(`opencc listening on http://localhost:${port}`);
   console.log("");
   config.providers.forEach((provider, i) => {
     if (provider.disabled) {

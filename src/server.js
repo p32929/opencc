@@ -282,10 +282,11 @@ const server = createServer(async (req, res) => {
   }
 });
 
-export function startServer() {
-  return new Promise((resolve) => {
+export function startServer(port = config.port) {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
     // "localhost" only — never exposed to the LAN.
-    server.listen(config.port, "localhost", () => {
+    server.listen(port, "localhost", () => {
       resolve(server);
     });
   });
