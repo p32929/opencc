@@ -1,7 +1,8 @@
 console.log("");
 console.log('opencc installed — the "opencc" command is now available anywhere.');
 console.log("");
-console.log("  opencc init             Add providers and settings (arrow-key menu)");
+console.log("  opencc init             Open the admin panel in your browser");
+console.log("  opencc init --tui       Same thing, as a terminal menu");
 console.log("  opencc                  Start the proxy server");
 console.log("  opencc claude [args]    Launch Claude Code, pointed at the proxy");
 console.log("");

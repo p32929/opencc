@@ -4,9 +4,18 @@ const args = process.argv.slice(2);
 const subcommand = args[0];
 
 if (subcommand === "init") {
-  const { runInit } = await import("./init.js");
-  await runInit();
-  process.exit(0);
+  // The browser panel is the default — it's a better place to manage a dozen
+  // models and their capabilities. --tui keeps the terminal menu for a machine
+  // with no browser, over SSH for instance. Both edit the same config.
+  if (args.includes("--tui")) {
+    const { runInit } = await import("./init.js");
+    await runInit();
+    process.exit(0);
+  }
+
+  const { runPanel } = await import("./panel.js");
+  await runPanel();
+  // The listening server keeps this process alive; Ctrl+C stops it.
 }
 
 if (subcommand === "claude") {

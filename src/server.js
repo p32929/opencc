@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { config, getConfig, isConfigured, displayName } from "./config.js";
 import { pickModels, toOpenAIRequest, toAnthropicResponse, toAnthropicError } from "./translate.js";
 import { streamOpenAIToAnthropic, sendAnthropicAsStream } from "./stream.js";
+import { readCapabilities, capabilityFor, requirementsOf, canServe, describeNeeds } from "./capabilities.js";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -77,6 +78,7 @@ export async function callUpstream(
   anthropicReq,
   providers = config.providers,
   streaming = config.streaming,
+  capabilities = null,
 ) {
   const failures = [];
   const deadline = Date.now() + TOTAL_DEADLINE_MS;
@@ -84,17 +86,43 @@ export async function callUpstream(
 
   // Flattened up front so the log can show "attempt 3/7" rather than a
   // provider index that says nothing about how much runway is left.
-  const attempts = providers
+  const candidates = providers
     .filter((provider) => !provider.disabled)
     .flatMap((provider) =>
       pickModels(anthropicReq.model, provider).map((model) => ({ provider, model })),
     );
 
-  if (attempts.length === 0) {
+  if (candidates.length === 0) {
     return {
       status: 503,
       message: `No provider is available: all ${providers.length} are disabled. Run "opencc init" to enable one.`,
     };
+  }
+
+  // Only try models that can serve what this request needs. A model with no
+  // detected capabilities is allowed through — unknown means untested, not
+  // incapable — so adding a provider never silently takes it out of rotation.
+  const needs = requirementsOf(anthropicReq);
+  const known = capabilities ?? readCapabilities();
+  const attempts = candidates.filter(({ provider, model }) =>
+    canServe(capabilityFor(known, provider.baseUrl, model), needs),
+  );
+
+  if (attempts.length === 0) {
+    const names = candidates.map(({ provider, model }) => `${displayName(provider)}/${model}`);
+    return {
+      status: 503,
+      message:
+        `This request needs ${describeNeeds(needs)}, and none of the ${candidates.length} ` +
+        `configured model(s) support it: ${names.join(", ")}. ` +
+        `Add a model that does, or re-run detection in "opencc init".`,
+    };
+  }
+
+  if (attempts.length < candidates.length) {
+    console.log(
+      `[opencc]   needs ${describeNeeds(needs)} — ${candidates.length - attempts.length} of ${candidates.length} model(s) skipped as unsupported`,
+    );
   }
 
   // With streaming off we ask upstream for the whole reply at once, then

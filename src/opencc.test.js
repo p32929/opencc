@@ -477,3 +477,83 @@ test("still maps a length finish_reason to max_tokens", () => {
   );
   assert.equal(out.stop_reason, "max_tokens");
 });
+
+// --- capability-aware routing ---------------------------------------------
+
+import { requirementsOf, canServe } from "./capabilities.js";
+
+test("works out what a request needs", () => {
+  assert.deepEqual(requirementsOf({ messages: [{ role: "user", content: "hi" }] }), {
+    tools: false, vision: false, documents: false,
+  });
+
+  assert.equal(requirementsOf({ messages: [], tools: [{ name: "Read" }] }).tools, true);
+  assert.equal(requirementsOf({ messages: [], tools: [] }).tools, false, "an empty array needs nothing");
+
+  const withImage = {
+    messages: [{ role: "user", content: [
+      { type: "text", text: "what is this" },
+      { type: "image", source: { media_type: "image/png", data: "x" } },
+    ] }],
+  };
+  assert.equal(requirementsOf(withImage).vision, true);
+
+  const withPdf = {
+    messages: [{ role: "user", content: [{ type: "document", source: { data: "x" } }] }],
+  };
+  assert.equal(requirementsOf(withPdf).documents, true);
+});
+
+test("an undetected model is allowed through, a known-incapable one is not", () => {
+  const needsVision = { tools: false, vision: true, documents: false };
+  assert.equal(canServe(null, needsVision), true, "unknown means untested, not incapable");
+  assert.equal(canServe({ vision: undefined }, needsVision), true);
+  assert.equal(canServe({ vision: false }, needsVision), false);
+  assert.equal(canServe({ vision: true }, needsVision), true);
+  assert.equal(canServe({ vision: false }, { tools: false, vision: false, documents: false }), true,
+    "no image in the request, so vision doesn't matter");
+});
+
+test("an image request skips models known to lack vision", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  const seen = stubFetch([200]);
+  const providers = [
+    { baseUrl: "https://blind.test/v1", apiKey: "k", bigModels: ["text-only"], smallModels: [], name: "blind" },
+    { baseUrl: "https://seeing.test/v1", apiKey: "k", bigModels: ["vision-model"], smallModels: [], name: "seeing" },
+  ];
+  const caps = {
+    "https://blind.test/v1|text-only": { vision: false, tools: true },
+    "https://seeing.test/v1|vision-model": { vision: true, tools: true },
+  };
+  const imageReq = {
+    ...REQ,
+    messages: [{ role: "user", content: [{ type: "image", source: { media_type: "image/png", data: "x" } }] }],
+  };
+
+  const result = await callUpstream(imageReq, providers, true, caps);
+  assert.equal(result.provider.name, "seeing");
+  assert.equal(seen.length, 1, "the blind model is never called");
+});
+
+test("nothing capable gives a 503 naming what was needed", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  const seen = stubFetch([]);
+  const providers = [
+    { baseUrl: "https://blind.test/v1", apiKey: "k", bigModels: ["text-only"], smallModels: [], name: "blind" },
+  ];
+  const caps = { "https://blind.test/v1|text-only": { vision: false } };
+  const imageReq = {
+    ...REQ,
+    messages: [{ role: "user", content: [{ type: "image", source: { media_type: "image/png", data: "x" } }] }],
+  };
+
+  const result = await callUpstream(imageReq, providers, true, caps);
+  assert.equal(result.status, 503);
+  assert.match(result.message, /needs images/);
+  assert.match(result.message, /blind\/text-only/);
+  assert.equal(seen.length, 0, "no request is sent at all");
+});

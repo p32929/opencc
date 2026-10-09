@@ -40,26 +40,40 @@ Claude Code's own flags pass straight through: `opencc claude --continue`.
 
 ## opencc init
 
-```
-  opencc — providers
-  Tried top to bottom — if one fails, the next takes over.
+Opens an admin panel in your browser. Add providers, reorder them, toggle them
+on and off, test a model, and see what each one can actually do.
 
-❯ 1. work openrouter
-    Big (Opus, Sonnet):  openai/gpt-4o, openai/gpt-5
-    Small (Haiku):       openai/gpt-4o-mini
-  2. my ollama
-    Big (Opus, Sonnet):  llama3
-    Small (Haiku):       llama3  (same as big)
-  ────────────────────
-  + Add provider      tried after the ones above
-  Port                3000
-  Streaming           on  replies arrive as they're generated
-  Test all providers  sends "Hi" to each model
-  ────────────────────
-  Save and exit
+![The opencc admin panel](docs/screenshots/panel.png)
 
-  ↑↓ move · enter open · u/d reorder · space on/off · x delete · a add · q save
+Everything saves as you change it. The panel binds to localhost on a random
+free port — it edits your API keys, so it's never reachable from your network
+and never collides with the proxy.
+
+Each provider takes:
+
+- **Base URL** — e.g. `https://openrouter.ai/api/v1`
+- **API key** — leave empty for a backend that needs none, like a local Ollama
+- **Big models** — the ones that do the real work, comma-separated, tried left
+  to right
+- **Small models** — cheaper models for Claude Code's quick background tasks.
+  Empty reuses the Big ones
+- **Name** — optional; defaults to the host
+
+**Disable** parks a provider that's out of credits — it keeps its key and
+position and is just skipped. **Delete** throws the key away. **Retry** is per
+provider and off by default. **Streaming** off makes opencc wait for the whole
+reply before passing it on, worth trying if a backend's SSE is flaky.
+
+### Terminal menu
+
+```bash
+opencc init --tui
 ```
+
+The arrow-key menu, for a machine with no browser. Both edit the same config,
+so you can switch freely.
+
+![The terminal menu](docs/screenshots/init-providers.png)
 
 | Key | Does |
 |---|---|
@@ -72,19 +86,31 @@ Claude Code's own flags pass straight through: `opencc claude --continue`.
 | `t` | test every model · `p` change port |
 | `q` `esc` | save and quit, or back out of anything |
 
-**Big** models do the real work, **Small** models handle Claude Code's cheap
-background calls (naming a conversation, classification). Comma-separate
-either to get a priority list, tried left to right. Changes save immediately.
+## Capabilities and routing
 
-![Editing a provider](docs/screenshots/init-provider-detail.png)
+Models differ: some take images, some do tool calling, some do neither. Rather
+than discover that as a mid-session failure, opencc works out what each request
+needs — `tools` at the top level, `image` blocks in the messages — and only
+tries models that can serve it.
 
-- **Disable** (`space`) parks a provider that's out of credits — keeps its
-  key and position, just skips it. Delete throws the key away.
-- **Test** (`t`) sends one real "Hi" to every model, six at a time.
-- **Streaming** off makes opencc wait for the full reply before passing it on.
-  Worth trying if a backend's SSE is flaky.
+Press **Detect** and it resolves each model two ways:
 
-![Testing every model](docs/screenshots/init-testing.png)
+- **From the provider's catalogue** where one is published. OpenRouter reports
+  `architecture.input_modalities` and `supported_parameters`, so its models
+  resolve instantly and for free, context length included.
+- **By probing** otherwise, since most providers publish nothing but a model
+  id. opencc sends a request with the feature and, if that's rejected, the same
+  request without it — only if the plain one succeeds has the feature been
+  shown to be the cause. Matching on error text doesn't work: z.ai rejects an
+  image with `messages.content.type is invalid, allowed values: ['text']`,
+  which mentions neither images nor vision.
+
+A model nobody has detected yet is tried anyway — unknown means untested, not
+incapable, so adding a provider never silently takes it out of rotation. You
+can set capabilities by hand too, which wins over detection.
+
+If a request needs something none of your models support, you get a 503 saying
+so and naming them, instead of watching every model fail in turn.
 
 ## Fallback
 
@@ -141,6 +167,10 @@ choice starts 429ing, the next one on the same provider often still works.
 | `PROVIDER_RETRY` | `true` to retry the same model once before moving on (default off) |
 | `PORT` `STREAMING` | global; `STREAMING=off` disables streaming |
 
+Detected capabilities are cached in `~/.opencc/capabilities.json`, keyed by
+base URL and model. It's derived data — delete it and the next Detect rebuilds
+it — which is why it isn't in the `.env`.
+
 `npm run server` runs the proxy alone; `npm test` runs the suite. Configs from
 older single-provider versions still work — they read as provider 1.
 
@@ -196,6 +226,12 @@ older single-provider versions still work — they read as provider 1.
   failure moves on immediately instead of doubling the wait.
 - The request log shows the incoming size (`tools=`, `chars=`), which is what
   you need when a backend complains about length.
+- `opencc init` opens a browser admin panel; `opencc init --tui` keeps the
+  terminal menu.
+- Capability-aware routing: opencc reads what a request needs and skips models
+  that can't serve it, instead of failing through them. Capabilities come from
+  a provider's published catalogue where there is one, and from differential
+  probing otherwise.
 
 ### 1.0.2 — 2026-08-28
 
