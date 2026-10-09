@@ -18,10 +18,9 @@ if (subcommand === "init") {
   const flag = args.indexOf("--port");
   const given = flag !== -1 ? Number(args[flag + 1]) : undefined;
   await runPanel(Number.isInteger(given) ? { port: given, ask: false } : {});
-  // The listening server keeps this process alive; Ctrl+C stops it.
-}
-
-if (subcommand === "claude") {
+  // The panel's own listening server keeps this process alive; Ctrl+C stops
+  // it. Nothing else runs — init edits config, it doesn't serve the proxy.
+} else if (subcommand === "claude") {
   await runClaude(args.slice(1));
 } else {
   await runServer();
