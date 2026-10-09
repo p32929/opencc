@@ -237,16 +237,43 @@ function capChip(caps, field, labelText) {
   return '<span class="chip ' + cls + '">' + labelText + " " + mark + "</span>";
 }
 
-function modelRow(p, index, model, tier) {
+// One row per model, in the order it will be tried. Order is the whole point
+// of these lists, so it's edited with buttons rather than by retyping a
+// comma-separated string.
+function modelRow(p, index, field, model, position, total) {
   const caps = state.capabilities[capKey(p.baseUrl, model)];
+  const btn = (act, text, disabled) =>
+    '<button class="tiny" data-act="' + act + '" data-i="' + index + '" data-field="' + field +
+    '" data-pos="' + position + '"' + (disabled ? " disabled" : "") + ">" + text + "</button>";
+
   return '<div class="m">' +
-    '<span class="chip tier">' + tier + "</span>" +
+    '<span class="pos">' + (position + 1) + "</span>" +
     "<code>" + esc(model) + "</code>" +
     capChip(caps, "tools", "tools") +
     capChip(caps, "vision", "image") +
     (caps && caps.contextLength ? '<span class="chip tier">' + caps.contextLength.toLocaleString() + " ctx</span>" : "") +
+    btn("mup", "↑", position === 0) +
+    btn("mdown", "↓", position === total - 1) +
     '<button class="tiny" data-act="test" data-i="' + index + '" data-m="' + esc(model) + '">Test</button>' +
     '<button class="tiny" data-act="cap" data-i="' + index + '" data-m="' + esc(model) + '">Set</button>' +
+    '<button class="tiny danger" data-act="mdel" data-i="' + index + '" data-field="' + field +
+      '" data-pos="' + position + '">✕</button>' +
+    "</div>";
+}
+
+function modelList(p, index, field, label, note) {
+  const models = p[field];
+  const rows = models.length
+    ? models.map((m, pos) => modelRow(p, index, field, m, pos, models.length)).join("")
+    : '<div class="m"><span class="chip unk">empty</span><code>' + esc(note) + "</code></div>";
+
+  return "<label>" + esc(label) + "</label>" +
+    '<div class="models">' + rows +
+      '<div class="m">' +
+        '<input type="text" list="cat' + index + '" placeholder="add a model, then press enter" ' +
+               'data-add="' + index + '" data-field="' + field + '" style="flex:1;min-width:220px">' +
+        '<button class="tiny" data-act="madd" data-i="' + index + '" data-field="' + field + '">Add</button>' +
+      "</div>" +
     "</div>";
 }
 
@@ -272,7 +299,6 @@ function render() {
 
   queueMicrotask(fillCatalogues);
   $("list").innerHTML = state.providers.map((p, i) => {
-    const models = [...new Set([...p.bigModels, ...p.smallModels])];
     return '<div class="card' + (p.disabled ? " off" : "") + '">' +
       '<div class="card-head">' +
         '<span class="pos">' + (i + 1) + "</span>" +
@@ -287,12 +313,10 @@ function render() {
       '<input type="text" data-f="baseUrl" data-i="' + i + '" value="' + esc(p.baseUrl) + '" placeholder="https://openrouter.ai/api/v1">' +
       "<label>API key — leave empty if the backend needs none</label>" +
       '<input type="password" data-f="apiKey" data-i="' + i + '" value="' + esc(p.apiKey) + '">' +
-      '<div class="row">' +
-        "<div><label>Big models (Opus, Sonnet) — comma separated, tried in order</label>" +
-        '<input type="text" data-f="bigModels" data-i="' + i + '" value="' + esc(p.bigModels.join(", ")) + '"></div>' +
-        "<div><label>Small models (Haiku) — empty reuses the big ones</label>" +
-        '<input type="text" data-f="smallModels" data-i="' + i + '" value="' + esc(p.smallModels.join(", ")) + '"></div>' +
-      "</div>" +
+      modelList(p, i, "bigModels", "Big models (Opus, Sonnet) — tried top to bottom",
+                "no big models yet — this provider will be skipped") +
+      modelList(p, i, "smallModels", "Small models (Haiku) — empty reuses the big ones",
+                "falls back to the big models above") +
       '<div class="models">' +
         '<div class="m">' +
           '<span class="chip tier">any</span>' +
@@ -303,9 +327,6 @@ function render() {
           '<button class="tiny" data-act="testpick" data-i="' + i + '">Test</button>' +
         "</div>" +
       "</div>" +
-      (models.length ? '<div class="models">' + models.map((m) =>
-          modelRow(p, i, m, p.bigModels.includes(m) ? (p.smallModels.includes(m) ? "both" : "big") : "small")
-        ).join("") + "</div>" : "") +
       "</div>";
   }).join("");
 }
@@ -330,11 +351,19 @@ async function fillCatalogues() {
   }
 }
 
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  const field = e.target.dataset.field;
+  const i = e.target.dataset.add;
+  if (field === undefined || i === undefined) return;
+  e.preventDefault();
+  document.querySelector('button[data-act="madd"][data-i="' + i + '"][data-field="' + field + '"]')?.click();
+});
+
 document.addEventListener("change", async (e) => {
   const field = e.target.dataset.f;
   if (field) {
-    const p = state.providers[Number(e.target.dataset.i)];
-    p[field] = field.endsWith("Models") ? parseModels(e.target.value) : e.target.value;
+    state.providers[Number(e.target.dataset.i)][field] = e.target.value;
     await save();
     return;
   }
@@ -402,6 +431,35 @@ document.addEventListener("click", async (e) => {
   if (act === "del") {
     if (!confirm("Delete provider " + (i + 1) + "? Its API key goes with it — Disable keeps it.")) return;
     state.providers.splice(i, 1);
+    await save();
+    return;
+  }
+
+  // --- model list order and membership -----------------------------------
+  if (act === "mup" || act === "mdown" || act === "mdel" || act === "madd") {
+    const field = btn.dataset.field;
+    const list = state.providers[i][field];
+
+    if (act === "madd") {
+      const input = document.querySelector('[data-add="' + i + '"][data-field="' + field + '"]');
+      const model = (input && input.value || "").trim();
+      if (!model) { toast("Type or pick a model first"); return; }
+      if (list.includes(model)) { toast(model + " is already in that list"); return; }
+      list.push(model);
+      await save();
+      return;
+    }
+
+    if (act === "mdel") {
+      list.splice(Number(btn.dataset.pos), 1);
+      await save();
+      return;
+    }
+
+    const from = Number(btn.dataset.pos);
+    const to = act === "mup" ? from - 1 : from + 1;
+    if (to < 0 || to >= list.length) return;
+    [list[from], list[to]] = [list[to], list[from]];
     await save();
     return;
   }

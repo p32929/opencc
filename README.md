@@ -58,10 +58,14 @@ Each provider takes:
 
 - **Base URL** — e.g. `https://openrouter.ai/api/v1`
 - **API key** — leave empty for a backend that needs none, like a local Ollama
-- **Big models** — the ones that do the real work, comma-separated, tried left
-  to right
+- **Big models** — the ones that do the real work, tried top to bottom
 - **Small models** — cheaper models for Claude Code's quick background tasks.
   Empty reuses the Big ones
+
+Each list is a set of ordered rows with **↑ ↓** to change priority, **✕** to
+remove, and a box to add one (autocompleted from that provider's catalogue).
+Capabilities and context length show on the row, so the model you're about to
+promote tells you what it can do.
 - **Name** — optional; defaults to the host
 
 **Disable** parks a provider that's out of credits — it keeps its key and
