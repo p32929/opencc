@@ -152,10 +152,14 @@ export function toOpenAIRequest(anthropicReq, model, baseUrl, stream = undefined
     messages.push(...convertMessage(msg, baseUrl));
   }
 
+  // max_tokens is deliberately not forwarded. Anthropic requires it so Claude
+  // Code always sends one (128000 as of Opus 5.5), but it's optional for
+  // OpenAI-compatible backends and several reject a budget larger than their
+  // own cap rather than just capping it — z.ai allows at most 98304. Leaving
+  // it out lets each provider apply its own limit.
   const request = {
     model,
     messages,
-    max_tokens: anthropicReq.max_tokens,
     temperature: anthropicReq.temperature,
     top_p: anthropicReq.top_p,
     stop: anthropicReq.stop_sequences,

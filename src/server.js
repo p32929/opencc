@@ -56,14 +56,28 @@ function sendJson(res, status, data) {
 // 5xx means the provider broke, not that the request was wrong, so it's worth
 // one quick retry before giving up on a model. 429 is deliberately excluded —
 // that needs backoff, not an immediate retry.
-const RETRYABLE = new Set([500, 502, 503, 504]);
+// Only for providers with retry switched on, and only for failures that could
+// plausibly go the other way a moment later: a 5xx, a dropped connection, or a
+// 429 (the key rotator in front of some providers may land on a fresh key).
+// A 400/401/403/404 is settled — retrying it just wastes the budget.
+const NOT_WORTH_RETRYING = new Set([400, 401, 403, 404, 413, 422]);
 const RETRY_DELAY_MS = 400;
-const UPSTREAM_TIMEOUT_MS = 600000;
+
+// Per attempt, and for the whole walk. Without the deadline a bad run could
+// spend 13 models x 2 tries x the per-attempt timeout before answering, which
+// reads as a hang rather than a failure — so stop trying and report instead.
+const UPSTREAM_TIMEOUT_MS = 120000;
+const TOTAL_DEADLINE_MS = 300000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function callUpstream(anthropicReq, providers = config.providers, streaming = config.streaming) {
+export async function callUpstream(
+  anthropicReq,
+  providers = config.providers,
+  streaming = config.streaming,
+) {
   const failures = [];
+  const deadline = Date.now() + TOTAL_DEADLINE_MS;
   let lastStatus = 502;
 
   // Flattened up front so the log can show "attempt 3/7" rather than a
@@ -88,6 +102,13 @@ export async function callUpstream(anthropicReq, providers = config.providers, s
   for (const [i, { provider, model }] of attempts.entries()) {
     const label = `attempt ${i + 1}/${attempts.length} (${displayName(provider)}, ${model})`;
 
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      console.error(`[opencc]   giving up after ${TOTAL_DEADLINE_MS / 1000}s, ${attempts.length - i} attempt(s) untried`);
+      failures.push(`stopped after ${TOTAL_DEADLINE_MS / 1000}s with ${attempts.length - i} attempt(s) untried`);
+      break;
+    }
+
     const headers = { "Content-Type": "application/json" };
     // Omitted entirely when blank — a local backend may reject an empty bearer.
     if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
@@ -100,8 +121,10 @@ export async function callUpstream(anthropicReq, providers = config.providers, s
     let networkError;
     let errorText;
 
-    // Two passes at most: the second only happens for a transient failure.
-    for (let attempt = 0; attempt < 2; attempt++) {
+    // One pass unless this provider has retry switched on, and even then the
+    // second pass only happens for a failure worth retrying.
+    const maxTries = provider.retry ? 2 : 1;
+    for (let attempt = 0; attempt < maxTries; attempt++) {
       if (attempt > 0) await sleep(RETRY_DELAY_MS);
 
       upstream = undefined;
@@ -113,7 +136,7 @@ export async function callUpstream(anthropicReq, providers = config.providers, s
           method: "POST",
           headers,
           body,
-          signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+          signal: AbortSignal.timeout(Math.min(UPSTREAM_TIMEOUT_MS, Math.max(1000, deadline - Date.now()))),
         });
       } catch (err) {
         // Unreachable host, DNS failure, connection reset, timeout, ...
@@ -123,16 +146,13 @@ export async function callUpstream(anthropicReq, providers = config.providers, s
       if (upstream?.ok) break;
 
       if (!networkError) errorText = await upstream.text();
-      // Only a 5xx is worth retrying. A refused connection or DNS failure
-      // won't heal in 400ms, and retrying just doubles a dead provider's
-      // latency before we move on.
-      const transient = !networkError && RETRYABLE.has(upstream.status);
+      const transient = networkError ? true : !NOT_WORTH_RETRYING.has(upstream.status);
 
       const reason = networkError
         ? `unreachable: ${networkError.message}`
         : `failed ${upstream.status}: ${errorText.slice(0, 300)}`;
 
-      if (transient && attempt === 0) {
+      if (transient && attempt + 1 < maxTries) {
         console.error(`[opencc]   ${label} ${reason} — retrying once`);
         continue;
       }
@@ -172,6 +192,14 @@ async function handleMessages(anthropicReq, res) {
     return;
   }
 
+  // Size of the incoming request, which is what you want when a backend
+  // complains about length. max_tokens is shown as asked for, not forwarded.
+  console.log(
+    `[opencc]   model=${anthropicReq.model} stream=${Boolean(anthropicReq.stream)}` +
+      ` asked_max_tokens=${anthropicReq.max_tokens} (not forwarded)` +
+      ` tools=${(anthropicReq.tools ?? []).length} chars=${JSON.stringify(anthropicReq).length}`,
+  );
+
   const result = await callUpstream(anthropicReq, live.providers, live.streaming);
 
   if (!result.upstream) {
@@ -208,7 +236,6 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && path === "/v1/messages") {
       const body = await readJsonBody(req);
-      console.log(`[opencc]   model=${body.model} stream=${Boolean(body.stream)}`);
       await handleMessages(body, res);
       return;
     }

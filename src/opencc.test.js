@@ -349,14 +349,14 @@ test("a finished message re-streams as well-formed Anthropic SSE", () => {
 
 // --- one retry on a transient upstream failure ----------------------------
 
-test("retries a 5xx once on the same model before moving on", async (t) => {
+test("retries a 5xx once on the same model when retry is on", async (t) => {
   const realFetch = globalThis.fetch;
   t.after(() => (globalThis.fetch = realFetch));
 
   const seen = stubFetch([503, 200]);
 
   const result = await callUpstream(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", retry: true },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
 
@@ -372,7 +372,7 @@ test("gives up on a model after two 5xx and moves to the next", async (t) => {
   const seen = stubFetch([500, 500, 200]);
 
   const result = await callUpstream(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", retry: true },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
 
@@ -380,20 +380,49 @@ test("gives up on a model after two 5xx and moves to the next", async (t) => {
   assert.deepEqual(seen.map((s) => s.body.model), ["m1", "m1", "m2"]);
 });
 
-test("does not retry a 429, and does not retry an unreachable host", async (t) => {
+test("with retry on, a 429 and an unreachable host are both retried", async (t) => {
   const realFetch = globalThis.fetch;
   t.after(() => (globalThis.fetch = realFetch));
 
-  const seen = stubFetch([429, "connect ECONNREFUSED", 200]);
+  const seen = stubFetch([429, 200]);
+
+  const result = await callUpstream(REQ, [
+    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", retry: true },
+    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
+  ]);
+
+  assert.equal(result.provider.name, "one", "the retry landed on a fresh key");
+  assert.deepEqual(seen.map((s) => s.body.model), ["m1", "m1"]);
+});
+
+test("retry is off by default — one try per model", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  const seen = stubFetch([503, 200]);
 
   const result = await callUpstream(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
-    { baseUrl: "https://three.test/v1", apiKey: "k", bigModels: ["m3"], smallModels: [], name: "three" },
   ]);
 
-  assert.equal(result.provider.name, "three");
-  assert.equal(seen.length, 3, "one attempt each — neither case is retried");
+  assert.equal(result.provider.name, "two", "a 5xx moves straight on");
+  assert.deepEqual(seen.map((s) => s.body.model), ["m1", "m2"], "m1 tried once only");
+});
+
+test("a settled 4xx is never retried, even with retry on", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  const seen = stubFetch([400, 200]);
+
+  const result = await callUpstream(REQ, [
+    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", retry: true },
+    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
+  ]);
+
+  assert.equal(result.provider.name, "two");
+  assert.deepEqual(seen.map((s) => s.body.model), ["m1", "m2"], "no point retrying a 400");
 });
 
 // --- never an empty content array -----------------------------------------
@@ -421,4 +450,30 @@ test("streaming: a reply that produced nothing still emits one text block", asyn
   const body = res.chunks.join("");
   assert.match(body, /"content_block_start"[\s\S]*?"type":"text"/);
   assert.match(body, /event: content_block_stop/);
+});
+
+// --- max_tokens is not forwarded --------------------------------------------
+// Anthropic requires it so Claude Code always sends one (128000 as of Opus
+// 5.5), but it's optional upstream and z.ai rejects anything over 98304.
+
+test("does not forward max_tokens, whatever the client asked for", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  const seen = stubFetch([200, 200]);
+  const provider = { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" };
+
+  await callUpstream({ ...REQ, max_tokens: 128000 }, [provider]);
+  assert.equal("max_tokens" in seen[0].body, false, "absent from the upstream request");
+
+  await callUpstream({ ...REQ, max_tokens: 64 }, [provider]);
+  assert.equal("max_tokens" in seen[1].body, false, "absent even for a small ask");
+});
+
+test("still maps a length finish_reason to max_tokens", () => {
+  const out = toAnthropicResponse(
+    { choices: [{ finish_reason: "length", message: { content: "cut off" } }], usage: {} },
+    "claude-sonnet-4-5",
+  );
+  assert.equal(out.stop_reason, "max_tokens");
 });

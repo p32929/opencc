@@ -103,7 +103,17 @@ choice starts 429ing, the next one on the same provider often still works.
 
 ![The startup banner](docs/screenshots/server-banner.png)
 
-- A 5xx is retried once on the same model. A 429 isn't — that needs backoff.
+- **Retry same model** is per provider and **off by default**: a failure goes
+  straight to the next model. Turn it on for a provider whose failures tend to
+  be momentary and it gets one more try first. A settled 4xx (400/401/403/404)
+  is never retried either way — there's nothing to gain.
+- `max_tokens` is **not** forwarded. Anthropic requires it so Claude Code
+  always sends one (128000 as of Opus 5.5), but it's optional upstream and
+  several backends reject a budget bigger than their own cap instead of just
+  capping it — z.ai allows at most 98304. Leaving it out lets each provider
+  decide how long a reply to produce.
+- The walk is bounded: 2 minutes per attempt, 5 minutes overall. Past that it
+  returns the error instead of quietly working through the rest of the list.
 - Failover only works *before* a reply starts arriving. If a provider dies
   mid-stream that one message fails; retry and the chain picks another.
 - Config is re-read every request, so `opencc init` changes apply without
@@ -125,6 +135,7 @@ choice starts 429ing, the next one on the same provider often still works.
 | `SMALL_MODEL` | comma-separated priority list, background work |
 | `PROVIDER_NAME` | optional label; defaults to the host |
 | `PROVIDER_DISABLED` | `true` to park it |
+| `PROVIDER_RETRY` | `true` to retry the same model once before moving on (default off) |
 | `PORT` `STREAMING` | global; `STREAMING=off` disables streaming |
 
 `npm run server` runs the proxy alone; `npm test` runs the suite. Configs from
@@ -171,6 +182,17 @@ older single-provider versions still work — they read as provider 1.
 - Replies are never an empty `content` array. Reasoning models can spend their
   whole output budget thinking and return nothing visible.
 - The API key is optional, for local backends that don't want one.
+- `max_tokens` is no longer forwarded upstream. Claude Code has to send one
+  (Anthropic requires it) and asks for 128000, which z.ai rejects outright —
+  its cap is 98304. It's optional for OpenAI-compatible backends, so each
+  provider now decides how long a reply to produce.
+- Attempts are bounded: 2 minutes each, 5 minutes for the whole walk. A bad
+  run used to be able to sit on a 10-minute timeout per attempt, which looked
+  like a hang rather than a failure.
+- Retrying a failed model is now opt-in per provider and off by default, so a
+  failure moves on immediately instead of doubling the wait.
+- The request log shows the incoming size (`tools=`, `chars=`), which is what
+  you need when a backend complains about length.
 
 ### 1.0.2 — 2026-08-28
 

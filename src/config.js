@@ -66,6 +66,9 @@ export function providersFromEnv(values) {
         // Parked rather than deleted: it keeps its place and its key, and is
         // skipped when picking a provider to call.
         disabled: values[`PROVIDER_DISABLED${suffix}`] === "true",
+        // Off by default: one try per model, then move on. Turn it on for a
+        // provider whose failures tend to be momentary.
+        retry: values[`PROVIDER_RETRY${suffix}`] === "true",
         baseUrl,
         // Optional: a local backend (Ollama, llama.cpp) usually wants no key,
         // and we omit the Authorization header entirely when it's blank.
