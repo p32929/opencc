@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { providersFromEnv, displayName } from "./config.js";
+import { pickModels } from "./translate.js";
 import { callUpstream } from "./server.js";
 
 test("reads an old single-provider config as provider 1", () => {
@@ -678,4 +679,45 @@ test("a flaky rejection does not become a negative", async (t) => {
   const seen = stubStatuses([400, 200, 200]);
   assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), true);
   assert.equal(seen.length, 3);
+});
+
+// --- parking a single model ------------------------------------------------
+
+test("a disabled model keeps its place but never gets a turn", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  const seen = stubFetch([200]);
+  const result = await callUpstream(REQ, [{
+    baseUrl: "https://one.test/v1", apiKey: "k", name: "one",
+    bigModels: ["m1", "m2", "m3"], smallModels: [],
+    disabledModels: ["m1"],
+  }]);
+
+  assert.equal(result.model, "m2", "m1 is skipped, order otherwise kept");
+  assert.deepEqual(seen.map((s) => s.body.model), ["m2"]);
+});
+
+test("parking applies to both tiers, and an absent list changes nothing", () => {
+  const provider = {
+    baseUrl: "https://one.test/v1", bigModels: ["big-1", "shared"], smallModels: ["shared", "small-1"],
+    disabledModels: ["shared"],
+  };
+  assert.deepEqual(pickModels("claude-sonnet-4-5", provider), ["big-1"]);
+  assert.deepEqual(pickModels("claude-3-5-haiku", provider), ["small-1"]);
+
+  // providers written by an older version have no such field
+  const old = { baseUrl: "x", bigModels: ["a", "b"], smallModels: [] };
+  assert.deepEqual(pickModels("claude-sonnet-4-5", old), ["a", "b"]);
+});
+
+test("PROVIDER_MODELS_DISABLED round-trips through the config", () => {
+  const [p] = providersFromEnv({
+    OPENAI_BASE_URL: "https://one.test/v1",
+    BIG_MODEL: "a, b, c",
+    PROVIDER_MODELS_DISABLED: "b",
+  });
+  assert.deepEqual(p.bigModels, ["a", "b", "c"], "the list keeps every model");
+  assert.deepEqual(p.disabledModels, ["b"]);
+  assert.deepEqual(pickModels("claude-sonnet-4-5", p), ["a", "c"]);
 });

@@ -8,7 +8,10 @@ import { generateId } from "./ids.js";
 // provider at call time, returning the whole list in priority order.
 export function pickModels(requestedModel = "", provider) {
   const small = provider.smallModels.length ? provider.smallModels : provider.bigModels;
-  return requestedModel.toLowerCase().includes("haiku") ? small : provider.bigModels;
+  const chosen = requestedModel.toLowerCase().includes("haiku") ? small : provider.bigModels;
+  // Parked models stay in the configured list — they just never get a turn.
+  const off = provider.disabledModels ?? [];
+  return off.length ? chosen.filter((model) => !off.includes(model)) : chosen;
 }
 
 function systemToOpenAI(system) {

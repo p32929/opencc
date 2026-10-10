@@ -72,6 +72,10 @@ export function providersFromEnv(values) {
         apiKey: values[`OPENAI_API_KEY${suffix}`] || "",
         bigModels: modelList(values[`BIG_MODEL${suffix}`]),
         smallModels: modelList(values[`SMALL_MODEL${suffix}`]),
+        // Parked models keep their place in the lists above and are skipped
+        // when picking one to call. Per provider rather than per tier: "this
+        // model, from this provider" is the thing you want to switch off.
+        disabledModels: modelList(values[`PROVIDER_MODELS_DISABLED${suffix}`]),
       };
     })
     .filter((provider) => provider.baseUrl && provider.bigModels.length > 0);

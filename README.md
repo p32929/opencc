@@ -62,8 +62,9 @@ Each provider takes:
 - **Small models** — cheaper models for Claude Code's quick background tasks.
   Empty reuses the Big ones
 
-Each list is a set of ordered rows with **↑ ↓** to change priority, **✕** to
-remove, and a box to add one (autocompleted from that provider's catalogue).
+Each list is a set of ordered rows with **↑ ↓** to change priority, **Off** to
+park a model without losing its place, **✕** to remove, and a box to add one
+(autocompleted from that provider's catalogue).
 Capabilities and context length show on the row, so the model you're about to
 promote tells you what it can do.
 - **Name** — optional; defaults to the host
@@ -175,6 +176,7 @@ choice starts 429ing, the next one on the same provider often still works.
 | `SMALL_MODEL` | comma-separated priority list, background work |
 | `PROVIDER_NAME` | optional label; defaults to the host |
 | `PROVIDER_DISABLED` | `true` to park it |
+| `PROVIDER_MODELS_DISABLED` | models to park, comma separated; they keep their place |
 | `PORT` `STREAMING` | global; `STREAMING=off` disables streaming |
 
 Detected capabilities are cached in `~/.opencc/capabilities.json`, keyed by

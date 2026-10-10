@@ -216,7 +216,7 @@ async function save() {
     providers: state.providers.map((p) => ({
       name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey,
       bigModels: p.bigModels, smallModels: p.smallModels,
-      disabled: p.disabled,
+      disabled: p.disabled, disabledModels: p.disabledModels || [],
     })),
     port: state.port,
     streaming: state.streaming,
@@ -242,18 +242,22 @@ function capChip(caps, field, labelText) {
 // comma-separated string.
 function modelRow(p, index, field, model, position, total) {
   const caps = state.capabilities[capKey(p.baseUrl, model)];
+  const off = (p.disabledModels || []).includes(model);
   const btn = (act, text, disabled) =>
     '<button class="tiny" data-act="' + act + '" data-i="' + index + '" data-field="' + field +
     '" data-pos="' + position + '"' + (disabled ? " disabled" : "") + ">" + text + "</button>";
 
-  return '<div class="m">' +
+  return '<div class="m"' + (off ? ' style="opacity:.5"' : "") + ">" +
     '<span class="pos">' + (position + 1) + "</span>" +
     "<code>" + esc(model) + "</code>" +
+    (off ? '<span class="chip no">off</span>' : "") +
     capChip(caps, "tools", "tools") +
     capChip(caps, "vision", "image") +
     (caps && caps.contextLength ? '<span class="chip tier">' + caps.contextLength.toLocaleString() + " ctx</span>" : "") +
     btn("mup", "↑", position === 0) +
     btn("mdown", "↓", position === total - 1) +
+    '<button class="tiny" data-act="moff" data-i="' + index + '" data-m="' + esc(model) + '">' +
+      (off ? "On" : "Off") + "</button>" +
     '<button class="tiny" data-act="test" data-i="' + index + '" data-m="' + esc(model) + '">Test</button>' +
     '<button class="tiny" data-act="cap" data-i="' + index + '" data-m="' + esc(model) + '">Set</button>' +
     '<button class="tiny danger" data-act="mdel" data-i="' + index + '" data-field="' + field +
@@ -380,7 +384,7 @@ document.addEventListener("click", async (e) => {
   const act = btn.dataset.act;
 
   if (btn.id === "add") {
-    state.providers.push({ name: "", baseUrl: "", apiKey: "", bigModels: [], smallModels: [], disabled: false });
+    state.providers.push({ name: "", baseUrl: "", apiKey: "", bigModels: [], smallModels: [], disabled: false, disabledModels: [] });
     render();
     return;
   }
@@ -435,6 +439,17 @@ document.addEventListener("click", async (e) => {
     return;
   }
 
+  if (act === "moff") {
+    const model = btn.dataset.m;
+    const p = state.providers[i];
+    p.disabledModels = p.disabledModels || [];
+    p.disabledModels = p.disabledModels.includes(model)
+      ? p.disabledModels.filter((m) => m !== model)
+      : [...p.disabledModels, model];
+    await save();
+    return;
+  }
+
   // --- model list order and membership -----------------------------------
   if (act === "mup" || act === "mdown" || act === "mdel" || act === "madd") {
     const field = btn.dataset.field;
@@ -451,7 +466,13 @@ document.addEventListener("click", async (e) => {
     }
 
     if (act === "mdel") {
-      list.splice(Number(btn.dataset.pos), 1);
+      const [gone] = list.splice(Number(btn.dataset.pos), 1);
+      const p = state.providers[i];
+      // Don't leave a parked entry behind for a model that's no longer listed.
+      const stillListed = [...p.bigModels, ...p.smallModels].includes(gone);
+      if (!stillListed && p.disabledModels) {
+        p.disabledModels = p.disabledModels.filter((m) => m !== gone);
+      }
       await save();
       return;
     }
