@@ -50,6 +50,13 @@ test("names a provider by its PROVIDER_NAME, falling back to the host", () => {
   assert.equal(displayName(providers[1]), "openrouter.ai", "an unnamed one falls back to its host");
 });
 
+// callUpstream reads and writes the shared stats file by default, which would
+// both pollute the real one and make these tests depend on each other's
+// history. Every call here goes through this instead.
+const NO_STATS = { lookup: () => null, record: () => {} };
+const up = (req, providers, streaming = true, caps = null) =>
+  callUpstream(req, providers, streaming, caps, NO_STATS);
+
 const REQ = { model: "claude-sonnet-4", messages: [{ role: "user", content: "hi" }], max_tokens: 16 };
 
 function stubFetch(responders) {
@@ -71,7 +78,7 @@ test("falls through exhausted providers to the first one that works", async (t) 
   // Neither status is retryable, so each is one attempt.
   const seen = stubFetch([429, "connect ECONNREFUSED", 200]);
 
-  const result = await callUpstream(REQ, [
+  const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k1", bigModels: ["big-1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k2", bigModels: ["big-2"], smallModels: [], name: "two" },
     { baseUrl: "https://three.test/v1", apiKey: "", bigModels: ["big-3"], smallModels: [], name: "three" },
@@ -92,7 +99,7 @@ test("routes background requests to each provider's small models", async (t) => 
   // make this test about retrying instead of about tier routing.
   const seen = stubFetch([429, 200]);
 
-  await callUpstream({ ...REQ, model: "claude-3-5-haiku-20241022" }, [
+  await up({ ...REQ, model: "claude-3-5-haiku-20241022" }, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["big-1"], smallModels: ["small-1"], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["big-2"], smallModels: [], name: "two" },
   ]);
@@ -107,7 +114,7 @@ test("reports the last error when every provider fails", async (t) => {
 
   stubFetch([429, 402]);
 
-  const result = await callUpstream(REQ, [
+  const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["big-1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["big-2"], smallModels: [], name: "two" },
   ]);
@@ -208,7 +215,7 @@ test("tries each model of a provider before moving to the next provider", async 
   // first two models of provider one fail, its third works
   const seen = stubFetch([429, 429, 200]);
 
-  const result = await callUpstream(REQ, [
+  const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1", "m2", "m3"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["other"], smallModels: [], name: "two" },
   ]);
@@ -224,7 +231,7 @@ test("moves to the next provider once a provider's models are exhausted", async 
 
   const seen = stubFetch([429, 429, 200]);
 
-  const result = await callUpstream(REQ, [
+  const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1", "m2"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m3"], smallModels: [], name: "two" },
   ]);
@@ -244,7 +251,7 @@ test("background requests walk the small-model list in order", async (t) => {
 
   const seen = stubFetch([429, 200]);
 
-  await callUpstream({ ...REQ, model: "claude-3-5-haiku" }, [
+  await up({ ...REQ, model: "claude-3-5-haiku" }, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["big"], smallModels: ["cheap-a", "cheap-b"], name: "one" },
   ]);
 
@@ -274,7 +281,7 @@ test("a disabled provider is skipped without shifting the others", async (t) => 
 
   const seen = stubFetch([200]);
 
-  const result = await callUpstream(REQ, [
+  const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", disabled: true },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
@@ -290,7 +297,7 @@ test("all providers disabled reports 503 rather than an empty failure list", asy
 
   const seen = stubFetch([]);
 
-  const result = await callUpstream(REQ, [
+  const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", disabled: true },
   ]);
 
@@ -311,11 +318,11 @@ test("streaming off asks upstream for a complete reply", async (t) => {
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
   ];
 
-  const on = await callUpstream({ ...REQ, stream: true }, providers, true);
+  const on = await up({ ...REQ, stream: true }, providers, true);
   assert.equal(seen[0].body.stream, true, "streaming on: upstream streams");
   assert.equal(on.streamed, true);
 
-  const off = await callUpstream({ ...REQ, stream: true }, providers, false);
+  const off = await up({ ...REQ, stream: true }, providers, false);
   assert.equal(seen[1].body.stream, false, "streaming off: upstream does not stream");
   assert.equal(off.streamed, false, "so the caller knows to re-stream it itself");
 });
@@ -356,7 +363,7 @@ test("retries a 5xx once on the same model", async (t) => {
 
   const seen = stubFetch([503, 200]);
 
-  const result = await callUpstream(REQ, [
+  const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
@@ -372,7 +379,7 @@ test("gives up on a model after two 5xx and moves to the next", async (t) => {
 
   const seen = stubFetch([500, 500, 200]);
 
-  const result = await callUpstream(REQ, [
+  const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
@@ -389,7 +396,7 @@ test("a 429 moves to the next model rather than being retried", async (t) => {
   // rotator in front of some providers is a separate concern.
   const seen = stubFetch([429, 200]);
 
-  const result = await callUpstream(REQ, [
+  const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
@@ -406,7 +413,7 @@ test("an unreachable host moves on without a retry", async (t) => {
   // a better bet than waiting out a second timeout.
   const seen = stubFetch(["connect ECONNREFUSED", 200]);
 
-  const result = await callUpstream(REQ, [
+  const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
@@ -421,7 +428,7 @@ test("a 400 is never retried", async (t) => {
 
   const seen = stubFetch([400, 200]);
 
-  const result = await callUpstream(REQ, [
+  const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
   ]);
@@ -468,10 +475,10 @@ test("does not forward max_tokens, whatever the client asked for", async (t) => 
   const seen = stubFetch([200, 200]);
   const provider = { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" };
 
-  await callUpstream({ ...REQ, max_tokens: 128000 }, [provider]);
+  await up({ ...REQ, max_tokens: 128000 }, [provider]);
   assert.equal("max_tokens" in seen[0].body, false, "absent from the upstream request");
 
-  await callUpstream({ ...REQ, max_tokens: 64 }, [provider]);
+  await up({ ...REQ, max_tokens: 64 }, [provider]);
   assert.equal("max_tokens" in seen[1].body, false, "absent even for a small ask");
 });
 
@@ -537,7 +544,7 @@ test("an image request skips models known to lack vision", async (t) => {
     messages: [{ role: "user", content: [{ type: "image", source: { media_type: "image/png", data: "x" } }] }],
   };
 
-  const result = await callUpstream(imageReq, providers, true, caps);
+  const result = await up(imageReq, providers, true, caps);
   assert.equal(result.provider.name, "seeing");
   assert.equal(seen.length, 1, "the blind model is never called");
 });
@@ -556,7 +563,7 @@ test("nothing capable gives a 503 naming what was needed", async (t) => {
     messages: [{ role: "user", content: [{ type: "image", source: { media_type: "image/png", data: "x" } }] }],
   };
 
-  const result = await callUpstream(imageReq, providers, true, caps);
+  const result = await up(imageReq, providers, true, caps);
   assert.equal(result.status, 503);
   assert.match(result.message, /needs images/);
   assert.match(result.message, /blind\/text-only/);
@@ -688,7 +695,7 @@ test("a disabled model keeps its place but never gets a turn", async (t) => {
   t.after(() => (globalThis.fetch = realFetch));
 
   const seen = stubFetch([200]);
-  const result = await callUpstream(REQ, [{
+  const result = await up(REQ, [{
     baseUrl: "https://one.test/v1", apiKey: "k", name: "one",
     bigModels: ["m1", "m2", "m3"], smallModels: [],
     disabledModels: ["m1"],
@@ -720,4 +727,57 @@ test("PROVIDER_MODELS_DISABLED round-trips through the config", () => {
   assert.deepEqual(p.bigModels, ["a", "b", "c"], "the list keeps every model");
   assert.deepEqual(p.disabledModels, ["b"]);
   assert.deepEqual(pickModels("claude-sonnet-4-5", p), ["a", "c"]);
+});
+
+// --- learning from what has worked ----------------------------------------
+
+import { kindOf, reliability, orderByReliability } from "./stats.js";
+
+test("a request is classified by the most specific thing it needs", () => {
+  assert.equal(kindOf({ tools: false, vision: false }), "text");
+  assert.equal(kindOf({ tools: true, vision: false }), "tools");
+  assert.equal(kindOf({ tools: false, vision: true }), "image");
+  assert.equal(kindOf({ tools: true, vision: true }), "image", "an image request is an image request");
+});
+
+test("a thin record is no record — one bad afternoon shouldn't reorder anything", () => {
+  assert.equal(reliability(null), null);
+  assert.equal(reliability({ ok: 0, fail: 3 }), null, "under the attempt threshold");
+  assert.equal(reliability({ ok: 0, fail: 4 }), 0, "at the threshold it counts");
+  assert.equal(reliability({ ok: 9, fail: 1 }), 0.9);
+});
+
+const attempt = (name, model) => ({ provider: { baseUrl: "https://" + name + "/v1", name }, model });
+
+test("a model that keeps failing this kind of request is tried last", () => {
+  const attempts = [attempt("one", "m1"), attempt("two", "m2"), attempt("three", "m3")];
+  const lookup = (baseUrl) =>
+    baseUrl.includes("one") ? { ok: 0, fail: 9 } : { ok: 9, fail: 1 };
+
+  const { attempts: order, demoted } = orderByReliability(attempts, "tools", lookup);
+  assert.deepEqual(order.map((a) => a.model), ["m2", "m3", "m1"], "m1 moved to the back, rest untouched");
+  assert.deepEqual(demoted.map((d) => d.model), ["m1"]);
+});
+
+test("models are never dropped, and a clean sheet keeps the configured order", () => {
+  const attempts = [attempt("one", "m1"), attempt("two", "m2")];
+
+  // nothing known about either
+  const { attempts: a1, demoted: d1 } = orderByReliability(attempts, "text", () => null);
+  assert.deepEqual(a1.map((a) => a.model), ["m1", "m2"]);
+  assert.deepEqual(d1, []);
+
+  // both failing: reordering would be pointless, so leave it alone
+  const { attempts: a2, demoted: d2 } = orderByReliability(attempts, "text", () => ({ ok: 0, fail: 9 }));
+  assert.deepEqual(a2.map((a) => a.model), ["m1", "m2"]);
+  assert.deepEqual(d2, [], "no point shuffling when everything is equally bad");
+});
+
+test("stats are per kind — failing at images doesn't demote a model for text", () => {
+  const attempts = [attempt("one", "m1"), attempt("two", "m2")];
+  const lookup = (baseUrl, model, kind) =>
+    baseUrl.includes("one") && kind === "image" ? { ok: 0, fail: 9 } : { ok: 9, fail: 1 };
+
+  assert.deepEqual(orderByReliability(attempts, "image", lookup).attempts.map((a) => a.model), ["m2", "m1"]);
+  assert.deepEqual(orderByReliability(attempts, "text", lookup).attempts.map((a) => a.model), ["m1", "m2"]);
 });

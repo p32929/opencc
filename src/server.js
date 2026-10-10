@@ -4,6 +4,7 @@ import { config, getConfig, isConfigured, displayName } from "./config.js";
 import { pickModels, toOpenAIRequest, toAnthropicResponse, toAnthropicError } from "./translate.js";
 import { streamOpenAIToAnthropic, sendAnthropicAsStream } from "./stream.js";
 import { readCapabilities, capabilityFor, requirementsOf, canServe, describeNeeds } from "./capabilities.js";
+import { kindOf, statsFor, record, orderByReliability } from "./stats.js";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -75,6 +76,10 @@ export async function callUpstream(
   providers = config.providers,
   streaming = config.streaming,
   capabilities = null,
+  // Injectable so a caller can run without touching the stats file at all —
+  // it is shared mutable state on disk, which otherwise makes this function's
+  // behaviour depend on every request that came before it.
+  stats = { lookup: statsFor, record },
 ) {
   const failures = [];
   const deadline = Date.now() + TOTAL_DEADLINE_MS;
@@ -121,17 +126,29 @@ export async function callUpstream(
     );
   }
 
+  // Past failures move a model down the list, never off it. Only models with
+  // a real track record of failing this kind of request are touched, so the
+  // order you configured still decides everything else.
+  const kind = kindOf(needs);
+  const ordered = orderByReliability(attempts, kind, stats.lookup);
+  if (ordered.demoted.length > 0) {
+    const names = ordered.demoted
+      .map((d) => `${d.model} ${Math.round(d.rate * 100)}%`)
+      .join(", ");
+    console.log(`[opencc]   tried last on ${kind} (poor record): ${names}`);
+  }
+
   // With streaming off we ask upstream for the whole reply at once, then
   // re-stream it ourselves if the client wanted a stream.
   const streamUpstream = Boolean(anthropicReq.stream) && streaming;
 
-  for (const [i, { provider, model }] of attempts.entries()) {
-    const label = `attempt ${i + 1}/${attempts.length} (${displayName(provider)}, ${model})`;
+  for (const [i, { provider, model }] of ordered.attempts.entries()) {
+    const label = `attempt ${i + 1}/${ordered.attempts.length} (${displayName(provider)}, ${model})`;
 
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
-      console.error(`[opencc]   giving up after ${TOTAL_DEADLINE_MS / 1000}s, ${attempts.length - i} attempt(s) untried`);
-      failures.push(`stopped after ${TOTAL_DEADLINE_MS / 1000}s with ${attempts.length - i} attempt(s) untried`);
+      console.error(`[opencc]   giving up after ${TOTAL_DEADLINE_MS / 1000}s, ${ordered.attempts.length - i} attempt(s) untried`);
+      failures.push(`stopped after ${TOTAL_DEADLINE_MS / 1000}s with ${ordered.attempts.length - i} attempt(s) untried`);
       break;
     }
 
@@ -176,6 +193,7 @@ export async function callUpstream(
 
       if (upstream?.ok) {
         console.log(`[opencc]   ${label} -> ${upstream.status} in ${took()}`);
+        stats.record({ baseUrl: provider.baseUrl, model, kind, status: upstream.status });
         break;
       }
 
@@ -184,6 +202,8 @@ export async function callUpstream(
       // request won't heal in 400ms, and the next model is a better bet than
       // waiting out a second timeout.
       const serverFault = !networkError && upstream.status >= 500;
+      // 0 stands for "never reached it", which is as much a failure as a 500.
+      stats.record({ baseUrl: provider.baseUrl, model, kind, status: networkError ? 0 : upstream.status });
 
       const reason = networkError
         ? `unreachable after ${took()}: ${networkError.message}`

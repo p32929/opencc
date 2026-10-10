@@ -162,6 +162,33 @@ choice starts 429ing, the next one on the same provider often still works.
 - Your API key only ever goes to the provider you picked. The proxy listens
   on localhost only.
 
+## Learning from what works
+
+Every attempt's outcome is appended to `~/.opencc/stats.jsonl` — provider,
+model, kind of request (text / tools / image) and status code. A model that
+has been tried at least four times for a given kind and almost never worked
+gets **moved to the back of the list** for that kind. It is never dropped, and
+nothing else is reordered, so the order you set still decides everything the
+stats have no opinion about.
+
+Per kind matters: a model can handle text perfectly and fail every tool call,
+and the log keeps those apart.
+
+```
+[opencc]   tried last on tools (poor record): some-model 8%
+```
+
+The file is append-only, one JSON object per line, because several opencc
+processes write it at once — two Claude Code sessions, say. An append is a
+single atomic write, where reading a document and writing it back loses
+whichever update finished second. Nothing locks, and a line left half-written
+by a killed process costs that one record. Once the log passes 256KB it is
+folded into one line per key: renamed out of the way first, then folded, then
+the summary appended, so appends that land mid-fold go to the new file rather
+than being overwritten.
+
+Delete the file any time — it only costs the proxy its memory of what worked.
+
 ## Config file
 
 `opencc init` writes `~/.opencc/.env`. A project-local `.env` overrides it
