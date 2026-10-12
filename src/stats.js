@@ -153,27 +153,77 @@ export const NEEDED = ["tools", "image", "document"];
 
 const keyOf = (baseUrl, model, kind) => `${baseUrl}\u0000${model}\u0000${kind}`;
 
+// Outcomes are counted in memory and written in batches.
+//
+// One line per request repeated the provider URL and the model name every
+// time, which is most of 126 bytes to say "that happened again", and paid for
+// a synchronous write on every one. A batch says it once with a number beside
+// it.
+//
+// Still appended rather than rewritten. A counters document would have to be
+// read, edited and written back, and two opencc processes doing that lose one
+// of the two updates - which is the whole reason this is a log and not a
+// file of totals.
+const FLUSH_AFTER_MS = 2000;
+const FLUSH_AT_KEYS = 64;
+
+let pending = new Map();
+let flushTimer = null;
+
+function pendingKey(baseUrl, model, kind, status, verdict) {
+  return `${baseUrl}\u0000${model}\u0000${kind}\u0000${status}\u0000${verdict ?? ""}`;
+}
+
 export function record({ baseUrl, model, kind, status, ms, verdict, chars }) {
-  const event = { p: baseUrl, m: model, k: kind, s: status, n: 1, t: Date.now() };
-  // Only written when the answer was not usable, so the common line stays
-  // the same size it has always been.
-  if (verdict && verdict !== "ok") event.q = verdict;
-  // Only for answers. How long a refusal took is noise.
-  if (Number.isFinite(ms) && status >= 200 && status < 300) event.ms = Math.round(ms);
-  // How big the request was, in characters of the serialised body. Not
-  // tokens: nothing here ever converts between the two, so the unit only has
-  // to be the same on both sides of a comparison, and characters are the one
-  // we can measure without guessing.
-  if (Number.isFinite(chars)) event.c = chars;
-  const line = `${JSON.stringify(event)}\n`;
+  const key = pendingKey(baseUrl, model, kind, status, verdict);
+  const row = pending.get(key) ?? { p: baseUrl, m: model, k: kind, s: status, n: 0 };
+  row.n += 1;
+  if (verdict && verdict !== "ok") row.q = verdict;
+
+  // Summed, not averaged, so a batch of five carries the same weight as five
+  // separate lines would have.
+  if (Number.isFinite(ms) && status >= 200 && status < 300) row.ms = (row.ms ?? 0) + Math.round(ms);
+  if (Number.isFinite(chars)) {
+    // The largest answered and the smallest refused are what bracket the
+    // size ceiling, so a batch keeps whichever end matters for its outcome.
+    row.c = row.c === undefined ? chars
+      : (status >= 200 && status < 300 ? Math.max(row.c, chars) : Math.min(row.c, chars));
+  }
+  pending.set(key, row);
+
+  if (pending.size >= FLUSH_AT_KEYS) {
+    flush();
+    return;
+  }
+  if (flushTimer === null) {
+    flushTimer = setTimeout(flush, FLUSH_AFTER_MS);
+    // Never a reason to hold the process open for statistics.
+    flushTimer.unref?.();
+  }
+}
+
+export function flush() {
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (pending.size === 0) return;
+
+  const batch = [...pending.values()];
+  pending = new Map();
+
   try {
     mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
-    appendFileSync(STATS_PATH, line, { mode: 0o600 });
+    appendFileSync(STATS_PATH, `${JSON.stringify({ t: Date.now(), b: batch })}\n`, { mode: 0o600 });
     maybeCompact();
   } catch {
     // Stats are an optimisation. Losing them must never cost a request.
   }
 }
+
+// Whatever is still buffered when the process goes. A kill -9 loses it, which
+// costs a couple of seconds of statistics and nothing else.
+process.on("exit", flush);
 
 // --- reading ---------------------------------------------------------------
 
@@ -183,13 +233,25 @@ export function record({ baseUrl, model, kind, status, ms, verdict, chars }) {
 let cache = { offset: 0, agg: new Map() };
 
 function foldLine(agg, line) {
-  let event;
+  let parsed;
   try {
-    event = JSON.parse(line);
+    parsed = JSON.parse(line);
   } catch {
     // A process killed mid-append leaves one unparseable line. Skip it.
     return;
   }
+  if (!parsed) return;
+
+  // A batch carries its own timestamp for everything in it. Lines written
+  // before batching are single events and still read fine.
+  if (Array.isArray(parsed.b)) {
+    for (const row of parsed.b) foldEvent(agg, { ...row, t: parsed.t });
+    return;
+  }
+  foldEvent(agg, parsed);
+}
+
+function foldEvent(agg, event) {
   if (!event || typeof event.p !== "string" || typeof event.m !== "string") return;
 
   const key = keyOf(event.p, event.m, event.k ?? "text");
@@ -222,7 +284,10 @@ function foldLine(agg, line) {
     bucket.ok += n;
     entry.lastOk = Math.max(entry.lastOk, when);
     if (Number.isFinite(event.ms)) {
-      entry.totalMs += event.ms * n;
+      // Already a total: a batch sums the time over its n outcomes, and a
+      // single event is a batch of one. Multiplying by n again counted each
+      // batch n times over.
+      entry.totalMs += event.ms;
       entry.timed += n;
     }
     if (Number.isFinite(event.c)) entry.maxOk = Math.max(entry.maxOk, event.c);

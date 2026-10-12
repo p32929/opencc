@@ -896,10 +896,11 @@ test("a reset moves the log aside rather than deleting it", async (t) => {
   const here = new URL(".", import.meta.url).pathname;
 
   writeFileSync(script, [
-    `import { record, aggregate, resetStats } from "${join(here, "stats.js")}";`,
+    `import { record, flush, aggregate, resetStats } from "${join(here, "stats.js")}";`,
     `import { STATS_PATH } from "${join(here, "paths.js")}";`,
     `import { existsSync, readFileSync } from "node:fs";`,
     `record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 200 });`,
+    `flush();`,
     `const before = [...aggregate().values()].reduce((n, e) => n + e.ok + e.fail, 0);`,
     `const { moved, previous } = resetStats();`,
     `const after = [...aggregate().values()].reduce((n, e) => n + e.ok + e.fail, 0);`,
@@ -1457,9 +1458,10 @@ test("a 200 with a bad verdict counts against the model like a 400 would", async
   const script = join(home, "run.mjs");
 
   writeFileSync(script, [
-    `import { record, statsFor, decayed } from "${join(here, "stats.js")}";`,
+    `import { record, flush, statsFor, decayed } from "${join(here, "stats.js")}";`,
     `record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 200 });`,
     `record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 200, verdict: "empty" });`,
+    `flush();`,
     `const e = statsFor("https://p/v1", "m", "tools");`,
     `console.log(JSON.stringify({ ok: e.ok, fail: e.fail, weighted: decayed(e).weighted }));`,
   ].join("\n"));
@@ -1526,9 +1528,10 @@ test("an oversized request does not count against the model", async () => {
   const script = join(home, "run.mjs");
 
   writeFileSync(script, [
-    `import { record, statsFor, decayed } from "${join(here, "stats.js")}";`,
+    `import { record, flush, statsFor, decayed } from "${join(here, "stats.js")}";`,
     `record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 400, chars: 500000, verdict: "${TOO_BIG_VERDICT}" });`,
     `record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 400 });`,
+    `flush();`,
     `const e = statsFor("https://p/v1", "m", "tools");`,
     `console.log(JSON.stringify({ fail: e.fail, weighted: decayed(e).weighted, minTooBig: e.minTooBig }));`,
   ].join("\n"));
@@ -1687,4 +1690,71 @@ test("callUpstream does not re-serialise a request the caller already measured",
 
   assert.equal(result.model, "m");
   assert.equal(seen, 123456, "the size it was handed, not one it worked out again");
+});
+
+// --- outcomes are counted, not listed --------------------------------------
+
+test("a batch of identical outcomes is one line with a count", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, dirname } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-batch-"));
+  mkdirSync(join(home, ".opencc"));
+  const here = dirname(new URL(import.meta.url).pathname);
+  const script = join(home, "run.mjs");
+
+  writeFileSync(script, [
+    `import { record, flush, aggregate, meanMs } from "${join(here, "stats.js")}";`,
+    `import { STATS_PATH } from "${join(here, "paths.js")}";`,
+    `import { readFileSync } from "node:fs";`,
+    `for (let i = 0; i < 200; i++) record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 200, ms: 1500, chars: 9000 });`,
+    `flush();`,
+    `const file = readFileSync(STATS_PATH, "utf8");`,
+    `const e = aggregate().get("https://p/v1\\u0000m\\u0000tools");`,
+    `console.log(JSON.stringify({ lines: file.split("\\n").filter(Boolean).length, bytes: file.length, ok: e.ok, mean: meanMs(e), maxOk: e.maxOk }));`,
+  ].join("\n"));
+
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+
+  assert.equal(out.lines, 1, "two hundred outcomes, one line");
+  assert.ok(out.bytes < 200, `and it stays small: ${out.bytes} bytes`);
+  assert.equal(out.ok, 200, "all of them counted");
+  // A batch sums its time; folding must not multiply by the count again.
+  assert.equal(out.mean, 1500, "the mean is the time recorded, not the total");
+  assert.equal(out.maxOk, 9000);
+});
+
+test("lines written before batching still read correctly", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, dirname } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-legacy-"));
+  mkdirSync(join(home, ".opencc"));
+  const here = dirname(new URL(import.meta.url).pathname);
+  const script = join(home, "run.mjs");
+
+  writeFileSync(script, [
+    `import { writeFileSync } from "node:fs";`,
+    `import { STATS_PATH } from "${join(here, "paths.js")}";`,
+    `const t = Date.now();`,
+    // one event per line, the shape opencc wrote before batching
+    `writeFileSync(STATS_PATH, [`,
+    `  JSON.stringify({ p: "https://p/v1", m: "m", k: "tools", s: 200, n: 1, t, ms: 800 }),`,
+    `  JSON.stringify({ p: "https://p/v1", m: "m", k: "tools", s: 200, n: 1, t, ms: 1200 }),`,
+    `  JSON.stringify({ p: "https://p/v1", m: "m", k: "tools", s: 429, n: 3, t }),`,
+    `].join("\\n") + "\\n");`,
+    `const { aggregate, meanMs } = await import("${join(here, "stats.js")}");`,
+    `const e = aggregate().get("https://p/v1\\u0000m\\u0000tools");`,
+    `console.log(JSON.stringify({ ok: e.ok, fail: e.fail, mean: meanMs(e) }));`,
+  ].join("\n"));
+
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+
+  assert.equal(out.ok, 2);
+  assert.equal(out.fail, 3, "n is still honoured on an old line");
+  assert.equal(out.mean, 1000, "and its timings average rather than sum");
 });
