@@ -35,6 +35,11 @@ const DAY_MS = 86400000;
 // makes the thing adaptive rather than merely tallied.
 const HALF_LIFE_DAYS = 4;
 
+// Past this a day's results are worth under a percent of today's, so keeping
+// them only makes the sum longer. Without pruning, a year of use turned a
+// 1.4us lookup into 147us, times every model, on every request.
+const KEEP_DAYS = 8 * HALF_LIFE_DAYS;
+
 // Not every failure says the same thing.
 //
 // "400 this model does not support image input" settles the question on the
@@ -201,6 +206,16 @@ function foldLine(agg, line) {
   // this week more heavily than what happened last month. See `decayed`.
   const day = Math.floor(when / DAY_MS);
   const bucket = entry.days[day] ?? (entry.days[day] = { ok: 0, fail: 0, weighted: 0 });
+
+  // Drop anything the discount has already reduced to noise. The totals above
+  // keep the whole history; only the per-day detail is trimmed.
+  const kept = Object.keys(entry.days);
+  if (kept.length > KEEP_DAYS) {
+    const cutoff = day - KEEP_DAYS;
+    for (const old of kept) {
+      if (Number(old) < cutoff) delete entry.days[old];
+    }
+  }
 
   if (usable) {
     entry.ok += n;

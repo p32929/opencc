@@ -1638,3 +1638,53 @@ test("the wait is capped, so a dead model is retried hourly rather than never", 
   assert.equal(last, 60 * 60 * 1000, "an hour, not a week");
   clearCooldowns();
 });
+
+// --- the record must not get slower the longer you use it ------------------
+
+test("day buckets are pruned, so a year of use costs what a week does", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, dirname } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-prune-"));
+  mkdirSync(join(home, ".opencc"));
+  const here = dirname(new URL(import.meta.url).pathname);
+  const script = join(home, "run.mjs");
+
+  writeFileSync(script, [
+    `import { writeFileSync } from "node:fs";`,
+    `import { STATS_PATH } from "${join(here, "paths.js")}";`,
+    `const day = 86400000, now = Date.now();`,
+    `const lines = [];`,
+    `for (let d = 400; d >= 0; d--) lines.push(JSON.stringify({ p: "https://p/v1", m: "m", k: "tools", s: 200, n: 1, t: now - d * day }));`,
+    `writeFileSync(STATS_PATH, lines.join("\\n") + "\\n");`,
+    `const { statsFor } = await import("${join(here, "stats.js")}");`,
+    `const e = statsFor("https://p/v1", "m", "tools");`,
+    `console.log(JSON.stringify({ ok: e.ok, buckets: Object.keys(e.days).length }));`,
+  ].join("\n"));
+
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+
+  assert.equal(out.ok, 401, "every result still counts toward the totals");
+  assert.ok(out.buckets <= 34, `only recent days are kept in detail, got ${out.buckets}`);
+});
+
+test("callUpstream does not re-serialise a request the caller already measured", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+  stubFetch([200]);
+
+  // A size nothing would compute by accident, passed in rather than measured.
+  let seen = null;
+  const result = await callUpstream(
+    REQ,
+    [{ baseUrl: "https://one.test/v1", apiKey: "k", models: ["m"], name: "one" }],
+    true,
+    { ...NO_STATS, record: (row) => { seen = row.chars; } },
+    123456,
+  );
+
+  assert.equal(result.model, "m");
+  assert.equal(seen, 123456, "the size it was handed, not one it worked out again");
+});

@@ -87,6 +87,9 @@ export async function callUpstream(
   // behaviour depend on every request that came before it. `order` is here so
   // a test can pin the draw that would otherwise be random.
   stats = { order: chooseOrder, record, coolOff, settled: cooledOffSuccessfully },
+  // Serialising a request is not free - a big one runs to most of a
+  // millisecond - and the caller has usually measured it already.
+  chars = JSON.stringify(anthropicReq).length,
 ) {
   const failures = [];
   const deadline = Date.now() + TOTAL_DEADLINE_MS;
@@ -120,9 +123,8 @@ export async function callUpstream(
   // the ones that did not.
   const needs = requirementsOf(anthropicReq);
   const kind = kindOf(needs);
-  // The size is what decides whether a model can take this at all, so it
-  // goes into the ordering as well as into the record.
-  const chars = JSON.stringify(anthropicReq).length;
+  // The size decides whether a model can take this at all, so it goes into
+  // the ordering as well as into the record.
   const ordered = stats.order(candidates, kind, { chars });
 
   console.log(
@@ -318,13 +320,14 @@ async function handleMessages(anthropicReq, res) {
 
   // Size of the incoming request, which is what you want when a backend
   // complains about length. max_tokens is shown as asked for, not forwarded.
+  const chars = JSON.stringify(anthropicReq).length;
   console.log(
     `[opencc]   model=${anthropicReq.model} stream=${Boolean(anthropicReq.stream)}` +
       ` asked_max_tokens=${anthropicReq.max_tokens} (not forwarded)` +
-      ` tools=${(anthropicReq.tools ?? []).length} chars=${JSON.stringify(anthropicReq).length}`,
+      ` tools=${(anthropicReq.tools ?? []).length} chars=${chars}`,
   );
 
-  const result = await callUpstream(anthropicReq, live.providers, live.streaming);
+  const result = await callUpstream(anthropicReq, live.providers, live.streaming, undefined, chars);
 
   if (!result.upstream && !result.reply) {
     sendJson(res, result.status, toAnthropicError(result.status, result.message));
