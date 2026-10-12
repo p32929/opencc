@@ -1,221 +1,239 @@
 # opencc
 
-Use [Claude Code](https://code.claude.com) with any OpenAI-compatible API —
-OpenRouter, Gemini, a local model — instead of paying for Anthropic's. A tiny
-local proxy translates between them; Claude Code can't tell the difference.
+Use [Claude Code](https://code.claude.com) with any OpenAI-compatible API
+instead of paying Anthropic. A small local proxy sits in the middle. Claude
+Code does not notice.
 
-Zero dependencies. Stack several providers and it falls back automatically
-when a free tier runs dry.
+Zero dependencies. Add many free tiers and opencc finds which ones work.
 
-![The opencc provider list](docs/screenshots/init-providers.png)
+![The opencc admin panel](PASTE_IMAGE_URL_HERE)
 
-## Why this exists
+## Why
 
-There are already a bunch of proxies out there that do basically this same
-thing. Most of them do *way* too much: dozens of supported providers, admin
-dashboards, multiple coding agents, messaging bot integrations, desktop
-apps with tray icons — entire platforms, when all I actually wanted was one
-small thing. I don't need 99 providers to use Claude Code for free. I just
-wanted something simple that does exactly this, one job, and is easy enough
-to set up that it takes a minute or two, not an afternoon of reading docs.
-That's what opencc is — nothing more.
+Other proxies do too much. Dozens of providers, dashboards, bot integrations,
+desktop apps. I wanted one small thing that does one job and takes a minute to
+set up. That is opencc.
 
 ## Setup
 
 ```bash
 git clone https://github.com/p32929/opencc.git
 cd opencc
-npm start      # makes `opencc` available everywhere — run once
-opencc init    # add your providers
+npm start      # installs the `opencc` command - run once
 ```
 
-Then two terminals:
+Then use two terminals:
 
 ```bash
-opencc         # the proxy — leave it running
+opencc         # leave it running
 opencc claude  # cd to your project first
 ```
 
-Both `opencc` and `opencc init` ask which port to use, showing the current one
-as the default — press enter to accept. The proxy remembers your answer, so
-`opencc claude` and the panel keep pointing at the right place. `--port 9753`
-skips the question, and so does running without a terminal.
+`opencc` starts two things:
 
-Claude Code's own flags pass straight through: `opencc claude --continue`.
+```
+  panel  http://localhost:3450
+  proxy  http://localhost:9753   26 models, 5 providers
+```
 
-## opencc init
+The **panel** is where you add providers. The **proxy** is what Claude Code
+talks to. The proxy only starts when you have at least one provider with a
+model. On a new install it waits, and starts by itself the moment you add one:
 
-Opens an admin panel in your browser. Add providers, reorder them, toggle them
-on and off, test a model, and see what each one can actually do.
+```
+  panel  http://localhost:3450
+  proxy  waiting - add a provider in the panel and it starts on its own
+```
 
-![The opencc admin panel](docs/screenshots/panel.png)
+Use `--port` for the proxy and `--panel-port` for the panel. If a port is
+busy, opencc uses the next free one.
 
-Everything saves as you change it. The panel binds to localhost on a random
-free port — it edits your API keys, so it's never reachable from your network
-and never collides with the proxy.
+Claude Code flags still work: `opencc claude --continue`.
 
-Each provider takes:
+![Claude Code running through opencc](PASTE_IMAGE_URL_HERE)
 
-- **Base URL** — e.g. `https://openrouter.ai/api/v1`
-- **API key** — leave empty for a backend that needs none, like a local Ollama
-- **Big models** — the ones that do the real work, tried top to bottom
-- **Small models** — cheaper models for Claude Code's quick background tasks.
-  Empty reuses the Big ones
+## How it works
 
-Each list is a set of ordered rows with **↑ ↓** to change priority, **Off** to
-park a model without losing its place, **✕** to remove, and a box to add one
-(autocompleted from that provider's catalogue).
-Capabilities and context length show on the row, so the model you're about to
-promote tells you what it can do.
-- **Name** — optional; defaults to the host
+All models from all providers go into one list. The order you type does not
+matter.
 
-**Disable** parks a provider that's out of credits — it keeps its key and
-position and is just skipped. **Delete** throws the key away. **Streaming** off
-makes opencc wait for the whole reply before passing it on, worth trying if a
-backend's SSE is flaky.
+Each request is filed by what it needed: **tools**, **image** or **document**
+(and **text** for the rare request carrying none of them). opencc saves the
+result of every call in `~/.opencc/stats.jsonl` - provider, model, kind,
+status code.
 
-### Terminal menu
+It then picks a model with
+[Thompson sampling](https://en.wikipedia.org/wiki/Thompson_sampling):
+
+- Good record: picked often.
+- Never tried: gets a fair chance.
+- Bad record: picked rarely, but still tested sometimes.
+
+So the work spreads over all models that answer. Five requests in a row usually
+go to five different models.
+
+Other rules:
+
+- A model that fails at `image` keeps its good record for `text`.
+- A request carrying a PDF goes only to models that have read one.
+- Old results count less. Half life is four days.
+- A 429 or a timeout puts the model at the back for 15 to 60 seconds.
+- If a model fails, the next one in the list is tried.
+- 5xx: one retry. 4xx: move on.
+- `max_tokens` is not sent. Some backends reject large values.
+
+## First run
+
+A new install has no data, so opencc tests every model once before the proxy
+starts. This takes about a minute.
+
+```
+  warming up 26 models across 5 providers
+  z.ai glm flash GLM-4.6V-Flash      429  The service may be temporarily overloaded
+  nvidia google/gemma-4-31b-it       403  Authorization failed
+  24 of 26 answered, 24 called the tool
+
+opencc on :9753 · 26 models · 5 providers
+
+in another terminal: opencc claude
+```
+
+Models that already have data are skipped. Use `--no-warmup` to turn this off.
+
+When you add a model or a provider in the panel, it is tested right away. You
+do not need to restart the proxy: a running proxy reads the results from the
+same file and starts using them. **Test new** in the panel does the same for
+anything still untested.
+
+![The warm-up on a fresh record](PASTE_IMAGE_URL_HERE)
+
+## What Claude Code needs
+
+Claude Code needs three things: tool calling, images you paste, and PDFs you
+attach. If nothing in your pot can serve one of them, every request of that
+kind fails, however many models you have.
+
+The panel shows this at the top:
+
+```
+  Tool calling  23 models      Images  9 models      PDFs  7 models
+```
+
+Green means covered. Amber means not tested yet, with a button to test it.
+Red means nothing can do it, and you need to add a model that can.
+
+Tool calling is tested on first run, because nearly every Claude Code request
+uses it. Images and PDFs are tested when you press their button.
+
+The PDF test checks the model actually *read* the file, not just that it
+accepted it. A model that takes a PDF and ignores it then answers confidently
+about a document it never saw, which is worse than any error.
+
+**Tool calling is required.** If every one of your models has been tried and
+none can call tools, the proxy does not start at all:
+
+```
+  panel  http://localhost:3450
+  proxy  not started - none of your 4 models can call tools
+         Claude Code needs it to read and edit files.
+         Add a model that can, in the panel, and it starts.
+```
+
+A model nobody has tried yet gets the benefit of the doubt, so a fresh install
+still comes up. The proxy starts the moment one model passes, whether from a
+warm-up, a **Test** button, or a real request.
+
+**Images are optional.** Claude Code works fine without them, you just cannot
+paste a screenshot. opencc says so once at startup and carries on.
+
+## The panel
+
+Open the panel URL that `opencc` prints. On a new install it opens by itself.
+
+Each provider needs a base URL, an API key (can be empty), and a list of
+models. Each model row shows its record: `text 100%  tools 24%  image -`.
+
+| Button | What it does |
+|---|---|
+| Park | keep the model in the list, never call it |
+| Remove | delete the model |
+| Test | send one real request |
+| Turn off | skip the provider, keep its key |
+| Delete | remove the provider and its key |
+| Streaming | off = wait for the full reply |
+| Test new | test every model with no record yet |
+| Text / Images Test | test what is still unknown for that kind |
+| Reset record | forget all results |
+
+## Reset
 
 ```bash
-opencc init --tui
+opencc --reset-stats
 ```
 
-The arrow-key menu, for a machine with no browser. Both edit the same config,
-so you can switch freely.
-
-![The terminal menu](docs/screenshots/init-providers.png)
-
-| Key | Does |
-|---|---|
-| `↑` `↓` | move the cursor |
-| `enter` | open a provider / edit a field |
-| `u` `d` | move this provider up / down the chain |
-| `space` | turn this provider off / on |
-| `x` | delete it (asks first) |
-| `a` | add a provider |
-| `t` | test every model · `p` change port |
-| `q` `esc` | save and quit, or back out of anything |
-
-## Capabilities and routing
-
-Models differ: some take images, some do tool calling, some do neither. Rather
-than discover that as a mid-session failure, opencc works out what each request
-needs — `tools` at the top level, `image` blocks in the messages — and only
-tries models that can serve it.
-
-Press **Detect** and it resolves each model two ways:
-
-- **From the provider's catalogue** where one is published. OpenRouter reports
-  `architecture.input_modalities` and `supported_parameters`, so its models
-  resolve instantly and for free, context length included.
-- **By probing** otherwise, since most providers publish nothing but a model
-  id. opencc sends a request with the feature and, if that's rejected, the same
-  request without it — only if the plain one succeeds has the feature been
-  shown to be the cause. Matching on error text doesn't work: z.ai rejects an
-  image with `messages.content.type is invalid, allowed values: ['text']`,
-  which mentions neither images nor vision.
-
-A model nobody has detected yet is tried anyway — unknown means untested, not
-incapable, so adding a provider never silently takes it out of rotation. You
-can set capabilities by hand too, which wins over detection.
-
-If a request needs something none of your models support, you get a 503 saying
-so and naming them, instead of watching every model fail in turn.
-
-## Fallback
-
-Providers are tried top to bottom, and each provider's models left to right.
-Rate-limited, out of credits, down, unknown model — opencc moves to the next
-combination and the request still goes through.
-
-Model lists matter because free tiers throttle *per model*: when your first
-choice starts 429ing, the next one on the same provider often still works.
-
-```
-[opencc]   attempt 1/3 (work openrouter, openai/gpt-4o) failed 429: rate limit exceeded
-[opencc]   attempt 2/3 (work openrouter, openai/gpt-5) failed 429: rate limit exceeded
-[opencc]   attempt 3/3 (my ollama, llama3) -> 200
-```
-
-![The startup banner](docs/screenshots/server-banner.png)
-
-- Failures are handled by status. **5xx** is the provider breaking, so the same
-  model gets one more try. Anything **4xx** is a decision about this request —
-  wrong model, no quota, bad shape — and asking again can't change it, so the
-  walk moves to the next model. An unreachable host moves on too: it won't heal
-  in 400ms, and the next model beats waiting out a second timeout.
-- `max_tokens` is **not** forwarded. Anthropic requires it so Claude Code
-  always sends one (128000 as of Opus 5.5), but it's optional upstream and
-  several backends reject a budget bigger than their own cap instead of just
-  capping it — z.ai allows at most 98304. Leaving it out lets each provider
-  decide how long a reply to produce.
-- The walk is bounded: 5 minutes per attempt, 10 minutes overall. Past that it
-  returns the error instead of quietly working through the rest of the list.
-  A request carrying a large tool set genuinely runs to several minutes on
-  some backends, so the per-attempt limit is deliberately loose — the overall
-  deadline is what stops a bad run looking like a hang.
-- Failover only works *before* a reply starts arriving. If a provider dies
-  mid-stream that one message fails; retry and the chain picks another.
-- Config is re-read every request, so `opencc init` changes apply without
-  restarting the proxy. Except the proxy's **port** — the socket is already
-  bound, and restarting asks you for it anyway.
-- Your API key only ever goes to the provider you picked. The proxy listens
-  on localhost only.
-
-## Learning from what works
-
-Every attempt's outcome is appended to `~/.opencc/stats.jsonl` — provider,
-model, kind of request (text / tools / image) and status code. A model that
-has been tried at least four times for a given kind and almost never worked
-gets **moved to the back of the list** for that kind. It is never dropped, and
-nothing else is reordered, so the order you set still decides everything the
-stats have no opinion about.
-
-Per kind matters: a model can handle text perfectly and fail every tool call,
-and the log keeps those apart.
-
-```
-[opencc]   tried last on tools (poor record): some-model 8%
-```
-
-The file is append-only, one JSON object per line, because several opencc
-processes write it at once — two Claude Code sessions, say. An append is a
-single atomic write, where reading a document and writing it back loses
-whichever update finished second. Nothing locks, and a line left half-written
-by a killed process costs that one record. Once the log passes 256KB it is
-folded into one line per key: renamed out of the way first, then folded, then
-the summary appended, so appends that land mid-fold go to the new file rather
-than being overwritten.
-
-Delete the file any time — it only costs the proxy its memory of what worked.
+Forgets all results. Providers, models and keys stay. The old file is saved as
+`~/.opencc/stats.jsonl.previous`.
 
 ## Config file
 
-`opencc init` writes `~/.opencc/.env`. A project-local `.env` overrides it
-(copy `.env.example`). Providers are numbered — first unsuffixed, then `_2`,
-`_3`:
+The panel writes `~/.opencc/.env`. A local `.env` overrides it. Providers
+are numbered: first has no suffix, then `_2`, `_3`.
 
 | Key | Meaning |
 |---|---|
-| `OPENAI_BASE_URL` | the provider's address |
-| `OPENAI_API_KEY` | optional — omit if the backend needs none |
-| `BIG_MODEL` | comma-separated priority list, real work |
-| `SMALL_MODEL` | comma-separated priority list, background work |
-| `PROVIDER_NAME` | optional label; defaults to the host |
-| `PROVIDER_DISABLED` | `true` to park it |
-| `PROVIDER_MODELS_DISABLED` | models to park, comma separated; they keep their place |
-| `PORT` `STREAMING` | global; `STREAMING=off` disables streaming |
+| `OPENAI_BASE_URL` | provider address |
+| `OPENAI_API_KEY` | optional |
+| `MODELS` | comma separated; order does not matter |
+| `PROVIDER_NAME` | optional label |
+| `PROVIDER_DISABLED` | `true` to skip it |
+| `PROVIDER_MODELS_DISABLED` | models to skip, comma separated |
+| `PORT` `STREAMING` | global settings |
 
-Detected capabilities are cached in `~/.opencc/capabilities.json`, keyed by
-base URL and model. It's derived data — delete it and the next Detect rebuilds
-it — which is why it isn't in the `.env`.
+Old configs with `BIG_MODEL` and `SMALL_MODEL` still work. Both become one
+`MODELS` list.
 
-`npm run server` runs the proxy alone; `npm test` runs the suite. Configs from
-older single-provider versions still work — they read as provider 1.
+## Tests
 
-![Claude Code running through opencc](docs/screenshots/claude-running.png)
+```bash
+npm test                                 # offline, one second
+OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
+```
 
 ## Changelog
+
+### 3.0.0 - 2026-10-10
+
+**Breaking**
+
+- One `MODELS` list per provider. No more `BIG_MODEL` / `SMALL_MODEL` and no
+  big/small tiers. Old configs are merged automatically.
+- Capability detection removed, with `~/.opencc/capabilities.json`. opencc now
+  learns what a model can do by using it.
+- `opencc init --tui` removed. The browser panel is the only UI.
+- `opencc init` and `opencc` are now one command. `opencc` serves the panel
+  and the proxy. `opencc init` still works and does the same thing.
+
+**Added**
+
+- Routing by Thompson sampling over the saved results.
+- Warm-up on first start, with live progress.
+- Old results count less over time (four day half life).
+- A 429 puts a model at the back for 15 to 60 seconds.
+- `opencc --reset-stats` and a **Reset record** button.
+- A coverage strip in the panel: how many models can do tool calling, images
+  and PDFs, so a missing capability is visible before it breaks a session.
+- The proxy does not start at all if every model has been tried and none can
+  call tools.
+- End-to-end tests against real providers.
+
+**Fixed**
+
+- The old ordering did nothing when every model was below 20%.
+- Attempts cut short by the deadline counted as model failures, in the request
+  walk and in the warm-up. The warm-up deadline was also a flat 180s, which cut
+  the tail off a provider with many models.
+- Adding a provider in the panel was impossible.
+- The startup banner listed every provider and model. Now three lines.
 
 ### 2.0.0 — 2026-10-05
 

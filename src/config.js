@@ -25,8 +25,8 @@ export function parseEnvFile(path) {
 
 // Providers are numbered in the .env file: the first one carries no suffix
 // (so an older single-provider config keeps working as-is) and the rest are
-// _2, _3, ... — OPENAI_BASE_URL_2, OPENAI_API_KEY_2, BIG_MODEL_2, and so on.
-// They're tried in this order, so put your preferred one first.
+// _2, _3, ... — OPENAI_BASE_URL_2, OPENAI_API_KEY_2, MODELS_2, and so on.
+// The numbering is just how the file is laid out; it is not a priority.
 // The host on its own, used when a provider hasn't been given a name.
 function providerLabel(baseUrl) {
   return baseUrl ? baseUrl.replace(/^https?:\/\//, "").split("/")[0] : "";
@@ -38,10 +38,24 @@ export function displayName(provider) {
   return provider.name || providerLabel(provider.baseUrl) || "(unnamed)";
 }
 
-// BIG_MODEL / SMALL_MODEL hold a comma-separated priority list, tried left to
-// right. A single value is just a list of one, so older configs still parse.
+// MODELS holds a comma-separated list. The order in it means nothing: what
+// gets called is decided from the record in stats.jsonl, not from where a
+// name sits in the file.
 function modelList(value) {
   return (value || "").split(",").map((m) => m.trim()).filter(Boolean);
+}
+
+// Configs written before the tiers were dropped carry BIG_MODEL and
+// SMALL_MODEL instead. Both become one list, in the order they appeared,
+// without duplicates. Nothing needs to be rewritten for this to work; the
+// next save through the panel writes MODELS and the old keys fall away.
+function modelsOf(values, suffix) {
+  const current = modelList(values[`MODELS${suffix}`]);
+  if (current.length > 0) return current;
+  return [...new Set([
+    ...modelList(values[`BIG_MODEL${suffix}`]),
+    ...modelList(values[`SMALL_MODEL${suffix}`]),
+  ])];
 }
 
 export function providersFromEnv(values) {
@@ -70,15 +84,14 @@ export function providersFromEnv(values) {
         // Optional: a local backend (Ollama, llama.cpp) usually wants no key,
         // and we omit the Authorization header entirely when it's blank.
         apiKey: values[`OPENAI_API_KEY${suffix}`] || "",
-        bigModels: modelList(values[`BIG_MODEL${suffix}`]),
-        smallModels: modelList(values[`SMALL_MODEL${suffix}`]),
+        models: modelsOf(values, suffix),
         // Parked models keep their place in the lists above and are skipped
         // when picking one to call. Per provider rather than per tier: "this
         // model, from this provider" is the thing you want to switch off.
         disabledModels: modelList(values[`PROVIDER_MODELS_DISABLED${suffix}`]),
       };
     })
-    .filter((provider) => provider.baseUrl && provider.bigModels.length > 0);
+    .filter((provider) => provider.baseUrl && provider.models.length > 0);
 }
 
 // Streaming is on unless explicitly turned off. Some OpenAI-compatible

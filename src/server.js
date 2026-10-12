@@ -3,8 +3,7 @@ import { pathToFileURL } from "node:url";
 import { config, getConfig, isConfigured, displayName } from "./config.js";
 import { pickModels, toOpenAIRequest, toAnthropicResponse, toAnthropicError } from "./translate.js";
 import { streamOpenAIToAnthropic, sendAnthropicAsStream } from "./stream.js";
-import { readCapabilities, capabilityFor, requirementsOf, canServe, describeNeeds } from "./capabilities.js";
-import { kindOf, statsFor, record, orderByReliability } from "./stats.js";
+import { requirementsOf, describeNeeds, kindOf, chooseOrder, record, coolOff } from "./stats.js";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -69,17 +68,25 @@ const RETRY_DELAY_MS = 400;
 const UPSTREAM_TIMEOUT_MS = 300000;
 const TOTAL_DEADLINE_MS = 600000;
 
+// With less than this left on the deadline there is no point starting another
+// attempt: the slowest working models here answer in a minute, so a few
+// seconds of runway only produces an abort. It used to start them anyway —
+// with a one-second floor on the timeout — which recorded a failure against
+// every model at the tail of a slow walk and taught the router to avoid
+// models that had never actually been asked.
+const MIN_ATTEMPT_MS = 20000;
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function callUpstream(
   anthropicReq,
   providers = config.providers,
   streaming = config.streaming,
-  capabilities = null,
   // Injectable so a caller can run without touching the stats file at all —
   // it is shared mutable state on disk, which otherwise makes this function's
-  // behaviour depend on every request that came before it.
-  stats = { lookup: statsFor, record },
+  // behaviour depend on every request that came before it. `order` is here so
+  // a test can pin the draw that would otherwise be random.
+  stats = { order: chooseOrder, record, coolOff },
 ) {
   const failures = [];
   const deadline = Date.now() + TOTAL_DEADLINE_MS;
@@ -100,43 +107,24 @@ export async function callUpstream(
     };
   }
 
-  // Only try models that can serve what this request needs. A model with no
-  // detected capabilities is allowed through — unknown means untested, not
-  // incapable — so adding a provider never silently takes it out of rotation.
+  // Every model is a candidate for every request. Which one goes first is
+  // drawn from what each has actually done with this kind of request before,
+  // so a model that cannot call tools sinks for tool requests without anyone
+  // having to test it, and keeps its place for plain text.
+  //
+  // The draw is random, weighted by the record. Two identical requests a
+  // second apart will not necessarily pick the same model, which is the
+  // point: it spreads load over everything that works and keeps re-checking
+  // the ones that did not.
   const needs = requirementsOf(anthropicReq);
-  const known = capabilities ?? readCapabilities();
-  const attempts = candidates.filter(({ provider, model }) =>
-    canServe(capabilityFor(known, provider.baseUrl, model), needs),
-  );
-
-  if (attempts.length === 0) {
-    const names = candidates.map(({ provider, model }) => `${displayName(provider)}/${model}`);
-    return {
-      status: 503,
-      message:
-        `This request needs ${describeNeeds(needs)}, and none of the ${candidates.length} ` +
-        `configured model(s) support it: ${names.join(", ")}. ` +
-        `Add a model that does, or re-run detection in "opencc init".`,
-    };
-  }
-
-  if (attempts.length < candidates.length) {
-    console.log(
-      `[opencc]   needs ${describeNeeds(needs)} — ${candidates.length - attempts.length} of ${candidates.length} model(s) skipped as unsupported`,
-    );
-  }
-
-  // Past failures move a model down the list, never off it. Only models with
-  // a real track record of failing this kind of request are touched, so the
-  // order you configured still decides everything else.
   const kind = kindOf(needs);
-  const ordered = orderByReliability(attempts, kind, stats.lookup);
-  if (ordered.demoted.length > 0) {
-    const names = ordered.demoted
-      .map((d) => `${d.model} ${Math.round(d.rate * 100)}%`)
-      .join(", ");
-    console.log(`[opencc]   tried last on ${kind} (poor record): ${names}`);
-  }
+  const ordered = stats.order(candidates, kind);
+
+  console.log(
+    `[opencc]   ${candidates.length} model(s) for ${describeNeeds(needs)}` +
+      (ordered.cooling ? `, ${ordered.cooling} cooling off` : "") +
+      `: ${ordered.head.join(", ")}`,
+  );
 
   // With streaming off we ask upstream for the whole reply at once, then
   // re-stream it ourselves if the client wanted a stream.
@@ -146,7 +134,7 @@ export async function callUpstream(
     const label = `attempt ${i + 1}/${ordered.attempts.length} (${displayName(provider)}, ${model})`;
 
     const remaining = deadline - Date.now();
-    if (remaining <= 0) {
+    if (remaining < MIN_ATTEMPT_MS) {
       console.error(`[opencc]   giving up after ${TOTAL_DEADLINE_MS / 1000}s, ${ordered.attempts.length - i} attempt(s) untried`);
       failures.push(`stopped after ${TOTAL_DEADLINE_MS / 1000}s with ${ordered.attempts.length - i} attempt(s) untried`);
       break;
@@ -179,12 +167,18 @@ export async function callUpstream(
       const startedAt = Date.now();
       const took = () => `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
 
+      // What the model actually gets. Less than the full timeout means the
+      // overall deadline is the thing cutting it off, which is about how long
+      // this walk has been running and not about this model.
+      const budget = Math.min(UPSTREAM_TIMEOUT_MS, Math.max(MIN_ATTEMPT_MS, deadline - Date.now()));
+      const shortened = budget < UPSTREAM_TIMEOUT_MS;
+
       try {
         upstream = await fetch(`${provider.baseUrl}/chat/completions`, {
           method: "POST",
           headers,
           body,
-          signal: AbortSignal.timeout(Math.min(UPSTREAM_TIMEOUT_MS, Math.max(1000, deadline - Date.now()))),
+          signal: AbortSignal.timeout(budget),
         });
       } catch (err) {
         // Unreachable host, DNS failure, connection reset, timeout, ...
@@ -202,8 +196,23 @@ export async function callUpstream(
       // request won't heal in 400ms, and the next model is a better bet than
       // waiting out a second timeout.
       const serverFault = !networkError && upstream.status >= 500;
+
       // 0 stands for "never reached it", which is as much a failure as a 500.
-      stats.record({ baseUrl: provider.baseUrl, model, kind, status: networkError ? 0 : upstream.status });
+      //
+      // Unless the deadline is what stopped it. An attempt that was never
+      // given the full timeout tells us nothing about the model, and
+      // recording it would hold a slow walk against whichever models happened
+      // to be at the end of it.
+      if (networkError && shortened) {
+        console.error(`[opencc]   ${label} cut short by the deadline after ${took()} — not counted against it`);
+      } else {
+        const status = networkError ? 0 : upstream.status;
+        stats.record({ baseUrl: provider.baseUrl, model, kind, status });
+        // Rate limits and outages say "not now" rather than "not ever", so
+        // on top of the record they park the model for a minute or so.
+        const cool = stats.coolOff(provider.baseUrl, model, status);
+        if (cool) console.error(`[opencc]   ${label} cooling off for ${cool / 1000}s`);
+      }
 
       const reason = networkError
         ? `unreachable after ${took()}: ${networkError.message}`
@@ -235,7 +244,7 @@ export async function callUpstream(
 
   return {
     status: lastStatus,
-    message: `All ${attempts.length} provider/model attempt(s) failed:\n${failures.join("\n")}`,
+    message: `All ${ordered.attempts.length} provider/model attempt(s) failed:\n${failures.join("\n")}`,
   };
 }
 

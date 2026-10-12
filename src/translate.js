@@ -1,17 +1,13 @@
 import { generateId } from "./ids.js";
 
-// Claude Code asks for a Haiku-class model for its cheap background work
-// (titles, classification) and a Sonnet/Opus-class one for everything else.
-// The requested model name is the only signal, so anything mentioning
-// "haiku" routes to the provider's SMALL list and everything else to its BIG
-// list. Each provider names its models differently, so this resolves per
-// provider at call time, returning the whole list in priority order.
+// Every model a provider offers is a candidate for every request. The name
+// Claude Code asks for is ignored: it names Anthropic models, which say
+// nothing about what the backends here can do, and the record in stats.jsonl
+// answers that question better than a substring match ever did.
 export function pickModels(requestedModel = "", provider) {
-  const small = provider.smallModels.length ? provider.smallModels : provider.bigModels;
-  const chosen = requestedModel.toLowerCase().includes("haiku") ? small : provider.bigModels;
   // Parked models stay in the configured list — they just never get a turn.
   const off = provider.disabledModels ?? [];
-  return off.length ? chosen.filter((model) => !off.includes(model)) : chosen;
+  return off.length ? provider.models.filter((model) => !off.includes(model)) : provider.models;
 }
 
 function systemToOpenAI(system) {
@@ -39,6 +35,23 @@ function imageBlockToOpenAI(block) {
   };
 }
 
+// A PDF, in the shape OpenAI added for file input. Few OpenAI-compatible
+// backends accept it, and that is the point: one that cannot will reject the
+// request, which is recorded and routes around it.
+//
+// This used to be dropped on the floor. The model then answered confidently
+// about a document it had never seen, which is worse than any error.
+function documentBlockToOpenAI(block) {
+  const source = block.source ?? {};
+  const mediaType = source.media_type ?? "application/pdf";
+  const data = source.type === "base64" ? `data:${mediaType};base64,${source.data}` : source.url;
+
+  return {
+    type: "file",
+    file: { filename: block.title ?? "document.pdf", file_data: data },
+  };
+}
+
 function convertUserMessage(content) {
   const parts = [];
   const toolMessages = [];
@@ -48,6 +61,8 @@ function convertUserMessage(content) {
       parts.push({ type: "text", text: block.text });
     } else if (block.type === "image") {
       parts.push(imageBlockToOpenAI(block));
+    } else if (block.type === "document") {
+      parts.push(documentBlockToOpenAI(block));
     } else if (block.type === "tool_result") {
       toolMessages.push({
         role: "tool",

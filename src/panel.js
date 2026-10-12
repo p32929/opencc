@@ -1,21 +1,19 @@
-// The admin panel `opencc init` opens. Same job as the terminal menu, but a
-// browser is a better place to manage a dozen models and their capabilities.
+// The admin panel `opencc init` opens: which providers exist, which models
+// they offer, and how each of those models has actually been doing.
 //
-// No dependencies: Node's http server, one hand-written page, and a small JSON
-// API over the same configStore the terminal menu uses, so the two stay
-// interchangeable.
+// There is nothing here for ordering or for capabilities. Both are worked out
+// from the record in stats.jsonl while the proxy runs, so the only things
+// left to set are the facts opencc cannot discover on its own: a URL, a key,
+// and which models to put in the pot.
+//
+// No dependencies: Node's http server, one hand-written page, and a small
+// JSON API over the same configStore the rest of opencc reads.
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline/promises";
 import { readStoredConfig, writeStoredConfig } from "./configStore.js";
 import { providersFromEnv, displayName, streamingFromEnv } from "./config.js";
-import {
-  readCapabilities,
-  writeCapabilities,
-  setCapability,
-  fetchCatalogue,
-  detectCapabilities,
-} from "./capabilities.js";
+import { allStats, successRate, coolingFor, coverage, record, resetStats, NEEDED } from "./stats.js";
+import { warmUp, pendingModels } from "./warmup.js";
 import { page } from "./panelPage.js";
 
 const json = (res, status, body) => {
@@ -41,10 +39,9 @@ function readBody(req) {
   });
 }
 
-// Detection can take minutes across a dozen models, so the run publishes
-// where it's up to and the page polls it. Module state is fine: the panel is
-// a single local process serving one person.
-let detection = null;
+// A warm-up started from the panel. Module state is fine: the panel is a
+// single local process serving one person.
+let warming = null;
 
 function loadState() {
   const stored = readStoredConfig();
@@ -52,11 +49,12 @@ function loadState() {
     providers: providersFromEnv(stored).map((p) => ({ ...p, label: displayName(p) })),
     port: stored.PORT || "3000",
     streaming: streamingFromEnv(stored),
-    capabilities: readCapabilities(),
   };
 }
 
-// One real "Hi" through the provider, the same check the terminal menu runs.
+// One real "Hi" through the provider. The result is recorded like any other
+// call, so pressing Test is not just a check: it is the first entry in a new
+// model's record, and the router reads it straight away.
 async function testModel(provider, model) {
   const headers = { "Content-Type": "application/json" };
   if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
@@ -67,35 +65,16 @@ async function testModel(provider, model) {
       body: JSON.stringify({ model, messages: [{ role: "user", content: "Hi" }] }),
       signal: AbortSignal.timeout(300000),
     });
+    record({ baseUrl: provider.baseUrl, model, kind: "text", status: res.status });
     if (!res.ok) return { ok: false, error: `${res.status} ${(await res.text()).slice(0, 200)}` };
     return { ok: true };
   } catch (err) {
+    record({ baseUrl: provider.baseUrl, model, kind: "text", status: 0 });
     return { ok: false, error: err.message };
   }
 }
 
-function openBrowser(url) {
-  // Headless machines and test runs don't want a browser launched at them.
-  if (process.env.OPENCC_NO_BROWSER) return;
-  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-  try {
-    // Detached and ignored: if no browser can be opened we just print the URL.
-    spawn(cmd, [url], { stdio: "ignore", detached: true, shell: process.platform === "win32" }).unref();
-  } catch {
-    /* printed below either way */
-  }
-}
-
-const DEFAULT_PANEL_PORT = 3450;
-
-async function askPort(fallback) {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = (await rl.question(`  Port for the admin panel [${fallback}]: `)).trim();
-  rl.close();
-  if (!answer) return fallback;
-  const n = Number(answer);
-  return Number.isInteger(n) && n > 0 && n < 65536 ? n : fallback;
-}
+export const DEFAULT_PANEL_PORT = 3450;
 
 function listen(server, port) {
   return new Promise((resolve, reject) => {
@@ -105,7 +84,7 @@ function listen(server, port) {
   });
 }
 
-export async function runPanel({ port, ask = true } = {}) {
+export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
   const server = createServer(async (req, res) => {
     const path = req.url.split("?")[0];
 
@@ -121,6 +100,93 @@ export async function runPanel({ port, ask = true } = {}) {
         return;
       }
 
+      // What has actually worked. This is the whole of what decides routing,
+      // so the page shows it per model and per kind of request.
+      if (req.method === "GET" && path === "/api/stats") {
+        const { providers } = loadState();
+        const cooling = {};
+        for (const p of providers) {
+          for (const model of p.models) {
+            const ms = coolingFor(p.baseUrl, model);
+            if (ms) cooling[p.baseUrl + "|" + model] = ms;
+          }
+        }
+        json(res, 200, {
+          kinds: NEEDED,
+          cooling,
+          // Worked out here rather than in the page: two copies of this rule
+          // drifted apart the first time one of them changed.
+          coverage: Object.fromEntries(NEEDED.map((kind) => [kind, coverage(providers, kind)])),
+          rows: allStats().map((row) => ({ ...row, rate: successRate(row) })),
+        });
+        return;
+      }
+
+      // Start over. The next "opencc" start finds an empty record and warms
+      // up again, which is the quickest way to a clean measured baseline.
+      if (req.method === "POST" && path === "/api/stats/reset") {
+        json(res, 200, resetStats());
+        return;
+      }
+
+      // Which models have never been asked anything. The page checks this
+      // after every save so a model added by hand gets tested straight away.
+      if (req.method === "GET" && path === "/api/warmup/pending") {
+        const kind = new URL(req.url, "http://localhost").searchParams.get("kind") || "tools";
+        const groups = pendingModels(loadState().providers, kind);
+        json(res, 200, {
+          total: groups.reduce((n, g) => n + g.models.length, 0),
+          models: groups.flatMap((g) => g.models.map((m) => `${displayName(g.provider)} ${m}`)),
+        });
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/warmup/progress") {
+        json(res, 200, warming ?? { running: false });
+        return;
+      }
+
+      // One small tool-calling request per untested model, the same thing
+      // `opencc` does on a cold start. The results land in the shared log, so
+      // a proxy already running picks them up without being restarted.
+      if (req.method === "POST" && path === "/api/warmup") {
+        if (warming?.running) {
+          json(res, 409, { error: "a warm-up is already running" });
+          return;
+        }
+
+        const { kind = "tools" } = await readBody(req);
+        warming = { running: true, kind, done: 0, total: 0, current: "", results: [] };
+        try {
+          await warmUp(loadState().providers, {
+            kind,
+            onEvent: (event) => {
+              if (event.type === "start") warming.total = event.total;
+              if (event.type === "result") {
+                warming.done = event.done;
+                warming.current = `${displayName(event.provider)} ${event.model}`;
+                warming.results.push({
+                  model: event.model,
+                  provider: displayName(event.provider),
+                  status: event.status,
+                  calledTool: Boolean(event.calledTool),
+                  error: event.error,
+                });
+              }
+            },
+          });
+        } finally {
+          warming = { ...warming, running: false, current: "" };
+        }
+
+        // A model that just proved it can call tools may be the one the
+        // proxy was waiting for.
+        await onSave?.();
+
+        json(res, 200, { results: warming.results });
+        return;
+      }
+
       if (req.method === "POST" && path === "/api/state") {
         const body = await readBody(req);
         writeStoredConfig({
@@ -129,88 +195,8 @@ export async function runPanel({ port, ask = true } = {}) {
           streaming: body.streaming !== false,
         });
         json(res, 200, loadState());
-        return;
-      }
-
-      // Capabilities the user set by hand win over anything detected.
-      if (req.method === "POST" && path === "/api/capability") {
-        const { baseUrl, model, caps } = await readBody(req);
-        const all = setCapability(readCapabilities(), baseUrl, model, {
-          ...caps,
-          source: "manual",
-          detectedAt: new Date().toISOString(),
-        });
-        writeCapabilities(all);
-        json(res, 200, { capabilities: all });
-        return;
-      }
-
-      if (req.method === "GET" && path === "/api/detect/progress") {
-        json(res, 200, detection ?? { running: false });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/api/detect") {
-        if (detection?.running) {
-          json(res, 409, { error: "a detection run is already going" });
-          return;
-        }
-
-        const { index } = await readBody(req);
-        const { providers } = loadState();
-        const chosen = (typeof index === "number" ? [providers[index]] : providers).filter(Boolean);
-        const jobs = chosen.flatMap((provider) =>
-          [...new Set([...provider.bigModels, ...provider.smallModels])].map((model) => ({ provider, model })),
-        );
-
-        detection = { running: true, done: 0, total: jobs.length, current: "", results: [] };
-        let all = readCapabilities();
-
-        try {
-          const catalogues = new Map();
-          for (const { provider, model } of jobs) {
-            detection.current = `${displayName(provider)} · ${model}`;
-            if (!catalogues.has(provider.baseUrl)) {
-              catalogues.set(provider.baseUrl, await fetchCatalogue(provider));
-            }
-            // Sequential so a run can't hammer one key, and so the progress
-            // the page shows means something.
-            const caps = await detectCapabilities(provider, model, catalogues.get(provider.baseUrl));
-            all = setCapability(all, provider.baseUrl, model, caps);
-            detection.done += 1;
-            detection.results.push({ model, tools: caps.tools, vision: caps.vision });
-          }
-          writeCapabilities(all);
-        } finally {
-          detection = { ...detection, running: false, current: "" };
-        }
-
-        json(res, 200, { capabilities: all, results: detection.results });
-        return;
-      }
-
-      // Forgetting everything detected, for when a provider's models change
-      // or a run cached something wrong.
-      if (req.method === "POST" && path === "/api/capability/clear") {
-        writeCapabilities({});
-        json(res, 200, { capabilities: {} });
-        return;
-      }
-
-      // Any model the provider offers, whether or not it's in the routing
-      // lists — otherwise checking whether a model is worth adding means
-      // adding it first.
-      if (req.method === "POST" && path === "/api/probe") {
-        const { index, model } = await readBody(req);
-        const provider = loadState().providers[index];
-        if (!provider || !model) {
-          json(res, 404, { error: "no such provider or model" });
-          return;
-        }
-        const caps = await detectCapabilities(provider, model, await fetchCatalogue(provider));
-        const all = setCapability(readCapabilities(), provider.baseUrl, model, caps);
-        writeCapabilities(all);
-        json(res, 200, { caps, capabilities: all });
+        // The proxy may have been waiting for exactly this.
+        await onSave?.();
         return;
       }
 
@@ -221,7 +207,10 @@ export async function runPanel({ port, ask = true } = {}) {
           json(res, 404, { ok: false, error: "no such provider" });
           return;
         }
-        json(res, 200, await testModel(provider, model));
+        const outcome = await testModel(provider, model);
+        // Same reason as the warm-up: one passing test can unblock the proxy.
+        await onSave?.();
+        json(res, 200, outcome);
         return;
       }
 
@@ -256,27 +245,29 @@ export async function runPanel({ port, ask = true } = {}) {
     }
   });
 
-  // Asked for rather than grabbed, so the panel never lands on the port the
-  // proxy is using and you always know where it is.
-  let chosen = port ?? (ask ? await askPort(DEFAULT_PANEL_PORT) : DEFAULT_PANEL_PORT);
-
-  while (true) {
+  // Taken rather than asked for: one command should not open with two
+  // questions. If the port is busy we move up until one is free.
+  let chosen = port;
+  for (let tries = 0; tries < 20; tries++) {
     try {
       await listen(server, chosen);
-      break;
+      return server;
     } catch (err) {
       if (err.code !== "EADDRINUSE") throw err;
-      console.log(`  Port ${chosen} is already in use.`);
-      if (!ask) throw err;
-      chosen = await askPort(chosen + 1);
+      chosen += 1;
     }
   }
+  throw new Error(`no free port for the panel between ${port} and ${chosen}`);
+}
 
-  const url = `http://localhost:${server.address().port}`;
-  console.log("");
-  console.log(`  opencc admin panel → ${url}`);
-  console.log("  Changes save as you make them. Ctrl+C when you're done.");
-  console.log("");
-  openBrowser(url);
-  return server;
+export function openBrowser(url) {
+  // Headless machines and test runs don't want a browser launched at them.
+  if (process.env.OPENCC_NO_BROWSER) return;
+  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+  try {
+    // Detached and ignored: if no browser can be opened we just print the URL.
+    spawn(cmd, [url], { stdio: "ignore", detached: true, shell: process.platform === "win32" }).unref();
+  } catch {
+    /* printed by the caller either way */
+  }
 }

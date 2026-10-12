@@ -3,41 +3,29 @@
 const args = process.argv.slice(2);
 const subcommand = args[0];
 
-if (subcommand === "init") {
-  // The browser panel is the default — it's a better place to manage a dozen
-  // models and their capabilities. --tui keeps the terminal menu for a machine
-  // with no browser, over SSH for instance. Both edit the same config.
-  if (args.includes("--tui")) {
-    const { runInit } = await import("./init.js");
-    await runInit();
-    process.exit(0);
-  }
-
-  const { runPanel } = await import("./panel.js");
-  // --port skips the question, for scripting.
-  const flag = args.indexOf("--port");
-  const given = flag !== -1 ? Number(args[flag + 1]) : undefined;
-  await runPanel(Number.isInteger(given) ? { port: given, ask: false } : {});
-  // The panel's own listening server keeps this process alive; Ctrl+C stops
-  // it. Nothing else runs — init edits config, it doesn't serve the proxy.
-} else if (subcommand === "claude") {
-  await runClaude(args.slice(1));
-} else {
-  await runServer();
+// Checked before anything else dispatches, so it works wherever you put it
+// on the line. It only ever touches what opencc learned: providers, models,
+// keys and settings are in a different file and are not read here.
+if (args.includes("--reset-stats")) {
+  const { resetStats } = await import("./stats.js");
+  const { moved, previous } = resetStats();
+  console.log("");
+  console.log(moved
+    ? `  Record reset. The old one is at ${previous}`
+    : "  Nothing on record, so nothing to reset.");
+  console.log("  Providers, models and keys are untouched.");
+  console.log("  The next time you run opencc it warms up and starts learning again.");
+  console.log("");
+  process.exit(0);
 }
 
-// Asked every time the proxy starts, so you always know which port it's on and
-// can move it without editing config first. Skipped when there's no terminal
-// to ask (a script, a process manager) or when --port already said.
-async function askPort(label, fallback) {
-  if (!process.stdin.isTTY) return Number(fallback);
-  const { createInterface } = await import("node:readline/promises");
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = (await rl.question(`  ${label} [${fallback}]: `)).trim();
-  rl.close();
-  if (!answer) return Number(fallback);
-  const n = Number(answer);
-  return Number.isInteger(n) && n > 0 && n < 65536 ? n : Number(fallback);
+if (subcommand === "claude") {
+  await runClaude(args.slice(1));
+} else {
+  // "opencc" and "opencc init" are the same thing. There is one command: it
+  // serves the panel, and it serves the proxy as soon as there is something
+  // to route to.
+  await run();
 }
 
 // The chosen port is written back, because "opencc claude" and the panel both
@@ -55,66 +43,122 @@ async function rememberPort(port) {
   });
 }
 
-async function runServer() {
-  const { isConfigured, config, displayName } = await import("./config.js");
+function flagValue(name) {
+  const at = args.indexOf(name);
+  const given = at === -1 ? NaN : Number(args[at + 1]);
+  return Number.isInteger(given) && given > 0 && given < 65536 ? given : undefined;
+}
 
-  if (!isConfigured()) {
-    console.error("opencc is not configured yet.");
-    console.error('Run "opencc init" to set it up.');
-    process.exit(1);
-  }
-
-  const flag = args.indexOf("--port");
-  const given = flag !== -1 ? Number(args[flag + 1]) : undefined;
-  let port = Number.isInteger(given) ? given : await askPort("Port for the proxy", config.port);
-
+// One command, two servers.
+//
+// The panel always comes up: without it there is no way to add a provider.
+// The proxy only comes up once there is at least one provider with a model,
+// because a proxy with nothing behind it can only fail. Adding one in the
+// panel brings the proxy up on the spot, so the first run is: start opencc,
+// fill in the panel, start Claude Code.
+async function run() {
+  const { getConfig, isConfigured } = await import("./config.js");
+  const { coverage } = await import("./stats.js");
+  const { runPanel, openBrowser, DEFAULT_PANEL_PORT } = await import("./panel.js");
   const { startServer } = await import("./server.js");
-  while (true) {
-    try {
-      await startServer(port);
-      break;
-    } catch (err) {
-      if (err.code !== "EADDRINUSE") throw err;
-      console.log(`  Port ${port} is already in use.`);
-      if (!process.stdin.isTTY || Number.isInteger(given)) process.exit(1);
-      port = await askPort("Port for the proxy", port + 1);
-    }
-  }
-  await rememberPort(port);
 
-  console.log(`opencc listening on http://localhost:${port}`);
-  console.log("");
-  config.providers.forEach((provider, i) => {
-    if (provider.disabled) {
-      console.log(`  ${i + 1}. ${displayName(provider)} (disabled — skipped)`);
-      return;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+  let proxyPort = null;
+  // Why the proxy is not up, as lines to print. Null once it is.
+  let heldBack = ["proxy  waiting - add a provider in the panel and it starts on its own"];
+
+  // Whether there is any point exposing the proxy yet.
+  //
+  // Tool calling is not optional: Claude Code reads and edits files with it,
+  // so a proxy whose models all fail at it can only waste your time. The bar
+  // is "we know it cannot work", not "we have not proved it can" - a model
+  // nobody has asked yet gets the benefit of the doubt, or a fresh install
+  // started with --no-warmup would never come up.
+  function blockedBecause(live) {
+    if (!isConfigured(live)) {
+      return ["proxy  waiting - add a provider in the panel and it starts on its own"];
     }
-    console.log(`  ${i + 1}. ${displayName(provider)}`);
-    console.log(`       Big (Opus, Sonnet) -> ${provider.bigModels.join(" → ")}`);
-    const small = provider.smallModels.length ? provider.smallModels : provider.bigModels;
-    console.log(`       Small (Haiku)      -> ${small.join(" → ")}`);
+
+    const tools = coverage(live.providers, "tools");
+    if (tools.can === 0 && tools.untried === 0) {
+      return [
+        `proxy  not started - none of your ${plural(tools.cannot, "model")} can call tools`,
+        "       Claude Code needs it to read and edit files.",
+        "       Add a model that can, in the panel, and it starts.",
+      ];
+    }
+
+    return null;
+  }
+
+  async function startProxy({ announce = true } = {}) {
+    if (proxyPort !== null) return;
+
+    const live = getConfig();
+    heldBack = blockedBecause(live);
+    if (heldBack) return;
+
+    // The port is taken before the warm-up runs, so a clash is known in a
+    // moment rather than after a minute of probing.
+    let port = flagValue("--port") ?? live.port;
+    for (let tries = 0; ; tries++) {
+      try {
+        await startServer(port);
+        break;
+      } catch (err) {
+        if (err.code !== "EADDRINUSE" || tries >= 20) throw err;
+        port += 1;
+      }
+    }
+    proxyPort = port;
+    await rememberPort(port);
+
+    if (!args.includes("--no-warmup")) {
+      const { warmUp, printingReporter } = await import("./warmup.js");
+      await warmUp(live.providers, { onEvent: printingReporter() });
+    }
+
+    if (!announce) return;
+
+    const enabled = live.providers.filter((p) => !p.disabled);
+    const models = enabled.reduce((n, p) => n + p.models.length - (p.disabledModels ?? []).length, 0);
+
+    console.log("");
+    console.log(`  proxy  http://localhost:${port}   ${plural(models, "model")}, ${plural(enabled.length, "provider")}`);
+    if (!live.streaming) console.log("  streaming is off, so replies arrive complete");
+
+    // Images are optional: Claude Code works fine without them, you just
+    // cannot paste a screenshot. Worth saying, not worth blocking over.
+    const images = coverage(live.providers, "image");
+    if (images.can === 0 && images.untried === 0) {
+      console.log("  no model can take images, so pasted screenshots will fail");
+    }
+
+    console.log("");
+    console.log("  in another terminal: opencc claude");
+    console.log("");
+  }
+
+  const panel = await runPanel({
+    port: flagValue("--panel-port") ?? DEFAULT_PANEL_PORT,
+    onSave: startProxy,
   });
-  if (!config.streaming) {
-    console.log("");
-    console.log("  Streaming is off — replies arrive complete instead of token by token.");
-  }
-  if (config.providers.every((provider) => provider.disabled)) {
-    console.log("");
-    console.log('  Every provider is disabled — run "opencc init" to enable one.');
-  }
-  if (config.providers.filter((p) => !p.disabled).length > 1) {
-    console.log("");
-    console.log("  Tried in order — if one fails, the next one takes over.");
-  }
+  const panelUrl = `http://localhost:${panel.address().port}`;
+
   console.log("");
-  console.log("In another terminal, run: opencc claude");
-  console.log('(Arguments after "claude" are passed through to Claude Code.)');
-  console.log("");
-  console.log('To change these settings, run "opencc init" (from either terminal).');
-  console.log("");
-  // No further action needed — the listening server keeps this process
-  // alive on its own. Ctrl+C (or closing the terminal) stops it; nothing
-  // runs in the background beyond that.
+  console.log(`  panel  ${panelUrl}`);
+
+  await startProxy();
+
+  if (heldBack) {
+    for (const lineText of heldBack) console.log(`  ${lineText}`);
+    console.log("");
+    // There is nothing to do but open the panel and fix it.
+    openBrowser(panelUrl);
+  }
+
+  // Both servers keep the process alive. Ctrl+C stops both.
 }
 
 async function isProxyReachable(port) {

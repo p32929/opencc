@@ -9,8 +9,7 @@ test("reads an old single-provider config as provider 1", () => {
   const providers = providersFromEnv({
     OPENAI_BASE_URL: "https://api.openai.com/v1/",
     OPENAI_API_KEY: "k1",
-    BIG_MODEL: "gpt-4o",
-    SMALL_MODEL: "gpt-4o-mini",
+    MODELS: "gpt-4o",
   });
 
   assert.equal(providers.length, 1);
@@ -18,13 +17,33 @@ test("reads an old single-provider config as provider 1", () => {
   assert.equal(displayName(providers[0]), "api.openai.com");
 });
 
+test("a config written before the tiers were dropped folds into one list", () => {
+  const [p] = providersFromEnv({
+    OPENAI_BASE_URL: "https://one.test/v1",
+    BIG_MODEL: "big-a, shared",
+    SMALL_MODEL: "shared, small-a",
+  });
+
+  assert.deepEqual(p.models, ["big-a", "shared", "small-a"], "merged, in order, without repeats");
+});
+
+test("MODELS wins when both the old and the new keys are present", () => {
+  const [p] = providersFromEnv({
+    OPENAI_BASE_URL: "https://one.test/v1",
+    MODELS: "current",
+    BIG_MODEL: "stale",
+  });
+
+  assert.deepEqual(p.models, ["current"]);
+});
+
 test("reads numbered providers in order, keeps gaps, drops incomplete ones", () => {
   const providers = providersFromEnv({
     OPENAI_BASE_URL: "https://one.test/v1",
-    BIG_MODEL: "a",
+    MODELS: "a",
     // no _2 at all — must not stop the scan at the gap
     OPENAI_BASE_URL_3: "http://localhost:11434/v1",
-    BIG_MODEL_3: "llama3",
+    MODELS_3: "llama3",
     // _4 has a URL but no model, so it can never serve a request
     OPENAI_BASE_URL_4: "https://four.test/v1",
   });
@@ -34,28 +53,32 @@ test("reads numbered providers in order, keeps gaps, drops incomplete ones", () 
     ["https://one.test/v1", "http://localhost:11434/v1"],
   );
   assert.equal(providers[1].apiKey, "", "a keyless local backend is valid");
-  assert.deepEqual(providers[0].bigModels, ["a"], "a single model parses as a one-item list");
+  assert.deepEqual(providers[0].models, ["a"], "a single model parses as a one-item list");
 });
 
 test("names a provider by its PROVIDER_NAME, falling back to the host", () => {
   const providers = providersFromEnv({
     PROVIDER_NAME: "work openrouter",
     OPENAI_BASE_URL: "https://openrouter.ai/api/v1",
-    BIG_MODEL: "openai/gpt-4o",
+    MODELS: "openai/gpt-4o",
     OPENAI_BASE_URL_2: "https://openrouter.ai/api/v1",
-    BIG_MODEL_2: "openai/gpt-4o",
+    MODELS_2: "openai/gpt-4o",
   });
 
   assert.equal(displayName(providers[0]), "work openrouter", "a set name wins");
   assert.equal(displayName(providers[1]), "openrouter.ai", "an unnamed one falls back to its host");
 });
 
-// callUpstream reads and writes the shared stats file by default, which would
-// both pollute the real one and make these tests depend on each other's
-// history. Every call here goes through this instead.
-const NO_STATS = { lookup: () => null, record: () => {} };
-const up = (req, providers, streaming = true, caps = null) =>
-  callUpstream(req, providers, streaming, caps, NO_STATS);
+// callUpstream draws its order from the shared stats file, which would both
+// pollute the real one and make these tests depend on each other's history.
+// These walk the list exactly as given, so a test about the walk is about the
+// walk and not about a random draw.
+const NO_STATS = {
+  order: (attempts) => ({ attempts, head: [], cooling: 0 }),
+  record: () => {},
+  coolOff: () => 0,
+};
+const up = (req, providers, streaming = true) => callUpstream(req, providers, streaming, NO_STATS);
 
 const REQ = { model: "claude-sonnet-4", messages: [{ role: "user", content: "hi" }], max_tokens: 16 };
 
@@ -79,9 +102,9 @@ test("falls through exhausted providers to the first one that works", async (t) 
   const seen = stubFetch([429, "connect ECONNREFUSED", 200]);
 
   const result = await up(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k1", bigModels: ["big-1"], smallModels: [], name: "one" },
-    { baseUrl: "https://two.test/v1", apiKey: "k2", bigModels: ["big-2"], smallModels: [], name: "two" },
-    { baseUrl: "https://three.test/v1", apiKey: "", bigModels: ["big-3"], smallModels: [], name: "three" },
+    { baseUrl: "https://one.test/v1", apiKey: "k1", models: ["big-1"], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k2", models: ["big-2"], name: "two" },
+    { baseUrl: "https://three.test/v1", apiKey: "", models: ["big-3"], name: "three" },
   ]);
 
   assert.equal(result.provider.name, "three");
@@ -91,23 +114,6 @@ test("falls through exhausted providers to the first one that works", async (t) 
   assert.equal(seen[2].headers.Authorization, undefined, "no auth header when the key is blank");
 });
 
-test("routes background requests to each provider's small models", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  // 429 rather than 500: a 5xx is retried on the same model, which would
-  // make this test about retrying instead of about tier routing.
-  const seen = stubFetch([429, 200]);
-
-  await up({ ...REQ, model: "claude-3-5-haiku-20241022" }, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["big-1"], smallModels: ["small-1"], name: "one" },
-    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["big-2"], smallModels: [], name: "two" },
-  ]);
-
-  assert.equal(seen[0].body.model, "small-1");
-  assert.equal(seen[1].body.model, "big-2", "falls back to the big model when no small one is set");
-});
-
 test("reports the last error when every provider fails", async (t) => {
   const realFetch = globalThis.fetch;
   t.after(() => (globalThis.fetch = realFetch));
@@ -115,8 +121,8 @@ test("reports the last error when every provider fails", async (t) => {
   stubFetch([429, 402]);
 
   const result = await up(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["big-1"], smallModels: [], name: "one" },
-    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["big-2"], smallModels: [], name: "two" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["big-1"], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k", models: ["big-2"], name: "two" },
   ]);
 
   assert.equal(result.upstream, undefined);
@@ -131,7 +137,7 @@ test("reports the last error when every provider fails", async (t) => {
 // finish_reason "stop"; Claude Code reads "end_turn" as the turn being over
 // and never runs the tool.
 
-import { toAnthropicResponse } from "./translate.js";
+import { toAnthropicResponse, toOpenAIRequest } from "./translate.js";
 import { streamOpenAIToAnthropic, sendAnthropicAsStream } from "./stream.js";
 
 test("non-streaming: a tool call reports tool_use even if finish_reason says stop", () => {
@@ -197,15 +203,13 @@ test("streaming: a plain text reply still reports end_turn", async () => {
 
 // --- model priority lists -------------------------------------------------
 
-test("parses a comma-separated model list in priority order", () => {
+test("parses a comma-separated model list", () => {
   const [p] = providersFromEnv({
     OPENAI_BASE_URL: "https://one.test/v1",
-    BIG_MODEL: "first, second ,third",
-    SMALL_MODEL: " cheap-a , cheap-b ",
+    MODELS: "first, second ,third , ",
   });
 
-  assert.deepEqual(p.bigModels, ["first", "second", "third"]);
-  assert.deepEqual(p.smallModels, ["cheap-a", "cheap-b"]);
+  assert.deepEqual(p.models, ["first", "second", "third"], "trimmed, blanks dropped");
 });
 
 test("tries each model of a provider before moving to the next provider", async (t) => {
@@ -216,8 +220,8 @@ test("tries each model of a provider before moving to the next provider", async 
   const seen = stubFetch([429, 429, 200]);
 
   const result = await up(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1", "m2", "m3"], smallModels: [], name: "one" },
-    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["other"], smallModels: [], name: "two" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1", "m2", "m3"], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k", models: ["other"], name: "two" },
   ]);
 
   assert.equal(result.provider.name, "one", "stays on a provider that still has models left");
@@ -232,8 +236,8 @@ test("moves to the next provider once a provider's models are exhausted", async 
   const seen = stubFetch([429, 429, 200]);
 
   const result = await up(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1", "m2"], smallModels: [], name: "one" },
-    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m3"], smallModels: [], name: "two" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1", "m2"], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k", models: ["m3"], name: "two" },
   ]);
 
   assert.equal(result.provider.name, "two");
@@ -245,30 +249,17 @@ test("moves to the next provider once a provider's models are exhausted", async 
   ]);
 });
 
-test("background requests walk the small-model list in order", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  const seen = stubFetch([429, 200]);
-
-  await up({ ...REQ, model: "claude-3-5-haiku" }, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["big"], smallModels: ["cheap-a", "cheap-b"], name: "one" },
-  ]);
-
-  assert.deepEqual(seen.map((s) => s.body.model), ["cheap-a", "cheap-b"]);
-});
-
 // --- disabling a provider -------------------------------------------------
 
 test("reads PROVIDER_DISABLED and keeps the provider in place", () => {
   const providers = providersFromEnv({
     OPENAI_BASE_URL: "https://one.test/v1",
-    BIG_MODEL: "m1",
+    MODELS: "m1",
     PROVIDER_DISABLED_2: "true",
     OPENAI_BASE_URL_2: "https://two.test/v1",
-    BIG_MODEL_2: "m2",
+    MODELS_2: "m2",
     OPENAI_BASE_URL_3: "https://three.test/v1",
-    BIG_MODEL_3: "m3",
+    MODELS_3: "m3",
   });
 
   assert.deepEqual(providers.map((p) => p.disabled), [false, true, false]);
@@ -282,8 +273,8 @@ test("a disabled provider is skipped without shifting the others", async (t) => 
   const seen = stubFetch([200]);
 
   const result = await up(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", disabled: true },
-    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1"], name: "one", disabled: true },
+    { baseUrl: "https://two.test/v1", apiKey: "k", models: ["m2"], name: "two" },
   ]);
 
   assert.equal(result.provider.name, "two");
@@ -298,7 +289,7 @@ test("all providers disabled reports 503 rather than an empty failure list", asy
   const seen = stubFetch([]);
 
   const result = await up(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one", disabled: true },
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1"], name: "one", disabled: true },
   ]);
 
   assert.equal(result.upstream, undefined);
@@ -315,7 +306,7 @@ test("streaming off asks upstream for a complete reply", async (t) => {
 
   const seen = stubFetch([200, 200]);
   const providers = [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1"], name: "one" },
   ];
 
   const on = await up({ ...REQ, stream: true }, providers, true);
@@ -364,8 +355,8 @@ test("retries a 5xx once on the same model", async (t) => {
   const seen = stubFetch([503, 200]);
 
   const result = await up(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
-    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1"], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k", models: ["m2"], name: "two" },
   ]);
 
   assert.equal(result.provider.name, "one", "stays on the preferred provider");
@@ -380,8 +371,8 @@ test("gives up on a model after two 5xx and moves to the next", async (t) => {
   const seen = stubFetch([500, 500, 200]);
 
   const result = await up(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
-    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1"], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k", models: ["m2"], name: "two" },
   ]);
 
   assert.equal(result.provider.name, "two");
@@ -397,8 +388,8 @@ test("a 429 moves to the next model rather than being retried", async (t) => {
   const seen = stubFetch([429, 200]);
 
   const result = await up(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
-    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1"], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k", models: ["m2"], name: "two" },
   ]);
 
   assert.equal(result.provider.name, "two");
@@ -414,8 +405,8 @@ test("an unreachable host moves on without a retry", async (t) => {
   const seen = stubFetch(["connect ECONNREFUSED", 200]);
 
   const result = await up(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
-    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1"], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k", models: ["m2"], name: "two" },
   ]);
 
   assert.equal(result.provider.name, "two");
@@ -429,8 +420,8 @@ test("a 400 is never retried", async (t) => {
   const seen = stubFetch([400, 200]);
 
   const result = await up(REQ, [
-    { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" },
-    { baseUrl: "https://two.test/v1", apiKey: "k", bigModels: ["m2"], smallModels: [], name: "two" },
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1"], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k", models: ["m2"], name: "two" },
   ]);
 
   assert.equal(result.provider.name, "two");
@@ -473,7 +464,7 @@ test("does not forward max_tokens, whatever the client asked for", async (t) => 
   t.after(() => (globalThis.fetch = realFetch));
 
   const seen = stubFetch([200, 200]);
-  const provider = { baseUrl: "https://one.test/v1", apiKey: "k", bigModels: ["m1"], smallModels: [], name: "one" };
+  const provider = { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1"], name: "one" };
 
   await up({ ...REQ, max_tokens: 128000 }, [provider]);
   assert.equal("max_tokens" in seen[0].body, false, "absent from the upstream request");
@@ -490,204 +481,6 @@ test("still maps a length finish_reason to max_tokens", () => {
   assert.equal(out.stop_reason, "max_tokens");
 });
 
-// --- capability-aware routing ---------------------------------------------
-
-import { requirementsOf, canServe } from "./capabilities.js";
-
-test("works out what a request needs", () => {
-  assert.deepEqual(requirementsOf({ messages: [{ role: "user", content: "hi" }] }), {
-    tools: false, vision: false, documents: false,
-  });
-
-  assert.equal(requirementsOf({ messages: [], tools: [{ name: "Read" }] }).tools, true);
-  assert.equal(requirementsOf({ messages: [], tools: [] }).tools, false, "an empty array needs nothing");
-
-  const withImage = {
-    messages: [{ role: "user", content: [
-      { type: "text", text: "what is this" },
-      { type: "image", source: { media_type: "image/png", data: "x" } },
-    ] }],
-  };
-  assert.equal(requirementsOf(withImage).vision, true);
-
-  const withPdf = {
-    messages: [{ role: "user", content: [{ type: "document", source: { data: "x" } }] }],
-  };
-  assert.equal(requirementsOf(withPdf).documents, true);
-});
-
-test("an undetected model is allowed through, a known-incapable one is not", () => {
-  const needsVision = { tools: false, vision: true, documents: false };
-  assert.equal(canServe(null, needsVision), true, "unknown means untested, not incapable");
-  assert.equal(canServe({ vision: undefined }, needsVision), true);
-  assert.equal(canServe({ vision: false }, needsVision), false);
-  assert.equal(canServe({ vision: true }, needsVision), true);
-  assert.equal(canServe({ vision: false }, { tools: false, vision: false, documents: false }), true,
-    "no image in the request, so vision doesn't matter");
-});
-
-test("an image request skips models known to lack vision", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  const seen = stubFetch([200]);
-  const providers = [
-    { baseUrl: "https://blind.test/v1", apiKey: "k", bigModels: ["text-only"], smallModels: [], name: "blind" },
-    { baseUrl: "https://seeing.test/v1", apiKey: "k", bigModels: ["vision-model"], smallModels: [], name: "seeing" },
-  ];
-  const caps = {
-    "https://blind.test/v1|text-only": { vision: false, tools: true },
-    "https://seeing.test/v1|vision-model": { vision: true, tools: true },
-  };
-  const imageReq = {
-    ...REQ,
-    messages: [{ role: "user", content: [{ type: "image", source: { media_type: "image/png", data: "x" } }] }],
-  };
-
-  const result = await up(imageReq, providers, true, caps);
-  assert.equal(result.provider.name, "seeing");
-  assert.equal(seen.length, 1, "the blind model is never called");
-});
-
-test("nothing capable gives a 503 naming what was needed", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  const seen = stubFetch([]);
-  const providers = [
-    { baseUrl: "https://blind.test/v1", apiKey: "k", bigModels: ["text-only"], smallModels: [], name: "blind" },
-  ];
-  const caps = { "https://blind.test/v1|text-only": { vision: false } };
-  const imageReq = {
-    ...REQ,
-    messages: [{ role: "user", content: [{ type: "image", source: { media_type: "image/png", data: "x" } }] }],
-  };
-
-  const result = await up(imageReq, providers, true, caps);
-  assert.equal(result.status, 503);
-  assert.match(result.message, /needs images/);
-  assert.match(result.message, /blind\/text-only/);
-  assert.equal(seen.length, 0, "no request is sent at all");
-});
-
-// --- capability probing ---------------------------------------------------
-
-import { probeVision, fetchCatalogue, detectCapabilities } from "./capabilities.js";
-
-function stubStatuses(statuses) {
-  const seen = [];
-  globalThis.fetch = async (url, init) => {
-    const status = statuses[seen.length] ?? 200;
-    seen.push({ url, body: JSON.parse(init.body) });
-    if (status < 400) {
-      return { ok: true, status, json: async () => ({ choices: [{ message: { content: "ok" } }] }) };
-    }
-    return { ok: false, status, text: async () => `status ${status}` };
-  };
-  return seen;
-}
-
-test("a rate-limited model is left unknown, not marked incapable", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  // 429 throughout. It sits in the 4xx range but is purely load, so
-  // concluding "no vision" from it would permanently route images away from a
-  // model that handles them.
-  const seen = stubStatuses([429, 429, 429]);
-  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), undefined);
-  assert.equal(seen.length, 3, "three attempts, then unknown rather than a verdict");
-});
-
-test("a real rejection is conclusive once the plain request succeeds", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  // image -> 400, control -> 200, then the negative is confirmed with a
-  // second image request that also fails.
-  const seen = stubStatuses([400, 200, 400]);
-  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), false);
-  assert.equal(seen.length, 3);
-  assert.equal(JSON.stringify(seen[0].body).includes("image_url"), true, "first carried the image");
-  assert.equal(JSON.stringify(seen[1].body).includes("image_url"), false, "second was the control");
-  assert.equal(JSON.stringify(seen[2].body).includes("image_url"), true, "third re-tested the feature");
-});
-
-test("a 400 on both requests is inconclusive, not a capability answer", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  // The plain request fails too, so the image was never shown to be the cause.
-  stubStatuses([400, 400]);
-  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), undefined);
-});
-
-test("accepting an image is enough to conclude vision", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  stubStatuses([200]);
-  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), true);
-});
-
-
-test("a routing variant falls back to the base model in the catalogue", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  // OpenRouter publishes "qwen/qwen3.8-27b" but serves "qwen/qwen3.8-27b:free",
-  // and the variant is absent from the catalogue.
-  globalThis.fetch = async () => ({
-    ok: true,
-    json: async () => ({
-      data: [{
-        id: "qwen/qwen3.8-27b",
-        architecture: { input_modalities: ["text", "image", "video"] },
-        supported_parameters: ["tools", "temperature"],
-        context_length: 1000000,
-      }],
-    }),
-  });
-
-  const provider = { baseUrl: "https://openrouter.test/v1", apiKey: "k" };
-  const catalogue = await fetchCatalogue(provider);
-  const caps = await detectCapabilities(provider, "qwen/qwen3.8-27b:free", catalogue);
-
-  assert.equal(caps.tools, true);
-  assert.equal(caps.vision, true, "resolved without probing the variant");
-  assert.equal(caps.contextLength, 1000000);
-  assert.equal(caps.source, "catalogue");
-});
-
-
-test("a 403 is never a capability answer, even an HTML one", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  // Google's frontend answers an over-quota probe with a 403 HTML page. Read
-  // as a verdict it marked gemini-3.5-flash — which serves tool calls all
-  // day — as tools=false, taking it out of rotation for every request.
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    return { ok: false, status: 403, text: async () => "<!DOCTYPE html><html><title>Error 403</title>" };
-  };
-
-  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), undefined);
-  assert.equal(calls, 1, "403 isn't load either, so it isn't retried — just inconclusive");
-});
-
-test("a flaky rejection does not become a negative", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  // image -> 400, control -> 200, confirmation -> 200. The first rejection
-  // didn't hold up, so the answer is yes rather than no.
-  const seen = stubStatuses([400, 200, 200]);
-  assert.equal(await probeVision({ baseUrl: "https://x.test/v1", apiKey: "k" }, "m", 5000), true);
-  assert.equal(seen.length, 3);
-});
-
 // --- parking a single model ------------------------------------------------
 
 test("a disabled model keeps its place but never gets a turn", async (t) => {
@@ -697,7 +490,7 @@ test("a disabled model keeps its place but never gets a turn", async (t) => {
   const seen = stubFetch([200]);
   const result = await up(REQ, [{
     baseUrl: "https://one.test/v1", apiKey: "k", name: "one",
-    bigModels: ["m1", "m2", "m3"], smallModels: [],
+    models: ["m1", "m2", "m3"],
     disabledModels: ["m1"],
   }]);
 
@@ -705,33 +498,57 @@ test("a disabled model keeps its place but never gets a turn", async (t) => {
   assert.deepEqual(seen.map((s) => s.body.model), ["m2"]);
 });
 
-test("parking applies to both tiers, and an absent list changes nothing", () => {
+test("parking removes a model from the pot, and an absent list changes nothing", () => {
   const provider = {
-    baseUrl: "https://one.test/v1", bigModels: ["big-1", "shared"], smallModels: ["shared", "small-1"],
-    disabledModels: ["shared"],
+    baseUrl: "https://one.test/v1", models: ["m1", "parked", "m2"], disabledModels: ["parked"],
   };
-  assert.deepEqual(pickModels("claude-sonnet-4-5", provider), ["big-1"]);
-  assert.deepEqual(pickModels("claude-3-5-haiku", provider), ["small-1"]);
+  assert.deepEqual(pickModels("claude-sonnet-4-5", provider), ["m1", "m2"]);
 
   // providers written by an older version have no such field
-  const old = { baseUrl: "x", bigModels: ["a", "b"], smallModels: [] };
-  assert.deepEqual(pickModels("claude-sonnet-4-5", old), ["a", "b"]);
+  assert.deepEqual(pickModels("claude-sonnet-4-5", { baseUrl: "x", models: ["a", "b"] }), ["a", "b"]);
+});
+
+test("the model Claude Code asks for no longer picks the list", () => {
+  const provider = { baseUrl: "https://one.test/v1", models: ["m1", "m2"] };
+  assert.deepEqual(
+    pickModels("claude-3-5-haiku", provider),
+    pickModels("claude-opus-4", provider),
+    "every model is a candidate for every request",
+  );
 });
 
 test("PROVIDER_MODELS_DISABLED round-trips through the config", () => {
   const [p] = providersFromEnv({
     OPENAI_BASE_URL: "https://one.test/v1",
-    BIG_MODEL: "a, b, c",
+    MODELS: "a, b, c",
     PROVIDER_MODELS_DISABLED: "b",
   });
-  assert.deepEqual(p.bigModels, ["a", "b", "c"], "the list keeps every model");
+  assert.deepEqual(p.models, ["a", "b", "c"], "the list keeps every model");
   assert.deepEqual(p.disabledModels, ["b"]);
   assert.deepEqual(pickModels("claude-sonnet-4-5", p), ["a", "c"]);
 });
 
-// --- learning from what has worked ----------------------------------------
 
-import { kindOf, reliability, orderByReliability } from "./stats.js";
+// --- routing is learned, not configured ------------------------------------
+
+import {
+  requirementsOf, describeNeeds, kindOf, successRate,
+  belief, betaSample, chooseOrder, coolOff, coolingFor, clearCooldowns,
+} from "./stats.js";
+
+test("works out what a request needs", () => {
+  assert.deepEqual(requirementsOf({}), { tools: false, vision: false, documents: false });
+  assert.deepEqual(
+    requirementsOf({ tools: [{ name: "Read" }] }),
+    { tools: true, vision: false, documents: false },
+  );
+  assert.deepEqual(
+    requirementsOf({ messages: [{ role: "user", content: [{ type: "image" }] }] }),
+    { tools: false, vision: true, documents: false },
+  );
+  assert.equal(describeNeeds({ tools: true, vision: true }), "tool calling + images");
+  assert.equal(describeNeeds({}), "plain text");
+});
 
 test("a request is classified by the most specific thing it needs", () => {
   assert.equal(kindOf({ tools: false, vision: false }), "text");
@@ -740,44 +557,727 @@ test("a request is classified by the most specific thing it needs", () => {
   assert.equal(kindOf({ tools: true, vision: true }), "image", "an image request is an image request");
 });
 
-test("a thin record is no record — one bad afternoon shouldn't reorder anything", () => {
-  assert.equal(reliability(null), null);
-  assert.equal(reliability({ ok: 0, fail: 3 }), null, "under the attempt threshold");
-  assert.equal(reliability({ ok: 0, fail: 4 }), 0, "at the threshold it counts");
-  assert.equal(reliability({ ok: 9, fail: 1 }), 0.9);
+test("the plain rate is for reading, and says nothing when there is nothing to say", () => {
+  assert.equal(successRate(null), null);
+  assert.equal(successRate({ ok: 0, fail: 0 }), null);
+  assert.equal(successRate({ ok: 0, fail: 4 }), 0);
+  assert.equal(successRate({ ok: 9, fail: 1 }), 0.9);
 });
 
-const attempt = (name, model) => ({ provider: { baseUrl: "https://" + name + "/v1", name }, model });
-
-test("a model that keeps failing this kind of request is tried last", () => {
-  const attempts = [attempt("one", "m1"), attempt("two", "m2"), attempt("three", "m3")];
-  const lookup = (baseUrl) =>
-    baseUrl.includes("one") ? { ok: 0, fail: 9 } : { ok: 9, fail: 1 };
-
-  const { attempts: order, demoted } = orderByReliability(attempts, "tools", lookup);
-  assert.deepEqual(order.map((a) => a.model), ["m2", "m3", "m1"], "m1 moved to the back, rest untouched");
-  assert.deepEqual(demoted.map((d) => d.model), ["m1"]);
+test("an untried model is held at even odds, not at zero", () => {
+  const { a, b } = belief(null, null);
+  assert.equal(a, b, "no reason to think it works, no reason to think it doesn't");
 });
 
-test("models are never dropped, and a clean sheet keeps the configured order", () => {
+test("what a model did at other kinds nudges its first try at a new one", () => {
+  const good = belief(null, { ok: 40, fail: 0 });
+  const bad = belief(null, { ok: 0, fail: 40 });
+  assert.ok(good.a / (good.a + good.b) > bad.a / (bad.a + bad.b),
+    "a model that answers text is a better first guess for tools");
+});
+
+test("a few real results outweigh the nudge from other kinds", () => {
+  // 100 clean text replies, then three failures at tools: the three win.
+  const { a, b } = belief({ ok: 0, fail: 3 }, { ok: 100, fail: 0 });
+  assert.ok(a / (a + b) < 0.5, "it cannot call tools, whatever it does with text");
+});
+
+// A small deterministic generator, so a test about the draw is repeatable.
+function seeded(seed) {
+  let x = seed;
+  return () => {
+    x = (x * 1664525 + 1013904223) % 4294967296;
+    return x / 4294967296;
+  };
+}
+
+test("the draw lands inside the unit interval", () => {
+  const rng = seeded(7);
+  for (let i = 0; i < 200; i++) {
+    const v = betaSample(1 + i, 1 + (200 - i), rng);
+    assert.ok(v > 0 && v < 1, `drew ${v}`);
+  }
+});
+
+test("the draw tracks the record it came from", () => {
+  const rng = seeded(11);
+  const mean = (a, b) => {
+    let total = 0;
+    for (let i = 0; i < 4000; i++) total += betaSample(a, b, rng);
+    return total / 4000;
+  };
+  assert.ok(Math.abs(mean(9, 1) - 0.9) < 0.02, "nine of ten draws high");
+  assert.ok(Math.abs(mean(1, 9) - 0.1) < 0.02, "one of ten draws low");
+});
+
+const attempt = (host, model) => ({ provider: { baseUrl: `https://${host}/v1`, name: host }, model });
+
+// How often each model comes out in front over many draws. This is the
+// behaviour that matters: not which model wins, but how the wins are shared.
+function firstPlaceCounts(attempts, kind, records, runs = 600) {
+  const rng = seeded(3);
+  const counts = {};
+  for (const a of attempts) counts[a.model] = 0;
+  for (let i = 0; i < runs; i++) {
+    const { attempts: order } = chooseOrder(attempts, kind, {
+      lookup: (baseUrl, model) => records[model] ?? null,
+      lookupOther: () => null,
+      rng,
+    });
+    counts[order[0].model] += 1;
+  }
+  return counts;
+}
+
+test("a model with a long bad record effectively stops being asked", () => {
+  const attempts = [attempt("one", "good"), attempt("two", "poor")];
+  const counts = firstPlaceCounts(attempts, "tools", {
+    good: { ok: 40, fail: 4 },
+    poor: { ok: 3, fail: 40 },
+  });
+
+  assert.equal(counts.poor, 0, `forty failures is an answer: ${JSON.stringify(counts)}`);
+});
+
+test("a model with only a few failures keeps getting re-checked", () => {
+  // This is the half of the trade the old threshold version had no answer
+  // for. Two of eight is a bad afternoon, not a verdict, so it still takes
+  // the lead sometimes and can earn its place back.
+  const attempts = [attempt("one", "good"), attempt("two", "thin")];
+  const counts = firstPlaceCounts(attempts, "tools", {
+    good: { ok: 12, fail: 3 },
+    thin: { ok: 2, fail: 6 },
+  }, 4000);
+
+  assert.ok(counts.good > counts.thin * 10, `good still leads: ${JSON.stringify(counts)}`);
+  assert.ok(counts.thin > 10, `and the thin one is retried: ${JSON.stringify(counts)}`);
+});
+
+test("work spreads across models that are doing equally well", () => {
+  const attempts = [attempt("one", "a"), attempt("two", "b"), attempt("three", "c")];
+  const record = { ok: 30, fail: 3 };
+  const counts = firstPlaceCounts(attempts, "tools", { a: record, b: record, c: record });
+
+  // The old version sorted by rate and sent everything to whichever model was
+  // in front. Each of these should take roughly a third.
+  for (const model of ["a", "b", "c"]) {
+    assert.ok(counts[model] > 120, `${model} took only ${counts[model]} of 600`);
+  }
+});
+
+test("a model that has never done this kind of request still gets a turn", () => {
+  const attempts = [attempt("one", "known-bad"), attempt("two", "untried")];
+  const counts = firstPlaceCounts(attempts, "image", { "known-bad": { ok: 0, fail: 25 } });
+
+  assert.ok(counts.untried > counts["known-bad"] * 5,
+    `untried should lead: ${JSON.stringify(counts)}`);
+});
+
+test("failing at images does not cost a model its place for text", () => {
   const attempts = [attempt("one", "m1"), attempt("two", "m2")];
+  const records = { image: { m1: { ok: 0, fail: 30 } }, text: {} };
+  const counts = (kind) => {
+    const rng = seeded(5);
+    const out = { m1: 0, m2: 0 };
+    for (let i = 0; i < 400; i++) {
+      const { attempts: order } = chooseOrder(attempts, kind, {
+        lookup: (baseUrl, model) => records[kind][model] ?? null,
+        lookupOther: () => null,
+        rng,
+      });
+      out[order[0].model] += 1;
+    }
+    return out;
+  };
 
-  // nothing known about either
-  const { attempts: a1, demoted: d1 } = orderByReliability(attempts, "text", () => null);
-  assert.deepEqual(a1.map((a) => a.model), ["m1", "m2"]);
-  assert.deepEqual(d1, []);
-
-  // both failing: reordering would be pointless, so leave it alone
-  const { attempts: a2, demoted: d2 } = orderByReliability(attempts, "text", () => ({ ok: 0, fail: 9 }));
-  assert.deepEqual(a2.map((a) => a.model), ["m1", "m2"]);
-  assert.deepEqual(d2, [], "no point shuffling when everything is equally bad");
+  assert.ok(counts("image").m2 > counts("image").m1 * 5, "sunk for images");
+  const text = counts("text");
+  assert.ok(Math.abs(text.m1 - text.m2) < 120, "and untouched for text");
 });
 
-test("stats are per kind — failing at images doesn't demote a model for text", () => {
-  const attempts = [attempt("one", "m1"), attempt("two", "m2")];
-  const lookup = (baseUrl, model, kind) =>
-    baseUrl.includes("one") && kind === "image" ? { ok: 0, fail: 9 } : { ok: 9, fail: 1 };
+test("nothing is ever struck off: every model stays in the walk", () => {
+  const attempts = [attempt("one", "hopeless"), attempt("two", "fine")];
+  const { attempts: order } = chooseOrder(attempts, "tools", {
+    lookup: (baseUrl, model) => (model === "hopeless" ? { ok: 0, fail: 500 } : { ok: 500, fail: 0 }),
+    lookupOther: () => null,
+    rng: seeded(1),
+  });
 
-  assert.deepEqual(orderByReliability(attempts, "image", lookup).attempts.map((a) => a.model), ["m2", "m1"]);
-  assert.deepEqual(orderByReliability(attempts, "text", lookup).attempts.map((a) => a.model), ["m1", "m2"]);
+  assert.equal(order.length, 2);
+  assert.deepEqual(order.map((a) => a.model), ["fine", "hopeless"], "last, but still there");
 });
+
+// --- a rate limit is about the next minute, not about the model ------------
+
+test("a rate-limited model goes to the back and comes back on its own", () => {
+  clearCooldowns();
+  const attempts = [attempt("one", "limited"), attempt("two", "free")];
+  const lookups = { lookup: () => ({ ok: 50, fail: 0 }), lookupOther: () => null, rng: seeded(2) };
+
+  coolOff("https://one/v1", "limited", 429, 1000);
+
+  const during = chooseOrder(attempts, "tools", { ...lookups, now: 2000 });
+  assert.deepEqual(during.attempts.map((a) => a.model), ["free", "limited"], "back of the queue");
+  assert.equal(during.cooling, 1);
+
+  const after = chooseOrder(attempts, "tools", { ...lookups, now: 1000 + 60000 + 1 });
+  assert.equal(after.cooling, 0, "the timer ran out and nobody had to do anything");
+});
+
+test("only a rate limit or an outage starts the timer", () => {
+  clearCooldowns();
+  assert.ok(coolOff("https://x/v1", "m", 429) > 0, "rate limited");
+  assert.ok(coolOff("https://x/v1", "m", 503) > 0, "unavailable");
+  assert.ok(coolOff("https://x/v1", "m", 0) > 0, "never answered");
+  assert.equal(coolOff("https://x/v1", "m", 400), 0, "a 400 is about the request, not the minute");
+  assert.equal(coolOff("https://x/v1", "m", 200), 0);
+  clearCooldowns();
+  assert.equal(coolingFor("https://x/v1", "m"), 0);
+});
+
+test("a cooling model is still reachable when nothing else is left", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+  clearCooldowns();
+
+  coolOff("https://one.test/v1", "m1", 429);
+  const seen = stubFetch([500, 500, 200]);
+
+  // Real ordering this time, so the cooldown actually applies.
+  const result = await callUpstream(
+    REQ,
+    [
+      { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1"], name: "one" },
+      { baseUrl: "https://two.test/v1", apiKey: "k", models: ["m2"], name: "two" },
+    ],
+    true,
+    { order: chooseOrder, record: () => {}, coolOff: () => 0 },
+  );
+
+  assert.deepEqual(seen.map((s) => s.body.model), ["m2", "m2", "m1"],
+    "the cooling model is tried last rather than skipped");
+  assert.equal(result.model, "m1");
+  clearCooldowns();
+});
+
+// --- the record forgets ----------------------------------------------------
+
+import { decayed } from "./stats.js";
+
+const DAY = 86400000;
+const daysAgo = (now, n) => String(Math.floor((now - n * DAY) / DAY));
+
+test("an entry with no day buckets is used as it stands", () => {
+  assert.deepEqual(decayed({ ok: 3, fail: 1 }), { ok: 3, fail: 1 });
+  assert.equal(decayed(null), null);
+});
+
+test("today's results count fully", () => {
+  const now = Date.now();
+  const entry = { ok: 4, fail: 1, days: { [daysAgo(now, 0)]: { ok: 4, fail: 1 } } };
+  const out = decayed(entry, now);
+  assert.ok(Math.abs(out.ok - 4) < 0.01 && Math.abs(out.fail - 1) < 0.01);
+});
+
+test("old results fade", () => {
+  const now = Date.now();
+  const stale = { ok: 0, fail: 20, days: { [daysAgo(now, 30)]: { ok: 0, fail: 20 } } };
+  const out = decayed(stale, now);
+  assert.ok(out.fail / 20 < 0.01, `a month of silence should leave under 1%, left ${(out.fail / 20 * 100).toFixed(1)}%`);
+  assert.ok(out.fail > 0, "faded, not erased");
+});
+
+test("a bad week does not outweigh a good today", () => {
+  const now = Date.now();
+  const entry = {
+    ok: 5, fail: 20,
+    days: {
+      [daysAgo(now, 14)]: { ok: 0, fail: 20 },  // a fortnight ago it was broken
+      [daysAgo(now, 0)]: { ok: 5, fail: 0 },    // today it works
+    },
+  };
+
+  const raw = 5 / 25;
+  const out = decayed(entry, now);
+  const recent = out.ok / (out.ok + out.fail);
+  assert.ok(recent > 0.7, `should read as working now, got ${recent.toFixed(2)} against ${raw.toFixed(2)} all-time`);
+});
+
+test("a model that has been broken for a month climbs back ahead of one still failing", () => {
+  const now = Date.now();
+  const recovered = { ok: 0, fail: 40, days: { [daysAgo(now, 40)]: { ok: 0, fail: 40 } } };
+  const stillBad = { ok: 0, fail: 8, days: { [daysAgo(now, 0)]: { ok: 0, fail: 8 } } };
+
+  const a = belief(recovered, null, now);
+  const b = belief(stillBad, null, now);
+  assert.ok(
+    a.a / (a.a + a.b) > b.a / (b.a + b.b),
+    "forty failures last month says less than eight failures today",
+  );
+});
+
+test("compaction shares a day out across statuses without losing any", () => {
+  // Three results in a day, five different failure codes on record. Rounding
+  // each share on its own gives 0.6 -> 1 five times, or floors to zero five
+  // times; neither adds up to three.
+  const statuses = { 429: 3, 500: 3, 502: 3, 0: 3, 400: 3 };
+  const count = 3;
+  const group = Object.entries(statuses);
+  const total = group.reduce((sum, [, n]) => sum + n, 0);
+
+  const shares = group.map(([status, n]) => {
+    const exact = (n / total) * count;
+    return { status, n: Math.floor(exact), frac: exact - Math.floor(exact) };
+  });
+  let spare = count - shares.reduce((sum, s) => sum + s.n, 0);
+  for (const share of [...shares].sort((x, y) => y.frac - x.frac)) {
+    if (spare <= 0) break;
+    share.n += 1;
+    spare -= 1;
+  }
+
+  assert.equal(shares.reduce((sum, s) => sum + s.n, 0), count, "every result accounted for");
+});
+
+// --- warm-up ---------------------------------------------------------------
+
+import { pendingModels } from "./warmup.js";
+
+test("only models with no record are warmed up", () => {
+  const providers = [
+    { baseUrl: "https://one/v1", name: "one", models: ["fresh", "known"], disabled: false },
+    { baseUrl: "https://two/v1", name: "two", models: ["also-fresh"], disabled: false },
+    { baseUrl: "https://off/v1", name: "off", models: ["skipped"], disabled: true },
+  ];
+  const lookup = (baseUrl, model) => (model === "known" ? { ok: 3, fail: 1 } : null);
+
+  const groups = pendingModels(providers, "tools", lookup);
+  assert.deepEqual(
+    groups.map((g) => [g.provider.name, g.models]),
+    [["one", ["fresh"]], ["two", ["also-fresh"]]],
+    "a model with a record is left alone, and a disabled provider is skipped entirely",
+  );
+});
+
+test("a model whose record is empty still counts as pending", () => {
+  const providers = [{ baseUrl: "https://one/v1", name: "one", models: ["m"], disabled: false }];
+  const groups = pendingModels(providers, "tools", () => ({ ok: 0, fail: 0 }));
+  assert.deepEqual(groups[0].models, ["m"], "zero of zero is not a record");
+});
+
+test("parked models are not warmed up", () => {
+  const providers = [{
+    baseUrl: "https://one/v1", name: "one",
+    models: ["live", "parked"], disabledModels: ["parked"], disabled: false,
+  }];
+  assert.deepEqual(pendingModels(providers, "tools", () => null)[0].models, ["live"]);
+});
+
+
+test("a reset moves the log aside rather than deleting it", async (t) => {
+  // Its own HOME, so the real record is never in reach of this test.
+  const { mkdtempSync, writeFileSync, existsSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-reset-"));
+  const script = join(home, "run.mjs");
+  const here = new URL(".", import.meta.url).pathname;
+
+  writeFileSync(script, [
+    `import { record, aggregate, resetStats } from "${join(here, "stats.js")}";`,
+    `import { STATS_PATH } from "${join(here, "paths.js")}";`,
+    `import { existsSync, readFileSync } from "node:fs";`,
+    `record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 200 });`,
+    `const before = [...aggregate().values()].reduce((n, e) => n + e.ok + e.fail, 0);`,
+    `const { moved, previous } = resetStats();`,
+    `const after = [...aggregate().values()].reduce((n, e) => n + e.ok + e.fail, 0);`,
+    `console.log(JSON.stringify({`,
+    `  before, after, moved,`,
+    `  logGone: !existsSync(STATS_PATH),`,
+    `  keptCopy: existsSync(previous) && readFileSync(previous, "utf8").includes('"m"'),`,
+    `}));`,
+  ].join("\n"));
+
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+
+  assert.equal(out.before, 1, "one result on record");
+  assert.equal(out.after, 0, "and none after the reset");
+  assert.equal(out.moved, true);
+  assert.equal(out.logGone, true, "the live log is gone");
+  assert.equal(out.keptCopy, true, "but the previous copy still holds it");
+});
+
+test("resetting an empty record is harmless", async () => {
+  // In its own HOME. Calling resetStats() in this process would move the
+  // real log aside, which is a thing this test did exactly once.
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-reset-empty-"));
+  const script = join(home, "run.mjs");
+  const here = new URL(".", import.meta.url).pathname;
+
+  writeFileSync(script, [
+    `import { resetStats } from "${join(here, "stats.js")}";`,
+    `console.log(JSON.stringify(resetStats()));`,
+  ].join("\n"));
+
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+  assert.equal(out.moved, false, "nothing to move, and nothing thrown");
+});
+
+test("opencc --reset-stats clears the record and leaves the config alone", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, existsSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, dirname } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-cli-reset-"));
+  mkdirSync(join(home, ".opencc"));
+  const config = [
+    "PROVIDER_NAME=kept",
+    "OPENAI_BASE_URL=https://example.test/v1",
+    "OPENAI_API_KEY=keep-me",
+    "MODELS=m1, m2",
+    "PROVIDER_MODELS_DISABLED=m2",
+    "PORT=4242",
+    "",
+  ].join("\n");
+  writeFileSync(join(home, ".opencc", ".env"), config);
+  writeFileSync(join(home, ".opencc", "capabilities.json"), "{}");
+
+  const here = dirname(new URL(import.meta.url).pathname);
+  const env = { ...process.env, HOME: home };
+
+  // give it something to forget
+  const seed = join(home, "seed.mjs");
+  writeFileSync(seed,
+    `import { record } from "${join(here, "stats.js")}";\n` +
+    `for (let i = 0; i < 9; i++) record({ baseUrl: "https://example.test/v1", model: "m1", kind: "tools", status: 200 });\n`);
+  execFileSync(process.execPath, [seed], { env });
+  assert.ok(existsSync(join(home, ".opencc", "stats.jsonl")), "seeded");
+
+  const out = execFileSync(process.execPath, [join(here, "cli.js"), "--reset-stats"], { env }).toString();
+
+  assert.match(out, /Record reset/);
+  assert.equal(existsSync(join(home, ".opencc", "stats.jsonl")), false, "the live log is gone");
+  assert.ok(existsSync(join(home, ".opencc", "stats.jsonl.previous")), "kept as the previous one");
+  assert.equal(existsSync(join(home, ".opencc", "capabilities.json")), false, "the dead cache goes too");
+
+  const { readFileSync } = await import("node:fs");
+  assert.equal(readFileSync(join(home, ".opencc", ".env"), "utf8"), config,
+    "providers, models, keys, parking and port all byte-for-byte unchanged");
+});
+
+test("--reset-stats on an empty record says so and keeps any earlier backup", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, dirname } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-cli-reset-empty-"));
+  mkdirSync(join(home, ".opencc"));
+  writeFileSync(join(home, ".opencc", "stats.jsonl.previous"), "an earlier reset\n");
+
+  const here = dirname(new URL(import.meta.url).pathname);
+  const out = execFileSync(process.execPath, [join(here, "cli.js"), "--reset-stats"], {
+    env: { ...process.env, HOME: home },
+  }).toString();
+
+  assert.match(out, /Nothing on record/);
+  assert.equal(readFileSync(join(home, ".opencc", "stats.jsonl.previous"), "utf8"), "an earlier reset\n",
+    "a reset with nothing to reset must not overwrite what is already there");
+});
+
+test("a failure reason is pulled out of whatever shape the provider used", async () => {
+  // reason() is internal, so this goes through the module's own surface by
+  // checking the strings it produces for the bodies these providers send.
+  const { readFileSync } = await import("node:fs");
+  const { dirname } = await import("node:path");
+  const src = readFileSync(dirname(new URL(import.meta.url).pathname) + "/warmup.js", "utf8");
+  const body = src.slice(src.indexOf("function reason(body) {"), src.indexOf("async function probe"));
+  const reason = new Function(`${body}; return reason;`)();
+
+  assert.equal(reason('{"error":{"message":"rate limit exceeded"}}'), "rate limit exceeded");
+  assert.equal(reason('{"message":"model not found"}'), "model not found");
+  assert.equal(reason('{"status":403,"title":"Forbidden","detail":"Authorization failed"}'), "Authorization failed");
+  assert.equal(reason('{"status":403,"title":"Forbidden"}'), "Forbidden");
+  assert.equal(reason('{"error":"bad request"}'), "bad request");
+  assert.match(reason("<!DOCTYPE html>\n<html><title>Error 403</title></html>"), /^Error 403/);
+  assert.equal(reason("  plain  text  "), "plain text");
+});
+
+test("a result written by another process is picked up without a restart", async () => {
+  // The panel tests a newly added model in its own process. A proxy already
+  // running has to see that without being restarted, or adding a model would
+  // only take effect next time you start it.
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, dirname } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-shared-"));
+  const here = dirname(new URL(import.meta.url).pathname);
+  const stats = join(here, "stats.js");
+
+  // one long-lived reader, one writer that runs part way through it
+  const reader = join(home, "reader.mjs");
+  writeFileSync(reader, [
+    `import { statsFor } from "${stats}";`,
+    `import { execFileSync } from "node:child_process";`,
+    `import { writeFileSync } from "node:fs";`,
+    `const look = () => statsFor("https://p/v1", "m", "tools");`,
+    `const before = look();`,
+    `const w = "${join(home, "writer.mjs")}";`,
+    `writeFileSync(w, 'import { record } from "${stats}";\\n' +`,
+    `  'for (let i = 0; i < 5; i++) record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 200 });\\n');`,
+    `execFileSync(process.execPath, [w], { env: process.env });`,
+    `const after = look();`,
+    `console.log(JSON.stringify({ before, after }));`,
+  ].join("\n"));
+
+  const out = JSON.parse(execFileSync(process.execPath, [reader], {
+    env: { ...process.env, HOME: home },
+  }).toString());
+
+  assert.equal(out.before, null, "nothing on record to start with");
+  assert.equal(out.after.ok, 5, "the same reader sees the other process's writes");
+});
+
+test("the proxy stays down until a provider exists, then comes up on its own", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, dirname } = await import("node:path");
+  const { spawn } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-merge-"));
+  mkdirSync(join(home, ".opencc"));
+  const here = dirname(new URL(import.meta.url).pathname);
+
+  const panelPort = 3491;
+  const proxyPort = 3492;
+  const child = spawn(process.execPath, [
+    join(here, "cli.js"), "--panel-port", String(panelPort), "--port", String(proxyPort), "--no-warmup",
+  ], { env: { ...process.env, HOME: home, OPENCC_NO_BROWSER: "1" }, stdio: "ignore" });
+
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const up = async (port) => {
+    try {
+      await fetch(`http://localhost:${port}/`, { signal: AbortSignal.timeout(500) });
+      return true;
+    } catch { return false; }
+  };
+
+  try {
+    for (let i = 0; i < 40 && !(await up(panelPort)); i++) await wait(100);
+    assert.equal(await up(panelPort), true, "the panel always comes up");
+    assert.equal(await up(proxyPort), false, "the proxy does not, with nothing to route to");
+
+    // add a provider exactly as the panel's form does
+    await fetch(`http://localhost:${panelPort}/api/state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        providers: [{
+          name: "test", baseUrl: "https://example.test/v1", apiKey: "",
+          models: ["m1"], disabled: false, disabledModels: [],
+        }],
+        port: String(proxyPort), streaming: true,
+      }),
+    });
+
+    for (let i = 0; i < 40 && !(await up(proxyPort)); i++) await wait(100);
+    assert.equal(await up(proxyPort), true, "and starts by itself once there is");
+  } finally {
+    child.kill();
+  }
+});
+
+test("each kind of request is tracked separately for what still needs testing", () => {
+  const providers = [{
+    baseUrl: "https://one/v1", name: "one", models: ["m"], disabled: false,
+  }];
+  // tried for tools, never for images
+  const lookup = (baseUrl, model, kind) => (kind === "tools" ? { ok: 3, fail: 0 } : null);
+
+  assert.equal(pendingModels(providers, "tools", lookup).length, 0, "tools is covered");
+  assert.deepEqual(pendingModels(providers, "image", lookup)[0].models, ["m"], "images is not");
+});
+
+import { deadlineFor, warmUp } from "./warmup.js";
+
+test("the warm-up deadline scales with the longest provider queue", () => {
+  assert.ok(deadlineFor(8) > deadlineFor(2), "eight models need more runway than two");
+  assert.equal(deadlineFor(0), deadlineFor(1), "never zero");
+  assert.ok(deadlineFor(1000) <= 600000, "but it is capped");
+});
+
+test("a probe the deadline cut short is not held against the model", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  // The first model answers; the second is still waiting when the deadline
+  // fires, which is exactly the case that used to record a false failure.
+  globalThis.fetch = async (url, init) => {
+    if (JSON.parse(init.body).model === "quick") {
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { tool_calls: [{}] } }] }) };
+    }
+    await new Promise((resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    });
+  };
+
+  const saved = [];
+  await warmUp(
+    [{ baseUrl: "https://one/v1", name: "one", models: ["quick", "slow"], disabled: false, disabledModels: [] }],
+    { deadlineMs: 150, save: (row) => saved.push(row), lookup: () => null },
+  );
+
+  assert.deepEqual(saved.map((r) => r.model), ["quick"], "only the one that got a real turn");
+});
+
+// --- is it worth exposing the proxy at all ---------------------------------
+
+import { coverage } from "./stats.js";
+
+const pot = (models, parked = []) => [{
+  baseUrl: "https://one/v1", name: "one", models, disabledModels: parked, disabled: false,
+}];
+
+test("coverage separates what works, what does not, and what nobody asked", () => {
+  const records = { good: { ok: 5, fail: 1 }, bad: { ok: 0, fail: 9 } };
+  const out = coverage(pot(["good", "bad", "new"]), "tools", (b, m) => records[m] ?? null);
+  assert.deepEqual(out, { can: 1, cannot: 1, untried: 1 });
+});
+
+test("coverage ignores parked models and switched-off providers", () => {
+  const lookup = () => ({ ok: 3, fail: 0 });
+  assert.equal(coverage(pot(["a", "b"], ["b"]), "tools", lookup).can, 1, "parked does not count");
+
+  const off = [{ baseUrl: "https://x/v1", models: ["a"], disabled: true, disabledModels: [] }];
+  assert.deepEqual(coverage(off, "tools", lookup), { can: 0, cannot: 0, untried: 0 });
+});
+
+test("an untried model is not the same as one that cannot", () => {
+  // The proxy starts on untried and refuses on proven-incapable, so these
+  // two must never collapse into one number.
+  const untried = coverage(pot(["m"]), "tools", () => null);
+  const proven = coverage(pot(["m"]), "tools", () => ({ ok: 0, fail: 20 }));
+
+  assert.deepEqual(untried, { can: 0, cannot: 0, untried: 1 });
+  assert.deepEqual(proven, { can: 0, cannot: 1, untried: 0 });
+});
+
+test("the proxy refuses to expose when nothing can call tools, and starts when something can", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, dirname } = await import("node:path");
+  const { spawn, execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-gate-"));
+  mkdirSync(join(home, ".opencc"));
+  const here = dirname(new URL(import.meta.url).pathname);
+  const panelPort = 3561;
+  const proxyPort = 3562;
+
+  writeFileSync(join(home, ".opencc", ".env"), [
+    "OPENAI_BASE_URL=https://example.test/v1",
+    "OPENAI_API_KEY=",
+    "MODELS=m",
+    `PORT=${proxyPort}`,
+    "",
+  ].join("\n"));
+
+  // proven unable: tried for tools, never once succeeded
+  const seed = join(home, "seed.mjs");
+  const write = (status) => {
+    writeFileSync(seed,
+      `import { record } from "${join(here, "stats.js")}";\n` +
+      `record({ baseUrl: "https://example.test/v1", model: "m", kind: "tools", status: ${status} });\n`);
+    execFileSync(process.execPath, [seed], { env: { ...process.env, HOME: home } });
+  };
+  for (let i = 0; i < 10; i++) write(400);
+
+  const child = spawn(process.execPath, [
+    join(here, "cli.js"), "--panel-port", String(panelPort), "--port", String(proxyPort), "--no-warmup",
+  ], { env: { ...process.env, HOME: home, OPENCC_NO_BROWSER: "1" }, stdio: "ignore" });
+
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const up = async (port) => {
+    try {
+      await fetch(`http://localhost:${port}/`, { signal: AbortSignal.timeout(500) });
+      return true;
+    } catch { return false; }
+  };
+
+  try {
+    for (let i = 0; i < 40 && !(await up(panelPort)); i++) await wait(100);
+    assert.equal(await up(panelPort), true, "the panel is up so you can fix it");
+    assert.equal(await up(proxyPort), false, "the proxy is not, because nothing can call tools");
+
+    // one success changes the answer
+    write(200);
+    await fetch(`http://localhost:${panelPort}/api/state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        providers: [{ baseUrl: "https://example.test/v1", apiKey: "", models: ["m"], disabled: false, disabledModels: [] }],
+        port: String(proxyPort), streaming: true,
+      }),
+    });
+
+    for (let i = 0; i < 40 && !(await up(proxyPort)); i++) await wait(100);
+    assert.equal(await up(proxyPort), true, "and it comes up once something proves it can");
+  } finally {
+    child.kill();
+  }
+});
+
+// --- a PDF must never vanish quietly ---------------------------------------
+
+test("a document block is forwarded, not dropped", () => {
+  const out = toOpenAIRequest({
+    model: "c",
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "Summarise this." },
+        { type: "document", title: "report.pdf", source: { type: "base64", media_type: "application/pdf", data: "AAAA" } },
+      ],
+    }],
+  }, "m", "https://x/v1", false);
+
+  const parts = out.messages[0].content;
+  assert.equal(parts.length, 2, "the text and the document both go");
+  assert.equal(parts[1].type, "file");
+  assert.equal(parts[1].file.filename, "report.pdf");
+  assert.match(parts[1].file.file_data, /^data:application\/pdf;base64,/);
+});
+
+test("a document block from a URL is forwarded too", () => {
+  const out = toOpenAIRequest({
+    model: "c",
+    messages: [{ role: "user", content: [{ type: "document", source: { type: "url", url: "https://x/a.pdf" } }] }],
+  }, "m", "https://x/v1", false);
+
+  assert.equal(out.messages[0].content[0].file.file_data, "https://x/a.pdf");
+});
+
+test("a request carrying a PDF is routed as a document, not as text", () => {
+  // It used to come out as "text", so a model that cannot read PDFs looked
+  // like a fine choice and then answered about a document it never saw.
+  const pdf = { messages: [{ role: "user", content: [{ type: "document", source: {} }] }] };
+  assert.equal(kindOf(requirementsOf(pdf)), "document");
+
+  // and the most demanding need wins when several are present
+  const everything = {
+    tools: [{ name: "t" }],
+    messages: [{ role: "user", content: [{ type: "image" }, { type: "document", source: {} }] }],
+  };
+  assert.equal(kindOf(requirementsOf(everything)), "document");
+});
+
