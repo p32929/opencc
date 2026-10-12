@@ -77,6 +77,7 @@ const NO_STATS = {
   order: (attempts) => ({ attempts, head: [], cooling: 0 }),
   record: () => {},
   coolOff: () => 0,
+  settled: () => {},
 };
 const up = (req, providers, streaming = true) => callUpstream(req, providers, streaming, NO_STATS);
 
@@ -88,7 +89,14 @@ function stubFetch(responders) {
     seen.push({ url, headers: init.headers, body: JSON.parse(init.body) });
     const responder = responders[seen.length - 1];
     if (typeof responder === "string") throw new Error(responder);
-    return { ok: responder < 400, status: responder, text: async () => `status ${responder}` };
+    return {
+      ok: responder < 400,
+      status: responder,
+      text: async () => `status ${responder}`,
+      // The walk reads a non-streamed reply to check it is usable, so a
+      // stubbed success has to look like one.
+      json: async () => ({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }),
+    };
   };
   return seen;
 }
@@ -751,7 +759,7 @@ test("a cooling model is still reachable when nothing else is left", async (t) =
       { baseUrl: "https://two.test/v1", apiKey: "k", models: ["m2"], name: "two" },
     ],
     true,
-    { order: chooseOrder, record: () => {}, coolOff: () => 0 },
+    { order: chooseOrder, record: () => {}, coolOff: () => 0, settled: () => {} },
   );
 
   assert.deepEqual(seen.map((s) => s.body.model), ["m2", "m2", "m1"],
@@ -1286,7 +1294,7 @@ test("a request carrying a PDF is routed as a document, not as text", () => {
 
 // --- what a failure actually means -----------------------------------------
 
-import { weightOf } from "./stats.js";
+import { weightOf, cooledOffSuccessfully } from "./stats.js";
 
 test("a failure is weighed by whether it settles anything", () => {
   assert.equal(weightOf(200), 0, "a success is not a failure");
@@ -1532,4 +1540,101 @@ test("an oversized request does not count against the model", async () => {
   // Only the plain 400 should carry weight: 4 for a conclusive refusal, and
   // nothing at all for the request simply being too long.
   assert.ok(out.weighted >= 3.9 && out.weighted <= 4.1, `expected ~4, got ${out.weighted}`);
+});
+
+// --- a reply we can see is useless gets another model ----------------------
+
+test("a 200 that came back empty is not served, the next model is tried", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    const model = JSON.parse(init.body).model;
+    seen.push(model);
+    return {
+      ok: true, status: 200, text: async () => "",
+      json: async () => (model === "hollow"
+        ? { choices: [{ message: { content: "" }, finish_reason: "stop" }] }
+        : { choices: [{ message: { content: "a real answer" }, finish_reason: "stop" }] }),
+    };
+  };
+
+  const result = await up(REQ, [
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["hollow"], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k", models: ["solid"], name: "two" },
+  ]);
+
+  assert.deepEqual(seen, ["hollow", "solid"], "the empty one was not good enough");
+  assert.equal(result.model, "solid");
+  assert.equal(result.reply.content[0].text, "a real answer");
+});
+
+test("a reply that is not JSON at all moves on rather than throwing", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  globalThis.fetch = async (url, init) => {
+    const model = JSON.parse(init.body).model;
+    return {
+      ok: true, status: 200, text: async () => "",
+      json: async () => {
+        if (model === "html") throw new Error("Unexpected token <");
+        return { choices: [{ message: { content: "fine" }, finish_reason: "stop" }] };
+      },
+    };
+  };
+
+  const result = await up(REQ, [
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["html"], name: "one" },
+    { baseUrl: "https://two.test/v1", apiKey: "k", models: ["good"], name: "two" },
+  ]);
+
+  assert.equal(result.model, "good");
+});
+
+test("every model returning something useless reports a failure, not an empty answer", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = realFetch));
+
+  globalThis.fetch = async () => ({
+    ok: true, status: 200, text: async () => "",
+    json: async () => ({ choices: [{ message: { content: "" }, finish_reason: "stop" }] }),
+  });
+
+  const result = await up(REQ, [
+    { baseUrl: "https://one.test/v1", apiKey: "k", models: ["a", "b"], name: "one" },
+  ]);
+
+  assert.equal(result.reply, undefined, "nothing worth sending");
+  assert.ok(result.status >= 400, `should report a failure, got ${result.status}`);
+  assert.match(result.message, /200 but empty/, "and it says why");
+});
+
+// --- a run of refusals is treated as a run ---------------------------------
+
+test("each refusal in a row doubles the wait, and an answer clears it", () => {
+  clearCooldowns();
+  const U = "https://p/v1";
+
+  const first = coolOff(U, "m", 429);
+  const second = coolOff(U, "m", 429);
+  const third = coolOff(U, "m", 429);
+
+  assert.equal(second, first * 2);
+  assert.equal(third, first * 4);
+
+  cooledOffSuccessfully(U, "m");
+  assert.equal(coolingFor(U, "m"), 0, "an answer also ends the current wait");
+  assert.equal(coolOff(U, "m", 429), first, "and the next refusal starts over");
+  clearCooldowns();
+});
+
+test("the wait is capped, so a dead model is retried hourly rather than never", () => {
+  clearCooldowns();
+  const U = "https://p/v1";
+  let last = 0;
+  for (let i = 0; i < 20; i++) last = coolOff(U, "m", 429);
+  assert.equal(last, 60 * 60 * 1000, "an hour, not a week");
+  clearCooldowns();
 });

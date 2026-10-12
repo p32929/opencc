@@ -128,6 +128,10 @@ export const KINDS = ["text", "tools", "image", "document"];
 // in prose is correct. It only counts when tool_choice demanded a call.
 export const TOO_BIG_VERDICT = "too_big";
 
+// The reply started arriving and then stopped. Worse than a refusal: the
+// request cannot be retried, because Claude Code already has half an answer.
+export const STREAM_DIED_VERDICT = "stream_died";
+
 export function verdictFor(anthropicReq, { blocks, toolUse, badArguments }) {
   if (blocks === 0) return "empty";
   if (badArguments) return "bad_arguments";
@@ -379,17 +383,38 @@ export function coverage(providers, kind, lookup = statsFor) {
 // of the queue and then forgets about it. Nothing on disk, nothing to decay,
 // gone on restart.
 const COOLDOWN_MS = { 429: 60000, 503: 30000, other: 15000 };
+const COOLDOWN_CAP_MS = 60 * 60 * 1000;
 const cooling = new Map();
+
+// How many times in a row this model has refused without an answer in
+// between. A free tier that is merely busy comes back on the first retry; one
+// whose daily quota is gone refuses every time until the quota resets, and a
+// flat minute means asking it all evening. Each consecutive refusal doubles
+// the wait, up to an hour. One answer clears it.
+const streaks = new Map();
 
 const coolKey = (baseUrl, model) => `${baseUrl}\u0000${model}`;
 
 export function coolOff(baseUrl, model, status, now = Date.now()) {
-  const ms = status === 429 ? COOLDOWN_MS[429]
+  const base = status === 429 ? COOLDOWN_MS[429]
     : status === 503 ? COOLDOWN_MS[503]
     : status === 0 || status >= 500 ? COOLDOWN_MS.other
     : 0;
-  if (ms) cooling.set(coolKey(baseUrl, model), now + ms);
+  if (!base) return 0;
+
+  const key = coolKey(baseUrl, model);
+  const streak = (streaks.get(key) ?? 0) + 1;
+  streaks.set(key, streak);
+
+  const ms = Math.min(base * Math.pow(2, streak - 1), COOLDOWN_CAP_MS);
+  cooling.set(key, now + ms);
   return ms;
+}
+
+// Called when a model answers. Whatever run of refusals it was on is over.
+export function cooledOffSuccessfully(baseUrl, model) {
+  streaks.delete(coolKey(baseUrl, model));
+  cooling.delete(coolKey(baseUrl, model));
 }
 
 export function coolingFor(baseUrl, model, now = Date.now()) {
@@ -404,6 +429,7 @@ export function coolingFor(baseUrl, model, now = Date.now()) {
 
 export function clearCooldowns() {
   cooling.clear();
+  streaks.clear();
 }
 
 // Forget everything and start over.

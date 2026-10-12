@@ -82,6 +82,12 @@ Other rules:
 - A 429 or a timeout puts the model at the back for 15 to 60 seconds.
 - If a model fails, the next one in the list is tried.
 - 5xx: one retry. 4xx: move on.
+- A 200 that came back empty, or with tool arguments nothing can parse, is
+  not served. The next model is tried instead.
+- A reply that starts and then dies counts against the model. It cannot be
+  retried, because Claude Code already has half of it.
+- Each refusal in a row doubles how long a model is left alone, up to an
+  hour. One answer clears it.
 - `max_tokens` is not sent. Some backends reject large values.
 
 ## Request size

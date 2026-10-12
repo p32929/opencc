@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { config, getConfig, isConfigured, displayName } from "./config.js";
 import { pickModels, toOpenAIRequest, toAnthropicResponse, toAnthropicError } from "./translate.js";
 import { streamOpenAIToAnthropic, sendAnthropicAsStream } from "./stream.js";
-import { requirementsOf, describeNeeds, kindOf, chooseOrder, record, coolOff, verdictFor, isTooBig, TOO_BIG_VERDICT } from "./stats.js";
+import { requirementsOf, describeNeeds, kindOf, chooseOrder, record, coolOff, cooledOffSuccessfully, verdictFor, isTooBig, TOO_BIG_VERDICT, STREAM_DIED_VERDICT } from "./stats.js";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -86,7 +86,7 @@ export async function callUpstream(
   // it is shared mutable state on disk, which otherwise makes this function's
   // behaviour depend on every request that came before it. `order` is here so
   // a test can pin the draw that would otherwise be random.
-  stats = { order: chooseOrder, record, coolOff },
+  stats = { order: chooseOrder, record, coolOff, settled: cooledOffSuccessfully },
 ) {
   const failures = [];
   const deadline = Date.now() + TOTAL_DEADLINE_MS;
@@ -246,6 +246,39 @@ export async function callUpstream(
       break;
     }
 
+    if (upstream?.ok && !streamUpstream) {
+      // Read here rather than in the caller, because a 200 carrying nothing
+      // usable is not an answer and the next model should get a turn. By the
+      // time the caller has it, it has already been promised to the client.
+      let reply;
+      try {
+        reply = toAnthropicResponse(await upstream.json(), anthropicReq.model, provider.baseUrl);
+      } catch (err) {
+        stats.record({ baseUrl: provider.baseUrl, model, kind, status: headStatus, chars, verdict: "unreadable" });
+        failures.push(`${displayName(provider)}/${model}: reply was not JSON: ${err.message}`);
+        console.error(`[opencc]   ${label} answered with something that is not JSON`);
+        continue;
+      }
+
+      const toolBlocks = reply.content.filter((block) => block.type === "tool_use");
+      const verdict = verdictFor(anthropicReq, {
+        blocks: reply.content.filter((block) => block.type !== "text" || block.text !== "").length,
+        toolUse: toolBlocks.length > 0,
+        badArguments: toolBlocks.some((block) => !block.input || typeof block.input !== "object"),
+      });
+
+      stats.record({ baseUrl: provider.baseUrl, model, kind, status: headStatus, ms: headMs, chars, verdict });
+
+      if (verdict !== "ok") {
+        failures.push(`${displayName(provider)}/${model}: 200 but ${verdict}`);
+        console.error(`[opencc]   ${label} -> 200 but ${verdict}, trying the next one`);
+        continue;
+      }
+
+      stats.settled(provider.baseUrl, model);
+      return { reply, provider, model, streamed: false };
+    }
+
     if (upstream?.ok) {
       return {
         upstream, provider, model, streamed: streamUpstream,
@@ -293,31 +326,29 @@ async function handleMessages(anthropicReq, res) {
 
   const result = await callUpstream(anthropicReq, live.providers, live.streaming);
 
-  if (!result.upstream) {
+  if (!result.upstream && !result.reply) {
     sendJson(res, result.status, toAnthropicError(result.status, result.message));
     return;
   }
 
   if (result.streamed) {
-    const sent = await streamOpenAIToAnthropic(result.upstream, res, anthropicReq.model, result.provider.baseUrl);
-    result.report(verdictFor(anthropicReq, sent));
+    try {
+      const sent = await streamOpenAIToAnthropic(result.upstream, res, anthropicReq.model, result.provider.baseUrl);
+      result.report(verdictFor(anthropicReq, sent));
+    } catch (err) {
+      // The worst outcome there is: the reply started, Claude Code has half
+      // of it, and there is no retrying. It used to be the one failure that
+      // went unrecorded, so a model that did it reliably kept a clean sheet.
+      console.error(`[opencc]   stream from ${result.model} died part way: ${err.message}`);
+      result.report(STREAM_DIED_VERDICT);
+      if (!res.writableEnded) res.end();
+    }
     return;
   }
 
-  const data = await result.upstream.json();
-  const message = toAnthropicResponse(data, anthropicReq.model, result.provider.baseUrl);
-
-  const toolBlocks = message.content.filter((block) => block.type === "tool_use");
-  result.report(verdictFor(anthropicReq, {
-    blocks: message.content.filter((block) => block.type !== "text" || block.text !== "").length,
-    toolUse: toolBlocks.length > 0,
-    badArguments: toolBlocks.some((block) => !block.input || typeof block.input !== "object"),
-  }));
-
-  // The client asked for a stream but streaming is off, so hand it the
-  // finished message as a one-shot stream rather than a plain JSON body.
-  if (anthropicReq.stream) sendAnthropicAsStream(res, message);
-  else sendJson(res, 200, message);
+  // Already read, checked and recorded inside the walk.
+  if (anthropicReq.stream) sendAnthropicAsStream(res, result.reply);
+  else sendJson(res, 200, result.reply);
 }
 
 const server = createServer(async (req, res) => {
