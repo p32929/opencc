@@ -35,6 +35,26 @@ const DAY_MS = 86400000;
 // makes the thing adaptive rather than merely tallied.
 const HALF_LIFE_DAYS = 4;
 
+// Not every failure says the same thing.
+//
+// "400 this model does not support image input" settles the question on the
+// first try: asking again cannot change it. A 429 says the minute was busy
+// and nothing about the model. Counting them equally meant a model that had
+// told us definitively still needed several more failures to sink, while a
+// model that was merely throttled sank alongside it.
+const CONCLUSIVE = 4;   // it told us, and it will keep telling us
+const ORDINARY = 1;     // a plain refusal, no explanation
+const PASSING = 0.25;   // busy, broken or unreachable right now
+
+export function weightOf(status) {
+  if (status >= 200 && status < 300) return 0;
+  // Checked first: 501 is "not implemented", which is a settled answer even
+  // though it sits in the 5xx range where everything else is a wobble.
+  if ([400, 401, 402, 403, 404, 413, 422, 501].includes(status)) return CONCLUSIVE;
+  if (status === 0 || status === 408 || status === 425 || status === 429 || status >= 500) return PASSING;
+  return ORDINARY;
+}
+
 // --- what a request needs --------------------------------------------------
 
 // Claude Code puts images in user content blocks and tools at the top level,
@@ -80,14 +100,36 @@ export const KINDS = ["text", "tools", "image", "document"];
 // What Claude Code actually asks for, and so the only things worth testing
 // and showing. It puts tools on nearly every request, so a bare text request
 // is rare enough that probing for it proves nothing and clutters the page.
+// What a 200 actually delivered.
+//
+// Only facts here, nothing that needs judgement. The tempting fourth check -
+// "tools were offered and none came back" - is not a fact: Claude Code puts
+// tools on nearly every request, and answering "what does this function do?"
+// in prose is correct. It only counts when tool_choice demanded a call.
+export function verdictFor(anthropicReq, { blocks, toolUse, badArguments }) {
+  if (blocks === 0) return "empty";
+  if (badArguments) return "bad_arguments";
+
+  const choice = anthropicReq?.tool_choice?.type;
+  if ((choice === "any" || choice === "tool") && !toolUse) return "no_tool_call";
+
+  return "ok";
+}
+
 export const NEEDED = ["tools", "image", "document"];
 
 // --- writing ---------------------------------------------------------------
 
 const keyOf = (baseUrl, model, kind) => `${baseUrl}\u0000${model}\u0000${kind}`;
 
-export function record({ baseUrl, model, kind, status }) {
-  const line = `${JSON.stringify({ p: baseUrl, m: model, k: kind, s: status, n: 1, t: Date.now() })}\n`;
+export function record({ baseUrl, model, kind, status, ms, verdict }) {
+  const event = { p: baseUrl, m: model, k: kind, s: status, n: 1, t: Date.now() };
+  // Only written when the answer was not usable, so the common line stays
+  // the same size it has always been.
+  if (verdict && verdict !== "ok") event.q = verdict;
+  // Only for answers. How long a refusal took is noise.
+  if (Number.isFinite(ms) && status >= 200 && status < 300) event.ms = Math.round(ms);
+  const line = `${JSON.stringify(event)}\n`;
   try {
     mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
     appendFileSync(STATS_PATH, line, { mode: 0o600 });
@@ -115,23 +157,37 @@ function foldLine(agg, line) {
   if (!event || typeof event.p !== "string" || typeof event.m !== "string") return;
 
   const key = keyOf(event.p, event.m, event.k ?? "text");
-  const entry = agg.get(key) ?? { ok: 0, fail: 0, statuses: {}, days: {}, lastOk: 0, lastFail: 0 };
+  const entry = agg.get(key) ?? { ok: 0, fail: 0, statuses: {}, days: {}, lastOk: 0, lastFail: 0, totalMs: 0, timed: 0 };
   const n = Number.isFinite(event.n) ? event.n : 1;
   const status = Number(event.s) || 0;
   const when = event.t ?? Date.now();
 
+  // A 200 that came back empty, or with tool arguments nothing can parse, is
+  // not a success however polite the status line was.
+  const usable = status >= 200 && status < 300 && !event.q;
+
   // Kept per day as well as in total, so the router can weigh what happened
   // this week more heavily than what happened last month. See `decayed`.
   const day = Math.floor(when / DAY_MS);
-  const bucket = entry.days[day] ?? (entry.days[day] = { ok: 0, fail: 0 });
+  const bucket = entry.days[day] ?? (entry.days[day] = { ok: 0, fail: 0, weighted: 0 });
 
-  if (status >= 200 && status < 300) {
+  if (usable) {
     entry.ok += n;
     bucket.ok += n;
     entry.lastOk = Math.max(entry.lastOk, when);
+    if (Number.isFinite(event.ms)) {
+      entry.totalMs += event.ms * n;
+      entry.timed += n;
+    }
   } else {
     entry.fail += n;
     bucket.fail += n;
+    // What the router actually scores on. `fail` stays the plain count, so
+    // the panel can still show "3 of 19 answered" without explaining a
+    // weighting scheme to anybody.
+    // A 200 that delivered nothing is the model telling us it cannot do
+    // this, same as a 400 would.
+    bucket.weighted += n * (event.q ? CONCLUSIVE : weightOf(status));
     entry.lastFail = Math.max(entry.lastFail, when);
   }
   entry.statuses[status] = (entry.statuses[status] ?? 0) + n;
@@ -206,21 +262,30 @@ export function statsForOtherKinds(baseUrl, model, kind) {
 // or one hand-built in a test, is used as-is.
 export function decayed(entry, now = Date.now()) {
   if (!entry) return null;
-  if (!entry.days) return { ok: entry.ok, fail: entry.fail };
+  if (!entry.days) return { ok: entry.ok, fail: entry.fail, weighted: entry.weighted ?? entry.fail };
 
   const today = Math.floor(now / DAY_MS);
   let ok = 0;
   let fail = 0;
+  let weighted = 0;
   for (const [day, counts] of Object.entries(entry.days)) {
-    const weight = Math.pow(0.5, (today - Number(day)) / HALF_LIFE_DAYS);
-    ok += counts.ok * weight;
-    fail += counts.fail * weight;
+    const age = Math.pow(0.5, (today - Number(day)) / HALF_LIFE_DAYS);
+    ok += counts.ok * age;
+    fail += counts.fail * age;
+    weighted += (counts.weighted ?? counts.fail) * age;
   }
-  return { ok, fail };
+  return { ok, fail, weighted };
 }
 
 // The plain rate, for showing a human a percentage. Null when there is
 // nothing to show, which is different from zero.
+// How long this model takes when it does answer, in milliseconds. Null until
+// something has been timed.
+export function meanMs(entry) {
+  if (!entry || !entry.timed) return null;
+  return entry.totalMs / entry.timed;
+}
+
 export function successRate(entry) {
   if (!entry) return null;
   const total = entry.ok + entry.fail;
@@ -344,6 +409,19 @@ export function resetStats() {
 // tools request and small enough that three real results outweigh it.
 const CROSS_KIND_WEIGHT = 2;
 
+// Two models with the same record are not equally good if one answers in a
+// second and the other in a minute: you sit and wait for both. This shaves a
+// little off the slow one's draw - enough to settle a near-tie, never enough
+// to put a broken model ahead of a working one.
+//
+// Log-scaled, so the gap that matters is 1s against 10s, not 50s against 60s.
+const SLOW_PENALTY_MAX = 0.12;
+
+export function slowness(ms) {
+  if (!Number.isFinite(ms) || ms <= 1000) return 0;
+  return SLOW_PENALTY_MAX * Math.min(1, Math.log10(ms / 1000) / 2);
+}
+
 // The model's record as a Beta distribution: `a` stands for successes, `b`
 // for failures, both nudged by what it has done at other kinds and by the
 // flat +1 that keeps an untried model at even odds rather than at zero.
@@ -355,7 +433,7 @@ export function belief(entry, otherEntry, now = Date.now()) {
 
   return {
     a: 1 + here.ok + CROSS_KIND_WEIGHT * otherRate,
-    b: 1 + here.fail + CROSS_KIND_WEIGHT * (1 - otherRate),
+    b: 1 + (here.weighted ?? here.fail) + CROSS_KIND_WEIGHT * (1 - otherRate),
   };
 }
 
@@ -406,6 +484,35 @@ export function betaSample(a, b, rng = Math.random) {
 // The practical effect is the one you want from a pile of free tiers: load
 // spreads across everything that works instead of hammering whichever model
 // happened to be in front, and the ordering keeps adjusting on its own.
+// When a free tier's quota runs out, every model behind that key starts
+// refusing at once. Cooling them one at a time means a provider with eight
+// models burns eight attempts to learn one fact, so once enough of a
+// provider's models are cooling the rest go to the back with them.
+//
+// Derived from the per-model timers rather than kept separately: there is
+// nothing to expire, nothing to reset, and no second thing to keep in step.
+const PROVIDER_COOLING_SHARE = 0.5;
+const PROVIDER_COOLING_MIN = 2;
+
+function providersCoolingOff(rows) {
+  const byProvider = new Map();
+  for (const row of rows) {
+    const url = row.attempt.provider.baseUrl;
+    const seen = byProvider.get(url) ?? { total: 0, cooling: 0 };
+    seen.total += 1;
+    if (row.cooling > 0) seen.cooling += 1;
+    byProvider.set(url, seen);
+  }
+
+  const out = new Set();
+  for (const [url, seen] of byProvider) {
+    if (seen.cooling >= PROVIDER_COOLING_MIN && seen.cooling >= seen.total * PROVIDER_COOLING_SHARE) {
+      out.add(url);
+    }
+  }
+  return out;
+}
+
 export function chooseOrder(attempts, kind, {
   lookup = statsFor,
   lookupOther = statsForOtherKinds,
@@ -414,20 +521,27 @@ export function chooseOrder(attempts, kind, {
 } = {}) {
   const rows = attempts.map((attempt, position) => {
     const { baseUrl } = attempt.provider;
-    const { a, b } = belief(
-      lookup(baseUrl, attempt.model, kind),
-      lookupOther(baseUrl, attempt.model, kind),
-      now,
-    );
+    const entry = lookup(baseUrl, attempt.model, kind);
+    const { a, b } = belief(entry, lookupOther(baseUrl, attempt.model, kind), now);
     return {
       attempt,
       position,
       a,
       b,
       cooling: coolingFor(baseUrl, attempt.model, now),
-      draw: betaSample(a, b, rng),
+      draw: betaSample(a, b, rng) - slowness(meanMs(entry)),
     };
   });
+
+  // A model on a provider that has clearly run dry is treated as cooling
+  // even if its own timer has not been set, because it is about to be.
+  const dryProviders = providersCoolingOff(rows);
+  for (const row of rows) {
+    if (row.cooling === 0 && dryProviders.has(row.attempt.provider.baseUrl)) {
+      row.cooling = 1;
+      row.providerDry = true;
+    }
+  }
 
   // Anything cooling off goes to the back, in order of when it frees up.
   // It is still reachable: if everything else fails, we would rather ask a

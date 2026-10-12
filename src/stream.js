@@ -132,6 +132,9 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
           entry = {
             index: nextIndex++,
             id: call.id || generateId("toolu"),
+            // Kept only so the finished call can be checked for being valid
+            // JSON. The deltas themselves are forwarded as they arrive.
+            argumentsText: "",
           };
           toolBlocksByOpenAIIndex.set(call.index, entry);
           sendEvent(res, "content_block_start", {
@@ -144,6 +147,7 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
         // the one that opened it, so check every delta.
         if (call.extra_content) rememberToolExtra(entry.id, call.extra_content, baseUrl);
         if (call.function?.arguments) {
+          entry.argumentsText += call.function.arguments;
           sendEvent(res, "content_block_delta", {
             type: "content_block_delta",
             index: entry.index,
@@ -184,6 +188,14 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
   }
 
   const emittedToolUse = toolBlocksByOpenAIIndex.size > 0;
+  // Arguments arrive as a string split across deltas. If the whole of it is
+  // not JSON by the end, the tool call cannot be run.
+  let badArguments = false;
+  for (const block of toolBlocksByOpenAIIndex.values()) {
+    const raw = block.argumentsText ?? "";
+    if (raw === "") continue;
+    try { JSON.parse(raw); } catch { badArguments = true; }
+  }
 
   // Same reason as the non-streaming path: a reply that produced no blocks at
   // all (reasoning model that spent its whole budget thinking) would leave the
@@ -213,4 +225,9 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
   });
   sendEvent(res, "message_stop", { type: "message_stop" });
   res.end();
+
+  // What the reply actually contained, for the record. The caller cannot see
+  // this: by the time the stream is done the bytes are already with Claude
+  // Code and nothing is left to inspect.
+  return { blocks: nextIndex, toolUse: emittedToolUse, badArguments };
 }

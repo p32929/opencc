@@ -768,7 +768,9 @@ const DAY = 86400000;
 const daysAgo = (now, n) => String(Math.floor((now - n * DAY) / DAY));
 
 test("an entry with no day buckets is used as it stands", () => {
-  assert.deepEqual(decayed({ ok: 3, fail: 1 }), { ok: 3, fail: 1 });
+  // "weighted" is what the router scores on; with no status to weigh it
+  // falls back to the plain count.
+  assert.deepEqual(decayed({ ok: 3, fail: 1 }), { ok: 3, fail: 1, weighted: 1 });
   assert.equal(decayed(null), null);
 });
 
@@ -1281,3 +1283,182 @@ test("a request carrying a PDF is routed as a document, not as text", () => {
   assert.equal(kindOf(requirementsOf(everything)), "document");
 });
 
+
+// --- what a failure actually means -----------------------------------------
+
+import { weightOf } from "./stats.js";
+
+test("a failure is weighed by whether it settles anything", () => {
+  assert.equal(weightOf(200), 0, "a success is not a failure");
+
+  // The provider told us the request can never work here.
+  for (const status of [400, 401, 402, 403, 404, 413, 422, 501]) {
+    assert.equal(weightOf(status), 4, `${status} is conclusive`);
+  }
+
+  // The minute was busy, the host was down, nobody answered.
+  for (const status of [0, 408, 425, 429, 500, 503]) {
+    assert.equal(weightOf(status), 0.25, `${status} says nothing about the model`);
+  }
+});
+
+test("two conclusive failures sink a model further than ten busy ones", () => {
+  const rate = (entry) => {
+    const { a, b } = belief(entry, null);
+    return a / (a + b);
+  };
+
+  const told = rate({ ok: 0, fail: 2, weighted: 2 * weightOf(400) });
+  const busy = rate({ ok: 0, fail: 10, weighted: 10 * weightOf(429) });
+
+  assert.ok(told < busy, `conclusive ${told.toFixed(2)} should sit below throttled ${busy.toFixed(2)}`);
+});
+
+test("the plain counts are left alone for display", () => {
+  // The panel shows "3 of 19 answered". Weighting is for the router only, so
+  // nobody has to be told about it to read the page.
+  const entry = decayed({ ok: 3, fail: 16, weighted: 40 });
+  assert.equal(entry.ok, 3);
+  assert.equal(entry.fail, 16, "still the real number of failures");
+  assert.equal(entry.weighted, 40, "and the router's view is separate");
+});
+
+// --- a provider that has run dry moves as one ------------------------------
+
+test("once half a provider's models are cooling, the rest go with them", () => {
+  clearCooldowns();
+  const DRY = "https://dry/v1";
+  const FINE = "https://fine/v1";
+  const attempts = [
+    ...["a", "b", "c", "d"].map((m) => ({ provider: { baseUrl: DRY, name: "dry" }, model: m })),
+    ...["x", "y"].map((m) => ({ provider: { baseUrl: FINE, name: "fine" }, model: m })),
+  ];
+
+  // two of four start refusing, which is what a spent quota looks like
+  coolOff(DRY, "a", 429);
+  coolOff(DRY, "b", 429);
+
+  const { attempts: order } = chooseOrder(attempts, "tools", {
+    lookup: () => ({ ok: 9, fail: 1 }), lookupOther: () => null, rng: seeded(4),
+  });
+
+  const firstTwo = order.slice(0, 2).map((a) => a.provider.name);
+  assert.deepEqual(firstTwo.sort(), ["fine", "fine"], "the working provider goes first");
+  assert.equal(order.length, 6, "and nothing is dropped");
+  clearCooldowns();
+});
+
+test("one cooling model does not condemn its provider", () => {
+  clearCooldowns();
+  const P = "https://p/v1";
+  const attempts = ["a", "b", "c", "d"].map((m) => ({ provider: { baseUrl: P, name: "p" }, model: m }));
+  coolOff(P, "a", 429);
+
+  const { cooling } = chooseOrder(attempts, "tools", {
+    lookup: () => ({ ok: 9, fail: 1 }), lookupOther: () => null, rng: seeded(4),
+  });
+
+  assert.equal(cooling, 1, "one in four is a model having a moment, not a dead provider");
+  clearCooldowns();
+});
+
+// --- speed is part of the choice -------------------------------------------
+
+import { slowness, meanMs } from "./stats.js";
+
+test("a reply under a second costs nothing, and the penalty is bounded", () => {
+  assert.equal(slowness(900), 0, "fast is free");
+  assert.equal(slowness(1000), 0);
+  assert.ok(slowness(60000) < 0.15, "and never enough to outrank a real difference in reliability");
+  assert.ok(slowness(10000) > slowness(3000), "but slower is always worse");
+});
+
+test("latency is only kept for answers", () => {
+  assert.equal(meanMs(null), null);
+  assert.equal(meanMs({ timed: 0, totalMs: 0 }), null, "nothing timed yet");
+  assert.equal(meanMs({ timed: 2, totalMs: 3000 }), 1500);
+});
+
+test("between two equally good models the faster one wins more often", () => {
+  const attempts = [attempt("one", "quick"), attempt("two", "slow")];
+  const record = { ok: 30, fail: 2, weighted: 2 };
+  const lookup = (baseUrl, model) =>
+    model === "quick" ? { ...record, timed: 10, totalMs: 8000 }     // 0.8s
+                      : { ...record, timed: 10, totalMs: 400000 };  // 40s
+
+  const rng = seeded(9);
+  const counts = { quick: 0, slow: 0 };
+  for (let i = 0; i < 2000; i++) {
+    const { attempts: order } = chooseOrder(attempts, "tools", { lookup, lookupOther: () => null, rng });
+    counts[order[0].model] += 1;
+  }
+
+  assert.ok(counts.quick > counts.slow, `quick should lead: ${JSON.stringify(counts)}`);
+  assert.ok(counts.slow > 100, `but slow still gets a turn: ${JSON.stringify(counts)}`);
+});
+
+test("speed never rescues a model that does not work", () => {
+  const attempts = [attempt("one", "fast-and-broken"), attempt("two", "slow-and-good")];
+  const lookup = (baseUrl, model) =>
+    model === "fast-and-broken"
+      ? { ok: 0, fail: 20, weighted: 80, timed: 5, totalMs: 1000 }
+      : { ok: 20, fail: 0, weighted: 0, timed: 5, totalMs: 200000 };
+
+  const rng = seeded(3);
+  let good = 0;
+  for (let i = 0; i < 500; i++) {
+    const { attempts: order } = chooseOrder(attempts, "tools", { lookup, lookupOther: () => null, rng });
+    if (order[0].model === "slow-and-good") good += 1;
+  }
+  assert.ok(good > 480, `working beats fast: ${good} of 500`);
+});
+
+// --- a 200 is not automatically a success ----------------------------------
+
+import { verdictFor } from "./stats.js";
+
+test("an empty reply is a failure however polite the status line", () => {
+  assert.equal(verdictFor({}, { blocks: 0, toolUse: false }), "empty");
+});
+
+test("tool arguments that will not parse are a failure", () => {
+  assert.equal(verdictFor({}, { blocks: 1, toolUse: true, badArguments: true }), "bad_arguments");
+});
+
+test("answering in prose is only a failure when a tool call was required", () => {
+  // Claude Code offers tools on nearly every request. Replying "this function
+  // sorts the list" is the right answer, not a broken model, so this must not
+  // be counted against it.
+  assert.equal(verdictFor({ tool_choice: { type: "auto" } }, { blocks: 1, toolUse: false }), "ok");
+  assert.equal(verdictFor({}, { blocks: 1, toolUse: false }), "ok");
+
+  // tool_choice any/tool means the model was told it had to call one.
+  assert.equal(verdictFor({ tool_choice: { type: "any" } }, { blocks: 1, toolUse: false }), "no_tool_call");
+  assert.equal(verdictFor({ tool_choice: { type: "tool" } }, { blocks: 1, toolUse: false }), "no_tool_call");
+  assert.equal(verdictFor({ tool_choice: { type: "any" } }, { blocks: 1, toolUse: true }), "ok");
+});
+
+test("a 200 with a bad verdict counts against the model like a 400 would", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, dirname } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-verdict-"));
+  const here = dirname(new URL(import.meta.url).pathname);
+  const script = join(home, "run.mjs");
+
+  writeFileSync(script, [
+    `import { record, statsFor, decayed } from "${join(here, "stats.js")}";`,
+    `record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 200 });`,
+    `record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 200, verdict: "empty" });`,
+    `const e = statsFor("https://p/v1", "m", "tools");`,
+    `console.log(JSON.stringify({ ok: e.ok, fail: e.fail, weighted: decayed(e).weighted }));`,
+  ].join("\n"));
+
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+
+  assert.equal(out.ok, 1, "only the good one counts as an answer");
+  assert.equal(out.fail, 1, "the empty 200 is a failure");
+  assert.ok(out.weighted >= 4, `and it carries conclusive weight, got ${out.weighted}`);
+});

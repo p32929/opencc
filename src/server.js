@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { config, getConfig, isConfigured, displayName } from "./config.js";
 import { pickModels, toOpenAIRequest, toAnthropicResponse, toAnthropicError } from "./translate.js";
 import { streamOpenAIToAnthropic, sendAnthropicAsStream } from "./stream.js";
-import { requirementsOf, describeNeeds, kindOf, chooseOrder, record, coolOff } from "./stats.js";
+import { requirementsOf, describeNeeds, kindOf, chooseOrder, record, coolOff, verdictFor } from "./stats.js";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -91,6 +91,8 @@ export async function callUpstream(
   const failures = [];
   const deadline = Date.now() + TOTAL_DEADLINE_MS;
   let lastStatus = 502;
+  let headStatus = 0;
+  let headMs = 0;
 
   // Flattened up front so the log can show "attempt 3/7" rather than a
   // provider index that says nothing about how much runway is left.
@@ -187,7 +189,12 @@ export async function callUpstream(
 
       if (upstream?.ok) {
         console.log(`[opencc]   ${label} -> ${upstream.status} in ${took()}`);
-        stats.record({ baseUrl: provider.baseUrl, model, kind, status: upstream.status });
+        // Deliberately not recorded here. A 200 whose body turned out to be
+        // empty, or to carry tool arguments nothing can parse, is not a
+        // success, and the body has not been read yet. The caller reports it
+        // once it knows, through `report` below.
+        headStatus = upstream.status;
+        headMs = Date.now() - startedAt;
         break;
       }
 
@@ -228,7 +235,14 @@ export async function callUpstream(
     }
 
     if (upstream?.ok) {
-      return { upstream, provider, model, streamed: streamUpstream };
+      return {
+        upstream, provider, model, streamed: streamUpstream,
+        // Called once the reply has been read. Until then this attempt is
+        // not in the record at all.
+        report: (verdict) => stats.record({
+          baseUrl: provider.baseUrl, model, kind, status: headStatus, ms: headMs, verdict,
+        }),
+      };
     }
 
     // Anything still failing moves to the next pair. Providers disagree wildly
@@ -273,12 +287,20 @@ async function handleMessages(anthropicReq, res) {
   }
 
   if (result.streamed) {
-    await streamOpenAIToAnthropic(result.upstream, res, anthropicReq.model, result.provider.baseUrl);
+    const sent = await streamOpenAIToAnthropic(result.upstream, res, anthropicReq.model, result.provider.baseUrl);
+    result.report(verdictFor(anthropicReq, sent));
     return;
   }
 
   const data = await result.upstream.json();
   const message = toAnthropicResponse(data, anthropicReq.model, result.provider.baseUrl);
+
+  const toolBlocks = message.content.filter((block) => block.type === "tool_use");
+  result.report(verdictFor(anthropicReq, {
+    blocks: message.content.filter((block) => block.type !== "text" || block.text !== "").length,
+    toolUse: toolBlocks.length > 0,
+    badArguments: toolBlocks.some((block) => !block.input || typeof block.input !== "object"),
+  }));
 
   // The client asked for a stream but streaming is off, so hand it the
   // finished message as a one-shot stream rather than a plain JSON body.

@@ -203,7 +203,7 @@ export async function warmUp(providers, {
         continue;
       }
 
-      save({ baseUrl: provider.baseUrl, model, kind, status: outcome.status });
+      save({ baseUrl: provider.baseUrl, model, kind, status: outcome.status, ms: outcome.took });
       done += 1;
       const result = { provider, model, ...outcome };
       results.push(result);
