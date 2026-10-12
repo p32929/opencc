@@ -3,6 +3,32 @@
 const args = process.argv.slice(2);
 const subcommand = args[0];
 
+// Anything after "claude" belongs to Claude Code, including its own --help,
+// so this only answers when opencc itself is being asked.
+if (subcommand !== "claude" && (args.includes("-h") || args.includes("--help"))) {
+  console.log(`
+opencc - use Claude Code with any OpenAI-compatible API
+
+  opencc                 start the panel and the proxy
+  opencc claude [args]   start Claude Code through the proxy
+  opencc --reset-stats   forget every result and start learning again
+
+Options
+
+  --port N               port for the proxy (default: from your config)
+  --panel-port N         port for the panel (default: 3450)
+  --no-warmup            do not test new models at startup
+  -h, --help             this
+
+The panel is where you add providers. The proxy is what Claude Code talks to,
+and it only starts once at least one model can call tools.
+
+  config   ~/.opencc/.env
+  record   ~/.opencc/stats.jsonl
+`);
+  process.exit(0);
+}
+
 // Checked before anything else dispatches, so it works wherever you put it
 // on the line. It only ever touches what opencc learned: providers, models,
 // keys and settings are in a different file and are not read here.
