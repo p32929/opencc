@@ -46,6 +46,26 @@ const CONCLUSIVE = 4;   // it told us, and it will keep telling us
 const ORDINARY = 1;     // a plain refusal, no explanation
 const PASSING = 0.25;   // busy, broken or unreachable right now
 
+// Does this failure mean "the request was too big" rather than "this model
+// cannot do that"?
+//
+// Written against what these providers actually say, captured by sending
+// deliberately oversized requests rather than guessed:
+//
+//   ollama  400  The prompt is too long: 133418, model maximum context
+//                length: 131072
+//   z.ai    400  Prompt exceeds max length
+//
+// The rest are the phrasings OpenAI and Anthropic use, which most
+// OpenAI-compatible backends copy.
+const TOO_BIG = /prompt is too long|exceeds max length|maximum context length|context[_ ]length[_ ]exceeded|too many tokens|input is too long|reduce the length|request too large|payload too large/i;
+
+export function isTooBig(status, body = "") {
+  if (status === 413) return true;
+  if (status !== 400 && status !== 422) return false;
+  return TOO_BIG.test(body);
+}
+
 export function weightOf(status) {
   if (status >= 200 && status < 300) return 0;
   // Checked first: 501 is "not implemented", which is a settled answer even
@@ -106,6 +126,8 @@ export const KINDS = ["text", "tools", "image", "document"];
 // "tools were offered and none came back" - is not a fact: Claude Code puts
 // tools on nearly every request, and answering "what does this function do?"
 // in prose is correct. It only counts when tool_choice demanded a call.
+export const TOO_BIG_VERDICT = "too_big";
+
 export function verdictFor(anthropicReq, { blocks, toolUse, badArguments }) {
   if (blocks === 0) return "empty";
   if (badArguments) return "bad_arguments";
@@ -122,13 +144,18 @@ export const NEEDED = ["tools", "image", "document"];
 
 const keyOf = (baseUrl, model, kind) => `${baseUrl}\u0000${model}\u0000${kind}`;
 
-export function record({ baseUrl, model, kind, status, ms, verdict }) {
+export function record({ baseUrl, model, kind, status, ms, verdict, chars }) {
   const event = { p: baseUrl, m: model, k: kind, s: status, n: 1, t: Date.now() };
   // Only written when the answer was not usable, so the common line stays
   // the same size it has always been.
   if (verdict && verdict !== "ok") event.q = verdict;
   // Only for answers. How long a refusal took is noise.
   if (Number.isFinite(ms) && status >= 200 && status < 300) event.ms = Math.round(ms);
+  // How big the request was, in characters of the serialised body. Not
+  // tokens: nothing here ever converts between the two, so the unit only has
+  // to be the same on both sides of a comparison, and characters are the one
+  // we can measure without guessing.
+  if (Number.isFinite(chars)) event.c = chars;
   const line = `${JSON.stringify(event)}\n`;
   try {
     mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
@@ -157,7 +184,7 @@ function foldLine(agg, line) {
   if (!event || typeof event.p !== "string" || typeof event.m !== "string") return;
 
   const key = keyOf(event.p, event.m, event.k ?? "text");
-  const entry = agg.get(key) ?? { ok: 0, fail: 0, statuses: {}, days: {}, lastOk: 0, lastFail: 0, totalMs: 0, timed: 0 };
+  const entry = agg.get(key) ?? { ok: 0, fail: 0, statuses: {}, days: {}, lastOk: 0, lastFail: 0, totalMs: 0, timed: 0, maxOk: 0, minTooBig: Infinity };
   const n = Number.isFinite(event.n) ? event.n : 1;
   const status = Number(event.s) || 0;
   const when = event.t ?? Date.now();
@@ -179,15 +206,24 @@ function foldLine(agg, line) {
       entry.totalMs += event.ms * n;
       entry.timed += n;
     }
+    if (Number.isFinite(event.c)) entry.maxOk = Math.max(entry.maxOk, event.c);
   } else {
     entry.fail += n;
     bucket.fail += n;
+    // The smallest request this model has refused for being too big. With
+    // maxOk above, the real ceiling is somewhere between the two, and the
+    // gap closes on its own as you use it.
+    if (event.q === TOO_BIG_VERDICT && Number.isFinite(event.c)) {
+      entry.minTooBig = Math.min(entry.minTooBig, event.c);
+    }
     // What the router actually scores on. `fail` stays the plain count, so
     // the panel can still show "3 of 19 answered" without explaining a
     // weighting scheme to anybody.
-    // A 200 that delivered nothing is the model telling us it cannot do
-    // this, same as a 400 would.
-    bucket.weighted += n * (event.q ? CONCLUSIVE : weightOf(status));
+      // A 200 that delivered nothing is the model telling us it cannot do
+    // this, same as a 400 would. An oversized request is the opposite: it
+    // says nothing about the model, so it carries no weight at all. It is
+    // still kept, because it is how the size ceiling is learned.
+    bucket.weighted += n * (event.q === TOO_BIG_VERDICT ? 0 : event.q ? CONCLUSIVE : weightOf(status));
     entry.lastFail = Math.max(entry.lastFail, when);
   }
   entry.statuses[status] = (entry.statuses[status] ?? 0) + n;
@@ -513,11 +549,22 @@ function providersCoolingOff(rows) {
   return out;
 }
 
+// Has this model already refused something no bigger than this?
+//
+// Demoted rather than excluded: a 400 could have been read as an overflow
+// when it was something else, and being wrong should cost a place in the
+// queue, not the model's whole turn.
+export function knownTooSmall(entry, chars) {
+  if (!entry || !Number.isFinite(chars)) return false;
+  return Number.isFinite(entry.minTooBig) && chars >= entry.minTooBig;
+}
+
 export function chooseOrder(attempts, kind, {
   lookup = statsFor,
   lookupOther = statsForOtherKinds,
   rng = Math.random,
   now = Date.now(),
+  chars,
 } = {}) {
   const rows = attempts.map((attempt, position) => {
     const { baseUrl } = attempt.provider;
@@ -529,6 +576,7 @@ export function chooseOrder(attempts, kind, {
       a,
       b,
       cooling: coolingFor(baseUrl, attempt.model, now),
+      tooSmall: knownTooSmall(entry, chars),
       draw: betaSample(a, b, rng) - slowness(meanMs(entry)),
     };
   });
@@ -547,6 +595,9 @@ export function chooseOrder(attempts, kind, {
   // It is still reachable: if everything else fails, we would rather ask a
   // rate-limited model than give up.
   rows.sort((x, y) =>
+    // A model too small for this request goes behind even a cooling one: the
+    // cooling model will work in a minute, this one will never take this.
+    (x.tooSmall ? 1 : 0) - (y.tooSmall ? 1 : 0) ||
     (x.cooling === 0 ? 0 : 1) - (y.cooling === 0 ? 0 : 1) ||
     x.cooling - y.cooling ||
     y.draw - x.draw ||
@@ -560,6 +611,7 @@ export function chooseOrder(attempts, kind, {
       return `${row.attempt.model} ${Math.round(mean * 100)}%` + (row.cooling ? " (cooling)" : "");
     }),
     cooling: rows.filter((row) => row.cooling > 0).length,
+    tooSmall: rows.filter((row) => row.tooSmall).length,
   };
 }
 

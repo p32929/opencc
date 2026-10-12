@@ -1462,3 +1462,74 @@ test("a 200 with a bad verdict counts against the model like a 400 would", async
   assert.equal(out.fail, 1, "the empty 200 is a failure");
   assert.ok(out.weighted >= 4, `and it carries conclusive weight, got ${out.weighted}`);
 });
+
+// --- too big is about the request, not the model ---------------------------
+
+import { isTooBig, knownTooSmall, TOO_BIG_VERDICT } from "./stats.js";
+
+test("an overflow is told apart from a real refusal", () => {
+  // These two are what ollama and z.ai actually send, captured by sending
+  // deliberately oversized requests rather than guessed.
+  assert.equal(isTooBig(400, '{"error":{"message":"The prompt is too long: 133418, model maximum context length: 131072"}}'), true);
+  assert.equal(isTooBig(400, '{"error":{"code":"1261","message":"Prompt exceeds max length"}}'), true);
+  assert.equal(isTooBig(413, ""), true, "payload too large needs no message");
+
+  // and the failures that are about the model
+  assert.equal(isTooBig(400, '{"error":{"message":"this model does not support image input"}}'), false);
+  assert.equal(isTooBig(429, "rate limited"), false);
+  assert.equal(isTooBig(403, "Authorization failed"), false);
+});
+
+test("a model that refused a smaller request cannot take a bigger one", () => {
+  const entry = { minTooBig: 100000 };
+  assert.equal(knownTooSmall(entry, 150000), true);
+  assert.equal(knownTooSmall(entry, 100000), true, "the same size failed once already");
+  assert.equal(knownTooSmall(entry, 50000), false, "smaller is still worth trying");
+  assert.equal(knownTooSmall({ minTooBig: Infinity }, 999999), false, "never refused anything");
+  assert.equal(knownTooSmall(null, 1000), false);
+});
+
+test("a model too small for this request goes behind even a cooling one", () => {
+  clearCooldowns();
+  const attempts = [attempt("one", "small"), attempt("two", "cooling"), attempt("three", "fine")];
+  coolOff("https://two/v1", "cooling", 429);
+
+  const { attempts: order, tooSmall } = chooseOrder(attempts, "tools", {
+    lookup: (baseUrl, model) =>
+      model === "small" ? { ok: 5, fail: 1, weighted: 1, minTooBig: 90000 } : { ok: 5, fail: 1, weighted: 1 },
+    lookupOther: () => null,
+    rng: seeded(6),
+    chars: 120000,
+  });
+
+  assert.deepEqual(order.map((a) => a.model), ["fine", "cooling", "small"]);
+  assert.equal(tooSmall, 1);
+  clearCooldowns();
+});
+
+test("an oversized request does not count against the model", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, dirname } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-toobig-"));
+  const here = dirname(new URL(import.meta.url).pathname);
+  const script = join(home, "run.mjs");
+
+  writeFileSync(script, [
+    `import { record, statsFor, decayed } from "${join(here, "stats.js")}";`,
+    `record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 400, chars: 500000, verdict: "${TOO_BIG_VERDICT}" });`,
+    `record({ baseUrl: "https://p/v1", model: "m", kind: "tools", status: 400 });`,
+    `const e = statsFor("https://p/v1", "m", "tools");`,
+    `console.log(JSON.stringify({ fail: e.fail, weighted: decayed(e).weighted, minTooBig: e.minTooBig }));`,
+  ].join("\n"));
+
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+
+  assert.equal(out.fail, 2, "both failed");
+  assert.equal(out.minTooBig, 500000, "and the ceiling was learned from the oversized one");
+  // Only the plain 400 should carry weight: 4 for a conclusive refusal, and
+  // nothing at all for the request simply being too long.
+  assert.ok(out.weighted >= 3.9 && out.weighted <= 4.1, `expected ~4, got ${out.weighted}`);
+});

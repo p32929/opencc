@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { config, getConfig, isConfigured, displayName } from "./config.js";
 import { pickModels, toOpenAIRequest, toAnthropicResponse, toAnthropicError } from "./translate.js";
 import { streamOpenAIToAnthropic, sendAnthropicAsStream } from "./stream.js";
-import { requirementsOf, describeNeeds, kindOf, chooseOrder, record, coolOff, verdictFor } from "./stats.js";
+import { requirementsOf, describeNeeds, kindOf, chooseOrder, record, coolOff, verdictFor, isTooBig, TOO_BIG_VERDICT } from "./stats.js";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -120,11 +120,15 @@ export async function callUpstream(
   // the ones that did not.
   const needs = requirementsOf(anthropicReq);
   const kind = kindOf(needs);
-  const ordered = stats.order(candidates, kind);
+  // The size is what decides whether a model can take this at all, so it
+  // goes into the ordering as well as into the record.
+  const chars = JSON.stringify(anthropicReq).length;
+  const ordered = stats.order(candidates, kind, { chars });
 
   console.log(
     `[opencc]   ${candidates.length} model(s) for ${describeNeeds(needs)}` +
       (ordered.cooling ? `, ${ordered.cooling} cooling off` : "") +
+      (ordered.tooSmall ? `, ${ordered.tooSmall} too small for ${chars} chars` : "") +
       `: ${ordered.head.join(", ")}`,
   );
 
@@ -214,7 +218,15 @@ export async function callUpstream(
         console.error(`[opencc]   ${label} cut short by the deadline after ${took()} — not counted against it`);
       } else {
         const status = networkError ? 0 : upstream.status;
-        stats.record({ baseUrl: provider.baseUrl, model, kind, status });
+        // An oversized request is about the request, not the model. Recorded
+        // so the ceiling is learned, weighed at nothing so the model is not
+        // blamed for it.
+        const oversized = !networkError && isTooBig(status, errorText ?? "");
+        stats.record({
+          baseUrl: provider.baseUrl, model, kind, status, chars,
+          verdict: oversized ? TOO_BIG_VERDICT : undefined,
+        });
+        if (oversized) console.error(`[opencc]   ${label} is too small for this request (${chars} chars)`);
         // Rate limits and outages say "not now" rather than "not ever", so
         // on top of the record they park the model for a minute or so.
         const cool = stats.coolOff(provider.baseUrl, model, status);
@@ -240,7 +252,7 @@ export async function callUpstream(
         // Called once the reply has been read. Until then this attempt is
         // not in the record at all.
         report: (verdict) => stats.record({
-          baseUrl: provider.baseUrl, model, kind, status: headStatus, ms: headMs, verdict,
+          baseUrl: provider.baseUrl, model, kind, status: headStatus, ms: headMs, verdict, chars,
         }),
       };
     }

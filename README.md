@@ -76,11 +76,38 @@ Other rules:
 
 - A model that fails at `image` keeps its good record for `text`.
 - A request carrying a PDF goes only to models that have read one.
+- A model that refused a smaller request for being too long is tried last for
+  a bigger one.
 - Old results count less. Half life is four days.
 - A 429 or a timeout puts the model at the back for 15 to 60 seconds.
 - If a model fails, the next one in the list is tried.
 - 5xx: one retry. 4xx: move on.
 - `max_tokens` is not sent. Some backends reject large values.
+
+## Request size
+
+Claude Code sends big requests. A model with a small window refuses one with a
+400, which looks exactly like "this model is broken" unless you read the
+message.
+
+opencc reads it. The refusal is recognised as being about the request, not the
+model, so it costs the model nothing in the record. What it does do is record
+the size, which brackets the ceiling:
+
+```
+  maxOk       the largest request this model answered
+  minTooBig   the smallest request it refused for length
+```
+
+The real limit is between the two, and the gap closes on its own as you use
+it. No probing, no extra calls. Once a model has refused something, anything
+that size or larger puts it at the back of the queue, behind even a
+rate-limited model: the rate-limited one will work in a minute, this one never
+will at this size.
+
+Sizes are counted in characters, not tokens. Nothing here converts between the
+two, so the unit only has to be the same on both sides of a comparison, and
+characters are the one that can be measured without guessing.
 
 ## First run
 
