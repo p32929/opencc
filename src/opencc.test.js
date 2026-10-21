@@ -1758,3 +1758,39 @@ test("lines written before batching still read correctly", async () => {
   assert.equal(out.fail, 3, "n is still honoured on an old line");
   assert.equal(out.mean, 1000, "and its timings average rather than sum");
 });
+
+// --- a stray system turn must not land in the middle -----------------------
+
+test("system turns inside messages are folded into the one at the front", () => {
+  // A SessionStart hook makes Claude Code put a system-role turn after the
+  // first user message, and its content is blocks rather than a string.
+  // vLLM answers that with "System message must be at the beginning" and
+  // rejects the whole request, so every system turn has to move to the front.
+  const out = toOpenAIRequest({
+    model: "c",
+    system: "top level rules",
+    messages: [
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+      { role: "system", content: [{ type: "text", text: "hook output" }] },
+      { role: "assistant", content: [{ type: "text", text: "hi" }] },
+    ],
+  }, "m", "https://x/v1", false);
+
+  assert.deepEqual(out.messages.map((m) => m.role), ["system", "user", "assistant"]);
+  assert.equal(out.messages[0].content, "top level rules\n\nhook output");
+  // and it is the text, not the JSON of the block array
+  assert.doesNotMatch(out.messages[0].content, /"type"/);
+});
+
+test("a system turn survives even with no top-level system field", () => {
+  const out = toOpenAIRequest({
+    model: "c",
+    messages: [
+      { role: "user", content: "hello" },
+      { role: "system", content: "hook output" },
+    ],
+  }, "m", "https://x/v1", false);
+
+  assert.deepEqual(out.messages.map((m) => m.role), ["system", "user"]);
+  assert.equal(out.messages[0].content, "hook output");
+});

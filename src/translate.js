@@ -129,6 +129,13 @@ function convertAssistantMessage(content, baseUrl) {
 }
 
 function convertMessage(msg, baseUrl) {
+  // A system turn can arrive inside messages, not just in the top-level
+  // system field: a SessionStart hook's output reaches Claude Code that way.
+  // Its content is blocks, so it needs the same text extraction as the
+  // top-level field rather than being stringified whole.
+  if (msg.role === "system") {
+    return [{ role: "system", content: systemToOpenAI(msg.content) ?? "" }];
+  }
   if (typeof msg.content === "string") {
     return [{ role: msg.role, content: msg.content }];
   }
@@ -164,10 +171,25 @@ function convertToolChoice(toolChoice) {
 // remembered thought_signature is only replayed to the backend that issued it.
 export function toOpenAIRequest(anthropicReq, model, baseUrl, stream = undefined) {
   const messages = [];
+  const systemParts = [];
   const system = systemToOpenAI(anthropicReq.system);
-  if (system) messages.push({ role: "system", content: system });
+  if (system) systemParts.push(system);
+
   for (const msg of anthropicReq.messages) {
-    messages.push(...convertMessage(msg, baseUrl));
+    for (const converted of convertMessage(msg, baseUrl)) {
+      // vLLM rejects the whole request with "System message must be at the
+      // beginning", so every system turn is folded into the single one at the
+      // front instead of being left where it appeared in the history.
+      if (converted.role === "system") {
+        if (converted.content) systemParts.push(converted.content);
+      } else {
+        messages.push(converted);
+      }
+    }
+  }
+
+  if (systemParts.length > 0) {
+    messages.unshift({ role: "system", content: systemParts.join("\n\n") });
   }
 
   // max_tokens is deliberately not forwarded. Anthropic requires it so Claude
