@@ -14,34 +14,54 @@ import { dirname } from "node:path";
 import { GLOBAL_CONFIG_DIR, MODELS_DEV_PATH } from "./paths.js";
 
 const URL_DEFAULT = "https://models.dev/api.json";
-const DAY_MS = 86_400_000;
 
 // Bumped when the shape below changes, so an older cache is refetched once
-// rather than read with missing fields.
-const VERSION = 1;
+// rather than read with fields missing from it.
+const VERSION = 2;
 
-// The published file is about 6 MB and most of it is prose we never show.
-// Only these fields are kept, which brings the cache under a megabyte.
+// Everything models.dev publishes about a model, less the prose.
+//
+// It is fetched once and then kept. There is no expiry: a six megabyte
+// download to learn that a context window is still what it was yesterday is
+// not worth doing on a timer. The models.dev button fetches it again when
+// you want it, and that is the only thing that does.
 function compact(raw) {
   const providers = {};
   for (const [id, provider] of Object.entries(raw)) {
     const models = {};
     for (const [modelId, info] of Object.entries(provider.models ?? {})) {
       const context = info.limit?.context > 0 ? info.limit.context : undefined;
+      const inputs = Array.isArray(info.modalities?.input) ? info.modalities.input : null;
       const entry = {
+        name: info.name,
+        family: info.family,
         context,
         maxOutput: info.limit?.output > 0 ? info.limit.output : undefined,
         input: info.cost?.input,
         output: info.cost?.output,
+        cacheRead: info.cost?.cache_read,
+        cacheWrite: info.cost?.cache_write,
         // Absent means "nobody said", which is not the same as false: a
         // missing tool_call is treated as capable, the way models.dev's own
         // consumers read it.
         tools: info.tool_call !== false,
-        vision: Array.isArray(info.modalities?.input)
-          ? info.modalities.input.includes("image")
-          : Boolean(info.attachment),
+        vision: inputs ? inputs.includes("image") : Boolean(info.attachment),
+        audio: inputs ? inputs.includes("audio") : undefined,
+        video: inputs ? inputs.includes("video") : undefined,
+        pdf: inputs ? inputs.includes("pdf") : undefined,
         reasoning: Boolean(info.reasoning),
+        temperature: info.temperature,
+        attachment: info.attachment,
+        openWeights: info.open_weights,
+        knowledge: info.knowledge,
+        released: info.release_date,
+        updated: info.last_updated,
+        status: info.status,
+        canonical: info.canonical_model_id,
+        inputs: inputs || undefined,
+        outputs: Array.isArray(info.modalities?.output) ? info.modalities.output : undefined,
       };
+      for (const key of Object.keys(entry)) if (entry[key] === undefined) delete entry[key];
       // A model with nothing useful on it is not worth a line in the cache.
       if (context || entry.input !== undefined || entry.vision || info.tool_call === false) {
         models[modelId] = entry;
@@ -109,8 +129,9 @@ export async function loadCatalog({
     table = readCache();
     index = null;
   }
-  const fresh = table && Date.now() - table.at < DAY_MS;
-  if (!force && (fresh || process.env.OPENCC_NO_MODELS_DEV)) return table;
+  // Kept until you ask for it again. There was a day's expiry here, which
+  // meant re-downloading six megabytes to be told the same thing.
+  if (!force && (table || process.env.OPENCC_NO_MODELS_DEV)) return table;
 
   try {
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeout) });

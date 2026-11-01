@@ -1114,6 +1114,7 @@ var CONTROLS = {
 function clearFilters() {
   FILTER = Object.assign({}, BLANK_FILTER);
   $("f-q").value = "";
+  keepFilter();
   drawMine();
 }
 
@@ -1270,6 +1271,20 @@ var BLANK_FILTER = {
   count: "", ctx: "", price: "", known: "", state: "",
 };
 var FILTER = Object.assign({}, BLANK_FILTER);
+try {
+  var savedFilter = JSON.parse(localStorage.getItem("opencc-filter"));
+  if (savedFilter) {
+    Object.keys(BLANK_FILTER).forEach(function (k) {
+      if (typeof savedFilter[k] === "string") FILTER[k] = savedFilter[k];
+    });
+  }
+} catch (e) {
+  // Private window or blocked storage: start with no filters.
+}
+
+function keepFilter() {
+  try { localStorage.setItem("opencc-filter", JSON.stringify(FILTER)); } catch (e) {}
+}
 
 var filtering = function () {
   return Object.keys(BLANK_FILTER).some(function (k) { return FILTER[k] !== BLANK_FILTER[k]; });
@@ -1452,7 +1467,17 @@ function drawMine() {
     list.length ? h("button", { className: "sm", disabled: Boolean(running),
       title: filtering() ? "Only the models these filters show" : "Every model in the pot",
       onclick: function () { testMany(view); } },
-      filtering() ? "Test these " + view.length : "Test all") : null);
+      filtering() ? "Test these " + view.length : "Test all") : null,
+
+    // The list you are looking at, made into the list you keep. Narrow to
+    // the ones that work, or that call tools, or that cost nothing, and this
+    // throws the rest out of the pot in one go.
+    filtering() && view.length && view.length < all.length
+      ? h("button", { className: "sm primary", disabled: Boolean(running),
+          title: "Take the " + (all.length - view.length) + " models these filters hide out of the pot",
+          onclick: function () { keepOnly(view, all); } },
+          "Keep only these " + view.length)
+      : null);
 
   if (!list.length) {
     put($("outcomes"));
@@ -1552,6 +1577,24 @@ function drawMine() {
             h("button", { className: "sm danger", "aria-label": "Remove " + t.model,
               onclick: function () { removeModels([t]); } }, "\\u2715"))));
       })))));
+}
+
+// Keep what is shown, drop the rest.
+async function keepOnly(view, all) {
+  var going = all.filter(function (t) {
+    return !view.some(function (k) { return k.i === t.i && k.model === t.model; });
+  });
+  if (!going.length) return;
+
+  var ok = await ask(
+    "Keep only these " + view.length + " models?",
+    going.length + " that these filters hide come out of the pot. Their providers and keys stay, " +
+    "and you can put any of them back from Providers.",
+    "Keep these " + view.length);
+  if (!ok) return;
+
+  await removeModels(going);
+  clearFilters();
 }
 
 async function park(t) {
@@ -2147,11 +2190,12 @@ $("go-prov").addEventListener("click", function () { location.hash = "#providers
 $("q").addEventListener("input", function (e) { query = e.target.value; drawProviders(); });
 $("free").addEventListener("change", function (e) { freeOnly = e.target.checked; drawProviders(); });
 $("sort").addEventListener("change", function (e) { catSort = e.target.value; drawProviders(); });
-$("f-q").addEventListener("input", function (e) { FILTER.q = e.target.value; drawMine(); });
-$("f-prov").addEventListener("change", function (e) { FILTER.prov = e.target.value; drawMine(); });
+$("f-q").addEventListener("input", function (e) { FILTER.q = e.target.value; keepFilter(); drawMine(); });
+$("f-prov").addEventListener("change", function (e) { FILTER.prov = e.target.value; keepFilter(); drawMine(); });
 Object.keys(CONTROLS).forEach(function (key) {
   $(CONTROLS[key]).addEventListener("change", function (e) {
     FILTER[key] = e.target.value;
+    keepFilter();
     drawMine();
   });
 });
