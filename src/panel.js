@@ -81,16 +81,43 @@ function loadState() {
 const DUMP_LIMIT = 4000;
 const trim = (text) => (text.length > DUMP_LIMIT ? text.slice(0, DUMP_LIMIT) + "\n…" : text);
 
-async function testModel(provider, model, timeoutMs) {
+// How many requests this process has out to providers right now. Reported
+// with the run, because "it has gone quiet" and "it is waiting on a hundred
+// replies" look identical from the outside and need different fixes.
+let inFlight = 0;
+
+async function testModel(provider, model, timeoutMs, keepDump) {
+  inFlight += 1;
+  try {
+    return await testModelInner(provider, model, timeoutMs, keepDump);
+  } finally {
+    inFlight -= 1;
+  }
+}
+
+async function testModelInner(provider, model, timeoutMs, keepDump) {
   const headers = { "Content-Type": "application/json" };
   if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
 
+  // Streamed, and with no max_tokens, which is what HeartCode sends.
+  //
+  // On a single request this makes no difference — measured, four models
+  // serially came out the same either way. At a hundred-odd in flight it
+  // makes all of it: a buffered reply holds the connection until the
+  // provider has written the whole thing, and a hundred of those through one
+  // rotator queue behind each other. Streaming, the first bytes come back at
+  // once and the connection clears. 127 in flight with 2 finished at two
+  // seconds was the shape of the problem.
   const body = {
     model,
-    messages: [{ role: "user", content: "Reply with the single word: ok" }],
-    max_tokens: 16,
+    messages: [{ role: "user", content: "Reply with just the word OK." }],
+    stream: true,
   };
-  const sent = JSON.stringify(body, null, 2);
+  // Pretty-printing the request and the reply for every model costs real CPU
+  // on a run of a thousand, and that CPU is the same event loop driving the
+  // requests. Only a single Test keeps them, which is the only place they
+  // are ever read.
+  const sent = keepDump ? JSON.stringify(body, null, 2) : "";
   const startedAt = Date.now();
 
   try {
@@ -107,11 +134,14 @@ async function testModel(provider, model, timeoutMs) {
     // no image and no document, so that is the bucket it belongs in.
     record({ baseUrl: provider.baseUrl, model, kind: "text", status: res.status, ms });
 
-    let got = text;
-    try {
-      got = JSON.stringify(JSON.parse(text), null, 2);
-    } catch {
-      // Not JSON — an HTML error page, most likely. Shown as it came.
+    let got = "";
+    if (keepDump) {
+      got = text;
+      try {
+        got = JSON.stringify(JSON.parse(text), null, 2);
+      } catch {
+        // Not JSON — an HTML error page, most likely. Shown as it came.
+      }
     }
 
     // A 429 usually says when to come back. Honouring it beats guessing,
@@ -124,8 +154,8 @@ async function testModel(provider, model, timeoutMs) {
       status: res.status,
       ms,
       retryAfter: Number.isFinite(after) && after > 0 ? after : undefined,
-      sent: trim(sent),
-      got: trim(got),
+      sent: keepDump ? trim(sent) : undefined,
+      got: keepDump ? trim(got) : undefined,
       error: res.ok ? undefined : reasonFrom(text) || `HTTP ${res.status}`,
     };
   } catch (err) {
@@ -172,17 +202,18 @@ let run = null;
 const testKey = (baseUrl, model) => `${baseUrl}|${model}`;
 
 // A 429 is the provider saying "not now", so the model is tried again rather
-// than written down as broken. How long to wait for that is a judgement, and
-// HeartCode's is too patient for a test run: four tries at 15s, 30s, 60s is
-// up to 105 seconds of waiting on one model.
+// than written down as broken.
 //
-// Measured on 24 models across 8 providers: 23 answered in 2.1s and the run
-// then sat for another 109s on a single rate-limited openrouter model. This
-// ladder is 5s, 10s, 20s, so the worst a 429 costs is about 35 seconds, and
-// a Retry-After from the provider still wins over all of it.
-const RATE_TRIES = 3;
-const FIRST_BACKOFF = 5000;
-const MAX_BACKOFF = 20000;
+// These numbers look over-patient on a short list and are not. A shorter
+// ladder (5s, 10s, 20s) was measured against this one on the full 1482-model
+// catalogue: it came back before the limit had cleared, earned another 429,
+// and spent the run thrashing between short pauses — 17.8 models a second
+// against 38. Waiting 15 seconds once beats waiting 5 seconds three times.
+//
+// A Retry-After from the provider still wins over the ladder.
+const RATE_TRIES = 4;
+const FIRST_BACKOFF = 15000;
+const MAX_BACKOFF = 120000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function runState() {
@@ -195,7 +226,7 @@ function runState() {
   return {
     running: true,
     total: run.total, done: run.done, good: run.good,
-    lanes: run.lanes, stopping: run.stopping, paused,
+    lanes: run.lanes, stopping: run.stopping, paused, inFlight,
   };
 }
 
@@ -228,17 +259,26 @@ async function startRun(items) {
   // the others finish and leave; the last never does, or the queue would
   // never drain.
   const worker = async (p, n) => {
-    while (!run.stopping && p.queue.length && (n < p.cap || p.live === 1)) {
+    while (!run.stopping && p.queue.length) {
       if (p.until > Date.now()) {
         await sleep(Math.min(200, p.until - Date.now()));
         bus.emit("testrun", runState());
+        continue;
+      }
+      // Over the cap: wait for it to come back rather than leave. Exiting
+      // here is what made a busy provider stay at one lane for the whole
+      // run — measured, the in-flight count collapsed from 127 to 15 within
+      // ten seconds and never recovered. One worker always carries on, or a
+      // queue narrowed to one lane would never drain.
+      if (n >= p.cap && n > 0) {
+        await sleep(150);
         continue;
       }
 
       const model = p.queue.shift();
       const key = testKey(p.provider.baseUrl, model);
       const sentAt = Date.now();
-      const outcome = await testModel(p.provider, model, timeoutMs);
+      const outcome = await testModel(p.provider, model, timeoutMs, false);
 
       if (outcome.status === 429) {
         const times = (p.refused.get(key) ?? 0) + 1;
@@ -258,7 +298,11 @@ async function startRun(items) {
         }
         outcome.error = `the provider kept saying it is busy (429), ${times} times with pauses between: try it again later`;
       } else if (outcome.ok) {
+        // It is answering again, so give it its lanes back. Without this the
+        // first 429 of a run costs a provider every lane but one until the
+        // run ends.
         p.backoff = FIRST_BACKOFF;
+        p.cap = lanes;
       }
 
       tests[key] = { ...outcome, at: Date.now() };
@@ -420,7 +464,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         }
         // Read fresh, so changing the timeout in the panel applies to the
         // next test without a restart.
-        const outcome = await testModel(provider, model, live.testTimeout * 1000);
+        const outcome = await testModel(provider, model, live.testTimeout * 1000, true);
         tests[testKey(provider.baseUrl, model)] = { ...outcome, at: Date.now() };
         bus.emit("tested", { key: testKey(provider.baseUrl, model), result: tests[testKey(provider.baseUrl, model)] });
         // A model that just answered may be the one the proxy was waiting for.
