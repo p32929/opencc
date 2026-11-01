@@ -230,6 +230,35 @@ function runState() {
   };
 }
 
+// Progress goes out at most this often. Every result used to emit, and so
+// did every worker on every pass of a pause: at sixteen lanes across nine
+// providers that is a hundred and forty workers, several hundred events a
+// second, each one re-serialising the whole run. The page drowned and the
+// progress strip stopped moving, which read as the run being stuck.
+const PROGRESS_EVERY_MS = 250;
+let lastProgress = 0;
+let progressTimer = null;
+
+function sendProgress(force) {
+  if (progressTimer) {
+    clearTimeout(progressTimer);
+    progressTimer = null;
+  }
+  const wait = PROGRESS_EVERY_MS - (Date.now() - lastProgress);
+  if (!force && wait > 0) {
+    // Nothing is lost by coalescing: the state is read when it is sent, so a
+    // late send carries the newest numbers rather than the ones that were
+    // current when it was asked for.
+    progressTimer = setTimeout(() => {
+      progressTimer = null;
+      sendProgress(true);
+    }, wait);
+    return;
+  }
+  lastProgress = Date.now();
+  bus.emit("testrun", runState());
+}
+
 async function startRun(items) {
   const live = loadState();
   const timeoutMs = live.testTimeout * 1000;
@@ -252,7 +281,13 @@ async function startRun(items) {
     run.provs.get(name).queue.push(t.model);
   }
   run.total = [...run.provs.values()].reduce((n, p) => n + p.queue.length, 0);
-  bus.emit("testrun", runState());
+  sendProgress(true);
+
+  // The pauses counting down, which nothing else reports now that a waiting
+  // worker is silent.
+  const ticker = setInterval(() => {
+    if (run && Object.keys(runState().paused).length) sendProgress(true);
+  }, 1000);
 
   // Worker n of a provider: takes its next model while there is one and n is
   // under the cap. A provider that says it is busy drops its cap to one, so
@@ -262,7 +297,6 @@ async function startRun(items) {
     while (!run.stopping && p.queue.length) {
       if (p.until > Date.now()) {
         await sleep(Math.min(200, p.until - Date.now()));
-        bus.emit("testrun", runState());
         continue;
       }
       // Over the cap: wait for it to come back rather than leave. Exiting
@@ -293,14 +327,20 @@ async function startRun(items) {
         }
         if (times < RATE_TRIES) {
           p.queue.push(model);
-          bus.emit("testrun", runState());
+          sendProgress();
           continue;
         }
         outcome.error = `the provider kept saying it is busy (429), ${times} times with pauses between: try it again later`;
-      } else if (outcome.ok) {
-        // It is answering again, so give it its lanes back. Without this the
-        // first 429 of a run costs a provider every lane but one until the
-        // run ends.
+      } else {
+        // Anything that is not a 429 means the provider is talking to us: a
+        // 402 or a 404 is an answer about the model, not a complaint about
+        // the rate. So it gets its lanes back.
+        //
+        // This used to require a success, and these lists are mostly models
+        // the account cannot use. One 429 therefore pinned a provider at a
+        // single lane for the rest of the run: measured, 785 models finished
+        // in the first three seconds and the remaining six hundred trickled
+        // out one at a time behind two throttled providers.
         p.backoff = FIRST_BACKOFF;
         p.cap = lanes;
       }
@@ -309,7 +349,7 @@ async function startRun(items) {
       run.done += 1;
       if (outcome.ok) run.good += 1;
       bus.emit("tested", { key, result: tests[key] });
-      bus.emit("testrun", runState());
+      sendProgress();
     }
     p.live -= 1;
   };
@@ -323,6 +363,11 @@ async function startRun(items) {
   try {
     await Promise.all(all);
   } finally {
+    clearInterval(ticker);
+    if (progressTimer) {
+      clearTimeout(progressTimer);
+      progressTimer = null;
+    }
     const over = { ...runState(), running: false, over: true };
     run = null;
     await onSaveRef?.();
@@ -447,8 +492,24 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         return;
       }
 
+      // `since` asks for only the results newer than a moment, which is what
+      // the page polls with while a run is going.
+      //
+      // The stream is the fast path, not the only one. An event stream that
+      // drops — and one does, under a few hundred results a second — takes
+      // every event with it, because there is nothing to replay. The page
+      // caught up to nothing and sat there looking seized while the run was
+      // still going: measured at 318 of 1471 on screen against 650 here.
       if (req.method === "GET" && path === "/api/tests") {
-        json(res, 200, { ...runState(), results: tests });
+        const since = Number(new URL(req.url, "http://localhost").searchParams.get("since"));
+        let results = tests;
+        if (Number.isFinite(since) && since > 0) {
+          results = {};
+          for (const [key, value] of Object.entries(tests)) {
+            if (value.at > since) results[key] = value;
+          }
+        }
+        json(res, 200, { ...runState(), results, now: Date.now() });
         return;
       }
 

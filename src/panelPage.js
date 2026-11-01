@@ -1339,9 +1339,13 @@ async function testMany(items) {
   drawMine();
 
   try {
-    await post("/api/tests/start", {
+    seenUpTo = Date.now() - 1000;
+    var started = await post("/api/tests/start", {
       only: items.map(function (t) { return { index: t.i, model: t.model }; }),
     });
+    running = started && started.running ? started : running;
+    drawRun();
+    watchRun();
   } catch (e) {
     items.forEach(function (t) { delete TRIES[pk(t.i, t.model)]; });
     drawMine();
@@ -1363,10 +1367,20 @@ function cssEscape(v) {
   return window.CSS && CSS.escape ? CSS.escape(v) : String(v).replace(/["\\\\]/g, "\\\\$&");
 }
 
+// While a run is going, only the counts above the table are redrawn. The
+// table itself is rebuilt row by row at a thousand-odd models, and doing
+// that every time a lull let the timer fire is what made a long run feel
+// like it had seized up. Each finished model already repaints its own cell.
 var settleTimer = null;
 function settleSoon() {
   clearTimeout(settleTimer);
-  settleTimer = setTimeout(function () { loadRecord().then(drawMine); }, 400);
+  settleTimer = setTimeout(function () {
+    if (running) {
+      drawOutcomes(sortRows(rows()));
+      return;
+    }
+    loadRecord().then(drawMine);
+  }, 400);
 }
 
 // The server reports by base URL; the table is keyed by provider index.
@@ -1383,9 +1397,14 @@ function gotResult(key, result) {
   if (i < 0) return;
   var model = key.slice(at + 1);
   TRIES[pk(i, model)] = result;
+  if (result.at > seenUpTo) seenUpTo = result.at;
   paintCell(i, model);
   settleSoon();
 }
+
+// The newest result this page has taken in, so a catch-up only asks for
+// what it is missing.
+var seenUpTo = 0;
 
 // Everything the server already knows, so a reload during a run picks it up
 // mid-flight instead of showing an empty column.
@@ -1401,8 +1420,48 @@ async function loadTests() {
     var at = key.lastIndexOf("|");
     var i = indexOfBaseUrl(key.slice(0, at));
     if (i >= 0) TRIES[pk(i, key.slice(at + 1))] = out.results[key];
+    if (out.results[key].at > seenUpTo) seenUpTo = out.results[key].at;
   });
+  if (out.now) seenUpTo = Math.max(seenUpTo, 0);
   running = out.running ? out : null;
+}
+
+// While a run is going, ask every couple of seconds for whatever the stream
+// did not deliver.
+//
+// The stream is the fast path and it is not reliable on its own: at a few
+// hundred results a second it drops, and an EventSource that reconnects has
+// no way to replay what it missed, so the page simply stopped moving while
+// the run carried on. This makes it heal itself, and the since parameter
+// keeps the answer to a handful of rows rather than the whole table.
+var catchUpTimer = null;
+
+function watchRun() {
+  if (catchUpTimer) return;
+  catchUpTimer = setInterval(async function () {
+    if (!running) {
+      clearInterval(catchUpTimer);
+      catchUpTimer = null;
+      return;
+    }
+    var out;
+    try {
+      out = await api("/api/tests?since=" + seenUpTo);
+    } catch (e) {
+      return;
+    }
+    Object.keys(out.results || {}).forEach(function (key) {
+      gotResult(key, out.results[key]);
+    });
+    running = out.running ? out : null;
+    drawRun();
+    if (!running) {
+      clearInterval(catchUpTimer);
+      catchUpTimer = null;
+      await loadRecord();
+      drawMine();
+    }
+  }, 2000);
 }
 
 function drawRun() {
@@ -1433,7 +1492,11 @@ function pausedNote() {
     return name + " " + running.paused[name] + "s";
   });
   if (!waiting.length) return null;
-  return h("span", { className: "tag warn", title: "It answered 429. Its models are tried again after the pause, up to " + RATE_TRIES + " times." },
+  // RATE_TRIES lives on the server now, where the run does. Naming it here
+  // threw on every call, and because the throw was inside the event handler
+  // it killed the progress strip silently: the page held the right numbers
+  // and never drew them.
+  return h("span", { className: "tag warn", title: "It answered 429. Its models go back on the queue and are tried again after the pause." },
     "busy: " + waiting.join(", "));
 }
 
@@ -1735,10 +1798,21 @@ function drawDetail() {
 function listen() {
   var src;
   try { src = new EventSource("/api/events"); } catch (e) { return; }
-  src.addEventListener("message", async function (e) {
-    var msg;
-    try { msg = JSON.parse(e.data); } catch (e2) { return; }
-    var what = msg.what;
+  src.addEventListener("message", function (e) {
+    // Anything that throws in here used to kill every later update silently,
+    // and the page sat on correct numbers it never drew. The catch-up poll
+    // covers a dropped stream; this covers a bad render.
+    handleEvent(e).catch(function (err) {
+      toast("Live updates hit a problem: " + err.message, true);
+    });
+  });
+}
+
+async function handleEvent(e) {
+  var msg;
+  try { msg = JSON.parse(e.data); } catch (e2) { return; }
+  var what = msg.what;
+  {
     if (what === "tested") {
       gotResult(msg.key, msg.result);
       return;
@@ -1746,7 +1820,8 @@ function listen() {
     if (what === "testrun") {
       var was = Boolean(running);
       running = msg.run && msg.run.running ? msg.run : null;
-      drawRun();
+      drawRun();   // the strip only: a few nodes, not the table
+      if (running) watchRun();
       // A run that has just ended: settle the counts and say how it went.
       if (was && !running) {
         await loadRecord();
@@ -1763,7 +1838,7 @@ function listen() {
       await Promise.all([loadRequests(), loadRecord()]);
       drawAll();
     }
-  });
+  }
 }
 
 async function refreshCatalog() {
@@ -1882,6 +1957,7 @@ try {
   ready = true;
   drawAll();
   listen();
+  if (running) watchRun();
 })();
 </script>
 </body>
