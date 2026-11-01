@@ -155,8 +155,15 @@ export const page = () => `<!doctype html>
   }
   .prov-h:hover { background: var(--hover); }
   .prov.off .prov-h .nm { color: var(--ink-3); text-decoration: line-through; }
-  .prov-h .fold { border: 0; background: none; color: var(--ink-3); padding: 2px; font-size: 11px; transition: transform .14s; }
-  .prov.shut .fold { transform: rotate(-90deg); }
+  /* 28px square. It was 9x15, which is below any sane hit target, and the
+     glyph swaps rather than rotating so the global button:active transform
+     has nothing to fight with. */
+  .prov-h .fold {
+    border: 0; background: none; color: var(--ink-3);
+    width: 28px; height: 28px; padding: 0; flex: none;
+    display: grid; place-items: center; font-size: 11px; border-radius: var(--r-s);
+  }
+  .prov-h .fold:hover { background: var(--rule); color: var(--ink); }
   .prov.shut .rows, .prov.shut .note { display: none; }
   .prov-h .who { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; overflow: hidden; }
   .prov-h .nm { font-weight: 600; font-size: 14px; color: var(--ink); white-space: nowrap; }
@@ -675,14 +682,28 @@ function drawProviders() {
 
     var shut = SHUT.has(i);
     var ticked = rows.filter(function (id) { return PICKED.has(pk(i, id)); });
+    var fold = function () {
+      if (SHUT.has(i)) SHUT.delete(i); else SHUT.add(i);
+      drawProviders();
+    };
 
     return h("div", { className: "prov" + (p.disabled ? " off" : "") + (shut ? " shut" : "") },
       h("div", { className: "prov-h", onclick: function (e) {
+        // Everything interactive in the header handles its own click; the
+        // rest of the strip folds.
         if (e.target.closest("button, input, label, form")) return;
-        if (shut) SHUT.delete(i); else SHUT.add(i);
-        drawProviders();
+        fold();
       } },
-        h("button", { className: "fold", type: "button", "aria-label": "Fold " + (p.name || p.label) }, "\\u25be"),
+        // It used to have no handler of its own, so the guard above threw
+        // away every click on it: the one control that looks like it folds
+        // was the one place that did not.
+        h("button", {
+          className: "fold", type: "button",
+          "aria-expanded": shut ? "false" : "true",
+          "aria-label": (shut ? "Expand " : "Collapse ") + (p.name || p.label),
+          title: shut ? "Expand" : "Collapse",
+          onclick: fold,
+        }, shut ? "\\u25b8" : "\\u25be"),
         rows.length ? h("input", {
           type: "checkbox",
           checked: ticked.length > 0 && ticked.length === rows.length,
