@@ -252,6 +252,23 @@ export const page = () => `<!doctype html>
   .spin { display: inline-block; width: 12px; height: 12px; vertical-align: -1px; margin-right: 6px; border: 2px solid var(--rule-2); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 2.4s; } }
+  /* Any network call at all. Indeterminate on purpose: there is no honest
+     percentage to show for "a provider is thinking about it". */
+  #bar {
+    position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 60;
+    overflow: hidden; opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  #bar.on { opacity: 1; }
+  #bar i { position: absolute; top: 0; bottom: 0; width: 34%; background: var(--accent); animation: slide 1.1s ease-in-out infinite; }
+  @keyframes slide { from { left: -34%; } to { left: 100%; } }
+  @media (prefers-reduced-motion: reduce) {
+    #bar i { animation: none; left: 0; width: 100%; opacity: .5; }
+  }
+
+  /* An area that is waiting, rather than one that is empty. The two look the
+     same otherwise, and "nothing here" is a lie while it is still loading. */
+  .loading { padding: 26px; text-align: center; color: var(--ink-3); font-size: 13px; }
+
   .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 50; background: var(--ink); color: var(--bg); padding: 9px 14px; border-radius: var(--r-s); font-size: 13px; opacity: 0; transition: opacity .18s; pointer-events: none; max-width: 80vw; }
   .toast.show { opacity: 1; }
   .toast.bad { background: var(--bad); color: #fff; }
@@ -344,6 +361,7 @@ export const page = () => `<!doctype html>
   </main>
 </div>
 
+<div id="bar" role="progressbar" aria-label="Loading"><i></i></div>
 <div class="scrim" id="scrim" role="dialog" aria-modal="true"><div class="dialog" id="dialog"></div></div>
 <div class="toast" id="toast" role="status"></div>
 
@@ -384,6 +402,10 @@ var CAT = {};        // "baseUrl|model" -> models.dev facts, for configured mode
 var CATINFO = { size: 0, age: null };
 var LISTS = {};      // provider index -> { models, error, loading }
 var REQS = [];
+// Until the first load lands, an empty area means "not here yet", not
+// "nothing to show". Saying the wrong one of those is how a slow panel looks
+// like a broken one.
+var ready = false;
 var reqFilter = "all";
 var reqPicked = null;
 
@@ -451,13 +473,29 @@ var isFree = function (d) { return Boolean(d) && d.input === 0 && d.output === 0
 var costOf = function (d) { return d && d.input !== undefined ? d.input + (d.output || 0) : Infinity; };
 
 // --- api ------------------------------------------------------------------
+// Every call on the page goes through here, which makes it the one place
+// that has to know something is in flight. A counter rather than a flag:
+// several of these overlap on load, and the first to finish must not clear
+// the bar while the others are still going.
+var busy = 0;
+function paintBusy() {
+  $("bar").classList.toggle("on", busy > 0);
+}
+
 async function api(path, opts) {
-  var res = await fetch(path, opts);
-  if (!res.ok) {
-    var body = await res.json().catch(function () { return {}; });
-    throw new Error(body.error || ("HTTP " + res.status));
+  busy += 1;
+  paintBusy();
+  try {
+    var res = await fetch(path, opts);
+    if (!res.ok) {
+      var body = await res.json().catch(function () { return {}; });
+      throw new Error(body.error || ("HTTP " + res.status));
+    }
+    return await res.json();
+  } finally {
+    busy -= 1;
+    paintBusy();
   }
-  return res.json();
 }
 function post(path, body) {
   return api(path, {
@@ -560,7 +598,9 @@ async function save(providers) {
   };
   var before = list.length;
   S = await post("/api/state", payload);
-  if (S.providers.length < before) toast("A provider needs a base URL and at least one model, so it was not kept", true);
+  // The only thing that gets a provider dropped now is having no base URL:
+  // there is nowhere to send a request.
+  if (S.providers.length < before) toast("A provider needs a base URL, so it was not kept", true);
   drawAll();
 }
 
@@ -735,8 +775,11 @@ function drawProviders() {
           h("input", { type: "text", name: "name", placeholder: "model name",
             title: "Add a model by its exact name, including one this provider does not list" }),
           h("button", { className: "sm" }, "Add")),
-        h("button", { className: "sm", title: "Ask this provider for its model list again",
-          onclick: function () { loadList(i, true); } }, "Refresh"),
+        h("button", {
+          className: "sm", disabled: list.loading,
+          title: list.loading ? "Asking it now" : "Ask this provider for its model list again",
+          onclick: function () { loadList(i, true); },
+        }, list.loading ? "Asking…" : "Refresh"),
         h("button", { className: "sm", onclick: function () { providerForm(i); } }, "Edit")),
 
       rows.length ? h("div", { className: "rows" }, rows.map(function (id) {
@@ -766,6 +809,10 @@ function drawProviders() {
           have ? h("button", { className: "sm", onclick: function () { testOne(i, id); } }, "Test") : null);
       })) : null,
 
+      list.loading && !rows.length
+        ? h("div", { className: "loading" }, h("span", { className: "spin" }),
+            "Asking " + (p.name || p.label) + " for its models")
+        : null,
       list.error ? h("div", { className: "note err" },
         "Could not list its models: " + list.error + " ",
         h("button", { className: "sm", onclick: function () { loadList(i, true); } }, "Try again"),
@@ -774,10 +821,12 @@ function drawProviders() {
         ? h("div", { className: "note" }, "This provider listed no models. Add one by name above.") : null);
   }).filter(Boolean);
 
-  put($("plist"), sections.length ? sections : h("div", { className: "empty" },
-    !S.providers.length ? "No providers yet. Use Add a provider."
-      : freeOnly && !query ? "No provider lists a model at $0. A provider whose list has no prices cannot say."
-      : "Nothing matches."));
+  put($("plist"), sections.length ? sections
+    : !ready ? h("div", { className: "loading" }, h("span", { className: "spin" }), "Loading providers")
+    : h("div", { className: "empty" },
+        !S.providers.length ? "No providers yet. Use Add a provider."
+          : freeOnly && !query ? "No provider lists a model at $0. A provider whose list has no prices cannot say."
+          : "Nothing matches."));
 
   var shown = shownKeys();
   var on = shown.filter(function (k) { return PICKED.has(k); });
@@ -839,16 +888,9 @@ async function removeModels(items) {
   });
   if (!n) return;
 
-  // A provider with no models left is not routable, and the server drops it
-  // along with its key. Saying so beats watching a row vanish.
-  var emptied = next.filter(function (p) { return p.models.length === 0; });
-  if (emptied.length) {
-    var ok = await ask(
-      "Take the last model out of " + (emptied[0].name || emptied[0].baseUrl) + "?",
-      "A provider with no models cannot be routed to, so it is dropped along with its API key. Switch it off instead to keep both.",
-      "Take it out");
-    if (!ok) return;
-  }
+  // No confirm for emptying a provider any more. It used to be dropped along
+  // with its key, which was worth stopping for; now it stays, keeps its URL
+  // and key, and simply has nothing in the pot until you pick something.
   PICKED.clear();
   MINE.clear();
   await save(next);
@@ -945,8 +987,10 @@ function drawMine() {
     list.length ? h("button", { className: "sm", onclick: function () { testMany(view); } }, "Test all") : null);
 
   if (!list.length) {
-    put($("mt"), h("div", { className: "card" }, h("div", { className: "empty" },
-      "Nothing in the pot yet. ", h("a", { href: "#providers" }, "Pick some models under Providers"), ".")));
+    put($("mt"), h("div", { className: "card" }, !ready
+      ? h("div", { className: "loading" }, h("span", { className: "spin" }), "Loading your models")
+      : h("div", { className: "empty" },
+          "Nothing in the pot yet. ", h("a", { href: "#providers" }, "Pick some models under Providers"), ".")));
     return;
   }
 
@@ -1208,8 +1252,10 @@ function drawRequests() {
   if (reqPicked !== null && !REQS.some(function (r) { return r.at === reqPicked; })) reqPicked = null;
 
   if (!shown.length) {
-    put($("reqlist"), h("div", { className: "empty" },
-      REQS.length ? "No request matches this filter." : "Nothing yet. Requests appear here as Claude Code makes them."));
+    put($("reqlist"), !ready
+      ? h("div", { className: "loading" }, h("span", { className: "spin" }), "Loading")
+      : h("div", { className: "empty" },
+          REQS.length ? "No request matches this filter." : "Nothing yet. Requests appear here as Claude Code makes them."));
     drawDetail();
     return;
   }
@@ -1373,6 +1419,7 @@ try {
   }
   drawAll();
   await Promise.all([loadRecord(), loadCatalog(), loadRequests()]);
+  ready = true;
   drawAll();
   listen();
 })();
