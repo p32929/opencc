@@ -13,8 +13,8 @@ import { spawn } from "node:child_process";
 import { readStoredConfig, writeStoredConfig } from "./configStore.js";
 import { providersFromEnv, displayName, streamingFromEnv } from "./config.js";
 import { allStats, successRate, coolingFor, coverage, record, resetStats, NEEDED } from "./stats.js";
-import { warmUp, pendingModels } from "./warmup.js";
-import { loadCatalog, lookupModel, catalogAge, catalogSize } from "./modelsdev.js";
+import { warmUp, pendingModels, probeModel } from "./warmup.js";
+import { loadCatalog, lookupModel, catalogAge, catalogSize, catalogSays } from "./modelsdev.js";
 import { listRequests, clearRequests, KEEP } from "./reqlog.js";
 import { bus } from "./events.js";
 import { page } from "./panelPage.js";
@@ -55,26 +55,23 @@ function loadState() {
   };
 }
 
-// One real "Hi" through the provider. The result is recorded like any other
-// call, so pressing Test is not just a check: it is the first entry in a new
-// model's record, and the router reads it straight away.
-async function testModel(provider, model) {
-  const headers = { "Content-Type": "application/json" };
-  if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
-  try {
-    const res = await fetch(`${provider.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ model, messages: [{ role: "user", content: "Hi" }] }),
-      signal: AbortSignal.timeout(300000),
-    });
-    record({ baseUrl: provider.baseUrl, model, kind: "text", status: res.status });
-    if (!res.ok) return { ok: false, error: `${res.status} ${(await res.text()).slice(0, 200)}` };
-    return { ok: true };
-  } catch (err) {
-    record({ baseUrl: provider.baseUrl, model, kind: "text", status: 0 });
-    return { ok: false, error: err.message };
-  }
+// One real tool-calling request, the same probe the warm-up sends. Recorded
+// like any other call, so pressing Test is not just a check: it is the first
+// entry in a new model's record and the router reads it straight away.
+//
+// Tool calling rather than a bare "Hi" because that is the shape of nearly
+// every request Claude Code makes. Answering "Hi" proves almost nothing.
+async function testModel(provider, model, kind = "tools") {
+  const outcome = await probeModel(provider, model, kind);
+  record({ baseUrl: provider.baseUrl, model, kind, status: outcome.status, ms: outcome.took });
+
+  const ok = outcome.status >= 200 && outcome.status < 300;
+  return {
+    ok,
+    kind,
+    calledTool: Boolean(outcome.calledTool),
+    error: ok ? undefined : outcome.error || `HTTP ${outcome.status}`,
+  };
 }
 
 export const DEFAULT_PANEL_PORT = 3450;
@@ -111,6 +108,10 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
       // What has actually worked. This is the whole of what decides routing,
       // so the page shows it per model and per kind of request.
       if (req.method === "GET" && path === "/api/stats") {
+        // Coverage below reads the catalogue, so it has to be loaded first or
+        // the first paint reports every model as untested and offers to probe
+        // the lot.
+        await loadCatalog();
         const { providers } = loadState();
         const cooling = {};
         for (const p of providers) {
@@ -124,7 +125,9 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
           cooling,
           // Worked out here rather than in the page: two copies of this rule
           // drifted apart the first time one of them changed.
-          coverage: Object.fromEntries(NEEDED.map((kind) => [kind, coverage(providers, kind)])),
+          coverage: Object.fromEntries(
+            NEEDED.map((kind) => [kind, coverage(providers, kind, undefined, catalogSays)]),
+          ),
           rows: allStats().map((row) => ({ ...row, rate: successRate(row) })),
         });
         return;
@@ -140,6 +143,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
       // Which models have never been asked anything. The page checks this
       // after every save so a model added by hand gets tested straight away.
       if (req.method === "GET" && path === "/api/warmup/pending") {
+        await loadCatalog();
         const kind = new URL(req.url, "http://localhost").searchParams.get("kind") || "tools";
         const groups = pendingModels(loadState().providers, kind);
         json(res, 200, {
@@ -163,6 +167,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
           return;
         }
 
+        await loadCatalog();
         const { kind = "tools" } = await readBody(req);
         warming = { running: true, kind, done: 0, total: 0, current: "", results: [] };
         try {
@@ -209,13 +214,13 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
       }
 
       if (req.method === "POST" && path === "/api/test") {
-        const { index, model } = await readBody(req);
+        const { index, model, kind = "tools" } = await readBody(req);
         const provider = loadState().providers[index];
         if (!provider) {
           json(res, 404, { ok: false, error: "no such provider" });
           return;
         }
-        const outcome = await testModel(provider, model);
+        const outcome = await testModel(provider, model, kind);
         // Same reason as the warm-up: one passing test can unblock the proxy.
         await onSave?.();
         json(res, 200, outcome);

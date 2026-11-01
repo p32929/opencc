@@ -2,9 +2,11 @@
 // dependency-free and there's nothing to build.
 //
 // There is nothing here for priority and nothing for capabilities, because
-// neither is something you set any more. Both are read off what the models
-// have actually done, which this page shows per model and per kind of
-// request, and which is the only thing deciding what gets called.
+// neither is something you set any more. Priority is read off what the
+// models have actually done, which is the only thing deciding what gets
+// called. Capabilities are read off models.dev where it knows the model, and
+// off a real request where it does not — the page marks which is which,
+// since one of the two has been checked and the other has not.
 //
 // What is left is the part opencc cannot work out for itself: which backends
 // exist, what their keys are, and which models to put in the pot.
@@ -166,6 +168,9 @@ export const page = () => `<!doctype html>
   .k.mid { color: var(--warn); background: var(--warn-bg); }
   .k.poor { color: var(--bad); background: var(--bad-bg); }
   .k.none { color: var(--ink-3); background: var(--panel-2); }
+  /* Published, not proven: deliberately quieter than a real result, because
+     it is a weaker claim. */
+  .k.pub { color: var(--ink-3); background: var(--panel-2); border: 1px dashed var(--rule); padding: 4px 5px; }
   .chip {
     font: 600 10.5px/1 ui-monospace, monospace; text-transform: uppercase;
     letter-spacing: .04em; padding: 4px 6px; border-radius: var(--r-ctl); white-space: nowrap;
@@ -650,20 +655,31 @@ const NEEDS = [
 
 function renderCoverage() {
   $("cover").innerHTML = NEEDS.map((need) => {
-    const c = { ...need, ...(coverageFromServer[need.kind] ?? { can: 0, cannot: 0, untried: 0 }) };
+    const c = { ...need, ...(coverageFromServer[need.kind] ?? { can: 0, cannot: 0, untried: 0, proven: 0 }) };
     const cls = c.can > 0 ? "good" : c.untried > 0 ? "unk" : "none";
     const count = c.can > 0
       ? c.can + (c.can === 1 ? " model" : " models")
       : c.untried > 0 ? "not tested" : "none";
 
+    // Where the number comes from, because "models.dev says so" and "it did
+    // it here" are not the same claim and only one of them is checked.
+    const published = c.can - (c.proven ?? 0);
     const note = c.can > 0
-      ? c.can + " of your models can do this"
+      ? c.can + " of your models can do this — " +
+        (published === 0 ? "all proven by a real request"
+          : c.proven === 0 ? "all from models.dev, none tried here yet"
+          : c.proven + " proven here, " + published + " published by models.dev")
       : c.untried > 0
-        ? "No model has been asked for this yet"
+        ? (need.kind === "document"
+            ? "Nobody has asked. models.dev has no field for PDFs, so this one always has to be tested"
+            : "Nobody has asked, and models.dev does not list these models")
         : "Nothing can do this. Requests needing it will fail.";
 
+    // Only the models nothing can answer for. For PDFs that is always all of
+    // them: there is no published field for whether a backend takes one.
     const button = c.untried > 0
-      ? '<button data-act="cover" data-kind="' + c.kind + '">Test ' + c.untried + '</button>'
+      ? '<button data-act="cover" data-kind="' + c.kind + '" title="' + attr("Send one real request to the " +
+          c.untried + " model(s) nothing has answered for yet") + '">Test ' + c.untried + "</button>"
       : "";
 
     return '<span class="cap ' + cls + '" title="' + attr(c.label + ": " + note + ". Needed for " + c.why + ".") + '">' +
@@ -702,16 +718,34 @@ function renderHeader() {
   }
 }
 
-// One cell per kind of request, which is where a model's abilities now show
-// up: a model that cannot call tools collects failures under "tools" and
-// keeps its record under "text", and the router reads exactly this.
+// One cell per kind of request, which is where a model's abilities show up.
+//
+// A record always wins. Where there is none, models.dev's published answer
+// is shown instead and marked as such: a tick here means "published", not
+// "tried". The difference matters, because the catalogue describes a model
+// and what is being configured is a backend that serves it — a gateway can
+// strip tool calling from a model that has it.
 function kindCells(baseUrl, model) {
   const rec = records[keyOf(baseUrl, model)] || {};
 
   return '<span class="kinds">' + kinds.map((kind) => {
     const row = rec[kind];
     if (!row || row.ok + row.fail === 0) {
-      return '<span class="k none" title="No ' + kind + ' request has gone to this model yet">' + kind + " -</span>";
+      const doing = { tools: "call tools", image: "read images", document: "read PDFs" }[kind] ?? kind;
+      const published = says(baseUrl, model, kind);
+      if (published === true) {
+        return '<span class="k pub" title="' + attr("models.dev says this model can " + doing +
+          ". Nothing has asked this backend for it yet, so it is published rather than proven.") + '">' + kind + " ✓</span>";
+      }
+      if (published === false) {
+        return '<span class="k pub" title="' + attr("models.dev says this model cannot " + doing +
+          ". It stays in the rotation and still gets its turn; this is what is published, not a verdict.") + '">' + kind + " ✗</span>";
+      }
+      // models.dev has no field at all for PDFs, so that one is never its
+      // silence about a model — it is silence about the whole question.
+      return '<span class="k none" title="' + attr(kind === "document"
+        ? "Nothing has sent this model a PDF. models.dev has no field for it either: whether a backend takes one is a property of the endpoint, not the model."
+        : "Nothing has asked this model to " + doing + ", and models.dev does not list it") + '">' + kind + " -</span>";
     }
     const total = row.ok + row.fail;
     const pct = Math.round((row.ok / total) * 100);
@@ -730,6 +764,17 @@ function kindCells(baseUrl, model) {
 // with a green record and a grey "no tools" here means the record is right.
 const money = (n) =>
   n === 0 ? "free" : n < 1 ? "$" + n.toFixed(2) : "$" + Math.round(n);
+
+// The same question coverage asks on the server: what does models.dev say
+// about this kind of request, or null when it cannot say. Documents are
+// always null — no published field describes whether a backend takes a PDF.
+function says(baseUrl, model, kind) {
+  const info = catalogKnown[keyOf(baseUrl, model)];
+  if (!info) return null;
+  if (kind === "tools") return info.tools;
+  if (kind === "image") return info.vision;
+  return null;
+}
 
 function metaCells(baseUrl, model) {
   const info = catalogKnown[keyOf(baseUrl, model)];
@@ -774,7 +819,7 @@ function modelRow(p, index, model, position) {
         'title="' + (off ? "Put this model back in the pot" : "Keep it listed but never call it") + '">' +
         (off ? "Unpark" : "Park") + "</button>" +
       '<button class="icon" data-act="test" data-i="' + index + '" data-m="' + attr(model) + '" ' +
-        'title="Send one real request. The result counts toward the record.">Test</button>' +
+        'title="Send one real tool-calling request, the same probe the warm-up uses. The result counts toward the record.">Test</button>' +
       '<button class="icon danger" data-act="mdel" data-i="' + index + '" data-pos="' + position + '">Remove</button>' +
     "</span>" +
   "</div>";
@@ -1293,7 +1338,14 @@ document.addEventListener("click", async (e) => {
       if (closeDialog) closeDialog();
       await loadRecords();
       renderAll();
-      showResult(model, [["Result", r.ok ? "OK, the provider answered" : "Failed"]].concat(r.ok ? [] : [["Error", r.error]]));
+      showResult(model, [
+        ["Result", r.ok
+          ? (r.calledTool ? "Called the tool" : "Answered, but in prose — no tool call")
+          : "Failed"],
+      ].concat(r.ok ? [] : [["Error", r.error]]),
+        r.ok && !r.calledTool
+          ? "Claude Code reads and edits files with tool calls, so a model that answers in prose here is not much use to it."
+          : undefined);
     } catch (err) {
       if (closeDialog) closeDialog();
       showResult("Test failed", [["Error", err.message]]);

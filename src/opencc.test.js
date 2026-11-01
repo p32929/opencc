@@ -959,7 +959,6 @@ test("opencc --reset-stats clears the record and leaves the config alone", async
     "",
   ].join("\n");
   writeFileSync(join(home, ".opencc", ".env"), config);
-  writeFileSync(join(home, ".opencc", "capabilities.json"), "{}");
 
   const here = dirname(new URL(import.meta.url).pathname);
   const env = { ...process.env, HOME: home };
@@ -977,7 +976,6 @@ test("opencc --reset-stats clears the record and leaves the config alone", async
   assert.match(out, /Record reset/);
   assert.equal(existsSync(join(home, ".opencc", "stats.jsonl")), false, "the live log is gone");
   assert.ok(existsSync(join(home, ".opencc", "stats.jsonl.previous")), "kept as the previous one");
-  assert.equal(existsSync(join(home, ".opencc", "capabilities.json")), false, "the dead cache goes too");
 
   const { readFileSync } = await import("node:fs");
   assert.equal(readFileSync(join(home, ".opencc", ".env"), "utf8"), config,
@@ -1005,13 +1003,7 @@ test("--reset-stats on an empty record says so and keeps any earlier backup", as
 });
 
 test("a failure reason is pulled out of whatever shape the provider used", async () => {
-  // reason() is internal, so this goes through the module's own surface by
-  // checking the strings it produces for the bodies these providers send.
-  const { readFileSync } = await import("node:fs");
-  const { dirname } = await import("node:path");
-  const src = readFileSync(dirname(new URL(import.meta.url).pathname) + "/warmup.js", "utf8");
-  const body = src.slice(src.indexOf("function reason(body) {"), src.indexOf("async function probe"));
-  const reason = new Function(`${body}; return reason;`)();
+  const { reason } = await import("./warmup.js");
 
   assert.equal(reason('{"error":{"message":"rate limit exceeded"}}'), "rate limit exceeded");
   assert.equal(reason('{"message":"model not found"}'), "model not found");
@@ -1162,7 +1154,7 @@ const pot = (models, parked = []) => [{
 test("coverage separates what works, what does not, and what nobody asked", () => {
   const records = { good: { ok: 5, fail: 1 }, bad: { ok: 0, fail: 9 } };
   const out = coverage(pot(["good", "bad", "new"]), "tools", (b, m) => records[m] ?? null);
-  assert.deepEqual(out, { can: 1, cannot: 1, untried: 1 });
+  assert.deepEqual(out, { can: 1, cannot: 1, untried: 1, proven: 1 });
 });
 
 test("coverage ignores parked models and switched-off providers", () => {
@@ -1170,7 +1162,7 @@ test("coverage ignores parked models and switched-off providers", () => {
   assert.equal(coverage(pot(["a", "b"], ["b"]), "tools", lookup).can, 1, "parked does not count");
 
   const off = [{ baseUrl: "https://x/v1", models: ["a"], disabled: true, disabledModels: [] }];
-  assert.deepEqual(coverage(off, "tools", lookup), { can: 0, cannot: 0, untried: 0 });
+  assert.deepEqual(coverage(off, "tools", lookup), { can: 0, cannot: 0, untried: 0, proven: 0 });
 });
 
 test("an untried model is not the same as one that cannot", () => {
@@ -1179,8 +1171,8 @@ test("an untried model is not the same as one that cannot", () => {
   const untried = coverage(pot(["m"]), "tools", () => null);
   const proven = coverage(pot(["m"]), "tools", () => ({ ok: 0, fail: 20 }));
 
-  assert.deepEqual(untried, { can: 0, cannot: 0, untried: 1 });
-  assert.deepEqual(proven, { can: 0, cannot: 1, untried: 0 });
+  assert.deepEqual(untried, { can: 0, cannot: 0, untried: 1, proven: 0 });
+  assert.deepEqual(proven, { can: 0, cannot: 1, untried: 0, proven: 0 });
 });
 
 test("the proxy refuses to expose when nothing can call tools, and starts when something can", async () => {
@@ -1959,4 +1951,104 @@ test("a half-written line does not take the whole log listing down", async () =>
   `);
   const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
   assert.deepEqual(out, [1], "the torn line is skipped, the good one still reads");
+});
+
+// --- the catalogue removes work, it does not replace the record ------------
+
+test("a model models.dev vouches for is not probed again", async () => {
+  const { pendingModels } = await import("./warmup.js");
+  const providers = [{
+    baseUrl: "https://p.test/v1",
+    models: ["published-yes", "published-no", "never-heard-of-it"],
+    disabledModels: [],
+  }];
+  const nothingRecorded = () => null;
+  const says = (baseUrl, model) =>
+    model === "published-yes" ? true : model === "published-no" ? false : null;
+
+  // Published either way is an answer, so neither costs a request. Only the
+  // model nobody has published anything about is worth asking.
+  const [group] = pendingModels(providers, "tools", nothingRecorded, says);
+  assert.deepEqual(group.models, ["never-heard-of-it"]);
+
+  // With no catalogue at all every model is still probed, which is what
+  // happens when models.dev cannot be reached.
+  const [all] = pendingModels(providers, "tools", nothingRecorded, () => null);
+  assert.equal(all.models.length, 3);
+});
+
+test("a model that has already been asked is never probed, whatever is published", async () => {
+  const { pendingModels } = await import("./warmup.js");
+  const providers = [{ baseUrl: "https://p.test/v1", models: ["m"], disabledModels: [] }];
+  const hasRecord = () => ({ ok: 0, fail: 3 });
+
+  // It failed three times here. The catalogue saying it should work is not a
+  // reason to go and ask a fourth.
+  assert.deepEqual(pendingModels(providers, "tools", hasRecord, () => true), []);
+});
+
+test("coverage says how much of what it counts was actually checked", async () => {
+  const { coverage } = await import("./stats.js");
+  const providers = [{
+    baseUrl: "https://p.test/v1",
+    models: ["worked", "failed", "published-yes", "published-no", "unknown"],
+    disabledModels: [],
+  }];
+  const lookup = (baseUrl, model) =>
+    model === "worked" ? { ok: 4, fail: 0 } : model === "failed" ? { ok: 0, fail: 4 } : null;
+  const says = (baseUrl, model) =>
+    model === "published-yes" ? true : model === "published-no" ? false : null;
+
+  const out = coverage(providers, "tools", lookup, says);
+  assert.deepEqual(out, { can: 2, cannot: 2, untried: 1, proven: 1 });
+  // One of the two in `can` was proved by a real request; the other is only
+  // published. The panel says which, rather than showing them as the same.
+  assert.equal(out.can - out.proven, 1);
+});
+
+test("a real result overrules the catalogue in both directions", async () => {
+  const { coverage } = await import("./stats.js");
+  const providers = [{ baseUrl: "https://p.test/v1", models: ["m"], disabledModels: [] }];
+
+  // Published as capable, but it has failed every time it was asked here.
+  const failed = coverage(providers, "tools", () => ({ ok: 0, fail: 5 }), () => true);
+  assert.deepEqual(failed, { can: 0, cannot: 1, untried: 0, proven: 0 });
+
+  // Published as incapable, but it has done it here. A gateway can serve a
+  // model the catalogue does not have on file under a name that it does.
+  const worked = coverage(providers, "tools", () => ({ ok: 5, fail: 0 }), () => false);
+  assert.deepEqual(worked, { can: 1, cannot: 0, untried: 0, proven: 1 });
+});
+
+test("documents are never answered by the catalogue, only by asking", async () => {
+  const { catalogSays, loadCatalog, forgetCatalog } = await import("./modelsdev.js");
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-doc-"));
+  const script = join(home, "run.mjs");
+  writeFileSync(script, `
+    import { loadCatalog, catalogSays } from ${JSON.stringify(new URL("./modelsdev.js", import.meta.url).href)};
+    await loadCatalog({ force: true, fetchImpl: async () => ({ ok: true, json: async () => ({
+      p: { api: "https://p.test/v1", models: { m: {
+        tool_call: true, modalities: { input: ["text", "image"] }, limit: { context: 1000 },
+      } } },
+    }) }) });
+    console.log(JSON.stringify({
+      tools: catalogSays("https://p.test/v1", "m", "tools"),
+      image: catalogSays("https://p.test/v1", "m", "image"),
+      document: catalogSays("https://p.test/v1", "m", "document"),
+      unknownModel: catalogSays("https://p.test/v1", "other", "tools"),
+    }));
+  `);
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+
+  assert.equal(out.tools, true);
+  assert.equal(out.image, true);
+  // There is no published field for it: whether a backend accepts a PDF as an
+  // OpenAI `file` part is a property of the endpoint, not of the model.
+  assert.equal(out.document, null, "documents always have to be asked about");
+  assert.equal(out.unknownModel, null, "silence is not a no");
 });

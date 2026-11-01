@@ -85,6 +85,11 @@ function flagValue(name) {
 async function run() {
   const { getConfig, isConfigured } = await import("./config.js");
   const { coverage } = await import("./stats.js");
+  // What models.dev publishes, so the warm-up only asks about the models
+  // nobody has answered for. Loaded once, before anything consults it; a
+  // failure here just means more gets probed.
+  const { loadCatalog, catalogSays } = await import("./modelsdev.js");
+  await loadCatalog().catch(() => {});
   const { runPanel, openBrowser, DEFAULT_PANEL_PORT } = await import("./panel.js");
   const { startServer } = await import("./server.js");
 
@@ -106,7 +111,7 @@ async function run() {
       return ["proxy  waiting - add a provider in the panel and it starts on its own"];
     }
 
-    const tools = coverage(live.providers, "tools");
+    const tools = coverage(live.providers, "tools", undefined, catalogSays);
     if (tools.can === 0 && tools.untried === 0) {
       return [
         `proxy  not started - none of your ${plural(tools.cannot, "model")} can call tools`,
@@ -156,7 +161,7 @@ async function run() {
 
     // Images are optional: Claude Code works fine without them, you just
     // cannot paste a screenshot. Worth saying, not worth blocking over.
-    const images = coverage(live.providers, "image");
+    const images = coverage(live.providers, "image", undefined, catalogSays);
     if (images.can === 0 && images.untried === 0) {
       console.log("  no model can take images, so pasted screenshots will fail");
     }

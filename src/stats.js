@@ -18,7 +18,7 @@
 // Nothing here is allowed to break a request. Every filesystem call is
 // wrapped: if stats can't be written or read, routing carries on without them.
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync } from "node:fs";
-import { CAPABILITIES_PATH, GLOBAL_CONFIG_DIR, STATS_PATH } from "./paths.js";
+import { GLOBAL_CONFIG_DIR, STATS_PATH } from "./paths.js";
 
 // Past this the log is folded into one line per key. Big enough that it
 // happens rarely, small enough that reading it stays trivial.
@@ -434,24 +434,44 @@ export function allStats() {
 // "untried" is deliberately its own number rather than being lumped in with
 // "cannot": a model nobody has asked is not a model that failed, and the
 // difference decides whether a gap is a real problem or just unknown.
-export function coverage(providers, kind, lookup = statsFor) {
+// `says` is an optional second opinion — models.dev's published facts, via
+// catalogSays — consulted only where opencc has asked nothing yet. What a
+// model has actually done always wins: the catalogue describes a model, and
+// what matters here is whether this backend serves it that way.
+//
+// `proven` counts how much of `can` came from a real request, so the panel
+// can say which it is rather than presenting both as the same thing.
+export function coverage(providers, kind, lookup = statsFor, says = () => null) {
   let can = 0;
   let cannot = 0;
   let untried = 0;
+  let proven = 0;
 
   for (const provider of providers) {
     if (provider.disabled) continue;
     const parked = provider.disabledModels ?? [];
     for (const model of provider.models) {
       if (parked.includes(model)) continue;
+
       const entry = lookup(provider.baseUrl, model, kind);
-      if (!entry || entry.ok + entry.fail === 0) untried += 1;
-      else if (entry.ok > 0) can += 1;
-      else cannot += 1;
+      if (entry && entry.ok + entry.fail > 0) {
+        if (entry.ok > 0) {
+          can += 1;
+          proven += 1;
+        } else {
+          cannot += 1;
+        }
+        continue;
+      }
+
+      const published = says(provider.baseUrl, model, kind);
+      if (published === true) can += 1;
+      else if (published === false) cannot += 1;
+      else untried += 1;
     }
   }
 
-  return { can, cannot, untried };
+  return { can, cannot, untried, proven };
 }
 
 // --- short-term availability -----------------------------------------------
@@ -529,14 +549,6 @@ export function resetStats() {
   } catch {
     // Nothing to move, or it could not be moved. Either way carry on and
     // clear what is in memory, which is the part that affects routing now.
-  }
-
-  // Left over from when capabilities were detected and cached. Nothing has
-  // read it since, so a reset is a good moment to stop it lying around.
-  try {
-    if (existsSync(CAPABILITIES_PATH)) unlinkSync(CAPABILITIES_PATH);
-  } catch {
-    // Not important enough to fail a reset over.
   }
 
   cache = { offset: 0, agg: new Map() };

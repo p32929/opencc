@@ -11,12 +11,23 @@
 // not a separate capability store and not a different kind of knowledge: it
 // is the same evidence, gathered a minute earlier than it otherwise would be.
 //
+// Most of that is now free. models.dev publishes whether a model calls tools
+// and whether it reads images, so those models are not asked at all. What is
+// left is the part nobody has published:
+//
+//   - a model the catalogue has never heard of: anything local, fine-tuned,
+//     or renamed by a gateway. The probe is the only thing that catches a
+//     model name that does not exist before a session is wasted on it.
+//   - whether a backend takes a PDF. There is no published field for it,
+//     because it is a property of the endpoint rather than the model.
+//
 // Models are probed one per provider at a time: in parallel across providers
 // so it finishes quickly, sequential within one so a single key does not get
 // a dozen requests at once and answer with rate limits that mean nothing.
 import { record, statsFor } from "./stats.js";
 import { pickModels } from "./translate.js";
 import { displayName } from "./config.js";
+import { catalogSays } from "./modelsdev.js";
 
 const PROBE_TIMEOUT_MS = 60000;
 
@@ -89,17 +100,21 @@ const PROBE_BODIES = {
   },
 };
 
-// Only models nobody has sent a tool request to yet. A model that already has
-// a record does not need one made up for it, which is what keeps the warm-up
-// off every start after the first.
-export function pendingModels(providers, kind = "tools", lookup = statsFor) {
+// Only the models nothing can answer for yet.
+//
+// Two ways to already have the answer: opencc has asked this model something
+// of this kind before, or models.dev publishes it. Either way there is no
+// case for spending a request to find out again — which, for a typical set of
+// models, leaves only the handful the catalogue has never heard of.
+export function pendingModels(providers, kind = "tools", lookup = statsFor, says = catalogSays) {
   return providers
     .filter((provider) => !provider.disabled)
     .map((provider) => ({
       provider,
       models: pickModels("", provider).filter((model) => {
         const entry = lookup(provider.baseUrl, model, kind);
-        return !entry || entry.ok + entry.fail === 0;
+        if (entry && entry.ok + entry.fail > 0) return false;
+        return says(provider.baseUrl, model, kind) === null;
       }),
     }))
     .filter((group) => group.models.length > 0);
@@ -110,7 +125,7 @@ export function pendingModels(providers, kind = "tools", lookup = statsFor) {
 // and failing that collapse whatever came back onto a single line, because a
 // 403 from Google is an entire document and printed raw it tears the progress
 // display apart.
-function reason(body) {
+export function reason(body) {
   try {
     const parsed = JSON.parse(body);
     // Seen in the wild, in this order of preference: OpenAI's envelope,
@@ -127,7 +142,11 @@ function reason(body) {
   return body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 }
 
-async function probe(provider, model, kind, signal) {
+// Exported because the panel's Test button runs exactly this. It used to
+// send a bare "Hi" and record it under "text" — a bucket the panel does not
+// show and Claude Code never produces — so a model could pass Test and still
+// be useless for every real request.
+export async function probeModel(provider, model, kind = "tools", signal) {
   const headers = { "Content-Type": "application/json" };
   if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
 
@@ -193,7 +212,7 @@ export async function warmUp(providers, {
         results.push({ provider, model, skipped: true });
         continue;
       }
-      const outcome = await probe(provider, model, kind, stop.signal);
+      const outcome = await probeModel(provider, model, kind, stop.signal);
 
       // A probe the run deadline cut short says nothing about the model: it
       // never got its full turn. Recording it would teach the router to avoid
