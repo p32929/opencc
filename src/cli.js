@@ -3,11 +3,27 @@
 const args = process.argv.slice(2);
 const subcommand = args[0];
 
+// From package.json rather than a constant here, which is the copy that
+// drifts: npm bumps the one in package.json and nothing bumps the other.
+const version = await (async () => {
+  try {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const here = dirname(fileURLToPath(import.meta.url));
+    return JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")).version;
+  } catch {
+    // Running from somewhere package.json is not reachable. A missing
+    // version is not a reason to refuse to start.
+    return "unknown";
+  }
+})();
+
 // Anything after "claude" belongs to Claude Code, including its own --help,
 // so this only answers when opencc itself is being asked.
 if (subcommand !== "claude" && (args.includes("-h") || args.includes("--help"))) {
   console.log(`
-opencc - use Claude Code with any OpenAI-compatible API
+opencc ${version} - use Claude Code with any OpenAI-compatible API
 
   opencc                 start the panel and the proxy
   opencc claude [args]   start Claude Code through the proxy
@@ -178,6 +194,7 @@ async function run() {
   const panelUrl = `http://localhost:${panel.address().port}`;
 
   console.log("");
+  console.log(`  opencc ${version}`);
   console.log(`  panel  ${panelUrl}`);
 
   await startProxy();
