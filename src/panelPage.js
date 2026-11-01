@@ -8,6 +8,14 @@
 //
 // What is left is the part opencc cannot work out for itself: which backends
 // exist, what their keys are, and which models to put in the pot.
+const DARK = `
+      --bg: #0e1116; --panel: #151922; --panel-2: #1c222d;
+      --rule: #272e3a; --ink: #e7eaef; --ink-2: #aeb7c4; --ink-3: #828d9c;
+      --accent: #4d7dee; --accent-ink: #fff;
+      --ok: #6fd3a5; --ok-bg: #12291f;
+      --warn: #e4b261; --warn-bg: #2a2112;
+      --bad: #f08c8c; --bad-bg: #2c1818;`;
+
 export const page = () => `<!doctype html>
 <html lang="en">
 <head>
@@ -26,16 +34,14 @@ export const page = () => `<!doctype html>
     --bad: #9b2c2c; --bad-bg: #f7e7e7;
     --r-box: 6px; --r-ctl: 4px;
   }
+  /* Dark twice over: once for the system setting, and once for the button in
+     the header. The media query is held off when the button has explicitly
+     asked for light, so a choice made here outlives the system flipping at
+     sunset. */
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0e1116; --panel: #151922; --panel-2: #1c222d;
-      --rule: #272e3a; --ink: #e7eaef; --ink-2: #aeb7c4; --ink-3: #828d9c;
-      --accent: #4d7dee; --accent-ink: #fff;
-      --ok: #6fd3a5; --ok-bg: #12291f;
-      --warn: #e4b261; --warn-bg: #2a2112;
-      --bad: #f08c8c; --bad-bg: #2c1818;
-    }
+    :root:not([data-theme="light"]) { ${DARK} }
   }
+  :root[data-theme="dark"] { ${DARK} }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink-2);
@@ -203,6 +209,78 @@ export const page = () => `<!doctype html>
     button:active:not(:disabled) { transform: none; }
   }
 
+  /* --- what models.dev knows, shown beside the record ------------------ */
+  .meta {
+    display: flex; gap: 5px; flex: none; align-items: center;
+    font: 11px/1 ui-monospace, monospace; color: var(--ink-3);
+  }
+  .meta span { white-space: nowrap; }
+
+  /* --- the request log ------------------------------------------------- */
+  .card {
+    background: var(--panel); border: 1px solid var(--rule);
+    border-radius: var(--r-box); margin-top: 16px;
+  }
+  .reqs-top {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 11px 13px; border-bottom: 1px solid var(--rule);
+  }
+  .reqs-top h2 { font-size: 14px; color: var(--ink); margin: 0; font-weight: 600; }
+  .seg { display: flex; border: 1px solid var(--rule); border-radius: var(--r-ctl); overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; background: var(--panel); padding: 6px 11px; }
+  .seg button + button { border-left: 1px solid var(--rule); }
+  .seg button.on { background: var(--accent); color: var(--accent-ink); }
+  #reqcount { font: 12px ui-monospace, monospace; color: var(--ink-3); }
+
+  /* Two panes side by side, stacked once there is no room: the detail is
+     long lines of error text, which is unreadable in a narrow column. */
+  .reqs { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); min-height: 150px; }
+  @media (max-width: 860px) { .reqs { grid-template-columns: minmax(0, 1fr); } }
+  .req-list { max-height: 420px; overflow: auto; border-right: 1px solid var(--rule); }
+  @media (max-width: 860px) {
+    .req-list { border-right: 0; border-bottom: 1px solid var(--rule); max-height: 260px; }
+  }
+  .req {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    padding: 8px 13px; border: 0; border-bottom: 1px solid var(--rule);
+    border-radius: 0; background: transparent; font-size: 12.5px;
+  }
+  .req:hover { background: var(--panel-2); }
+  .req.on { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+  .req .when { font: 11.5px ui-monospace, monospace; color: var(--ink-3); flex: none; }
+  .req .who { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--ink-3); }
+  .dot.ok { background: var(--ok); }
+  .dot.bad { background: var(--bad); }
+  .req-detail { padding: 13px; overflow: auto; max-height: 420px; font-size: 12.5px; }
+  .req-detail .empty { color: var(--ink-3); }
+  .walk { margin: 10px 0 0; padding: 0; list-style: none; }
+  .walk li {
+    padding: 7px 0; border-bottom: 1px solid var(--rule);
+    font: 12px ui-monospace, monospace; color: var(--ink-2);
+  }
+  .walk li:last-child { border-bottom: 0; }
+  .walk .err { color: var(--bad); white-space: pre-wrap; word-break: break-word; margin-top: 3px; }
+
+  /* --- browsing a provider's catalogue --------------------------------- */
+  .dialog.wide { max-width: 720px; }
+  .cat-top { display: flex; gap: 8px; align-items: center; margin: 12px 0 8px; flex-wrap: wrap; }
+  .cat-top input[type=text] { flex: 1; min-width: 180px; }
+  .cat-list { border: 1px solid var(--rule); border-radius: var(--r-ctl); max-height: 46vh; overflow: auto; }
+  .cat-row {
+    display: flex; align-items: center; gap: 9px; padding: 7px 10px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .cat-row:last-child { border-bottom: 0; }
+  .cat-row:hover { background: var(--panel-2); }
+  .cat-row input { flex: none; margin: 0; }
+  .cat-row label { margin: 0; text-transform: none; letter-spacing: 0; font-size: 12.5px;
+    color: var(--ink); font-family: ui-monospace, monospace; flex: 1; min-width: 0;
+    word-break: break-all; cursor: pointer; }
+  .cat-row .meta { font-size: 11px; }
+  .cat-row[data-have="1"] label { color: var(--ink-3); }
+  .cat-none { padding: 14px; color: var(--ink-3); font-size: 12.5px; }
+
   .toast {
     position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 50;
     background: var(--ink); color: var(--bg); padding: 8px 13px; border-radius: var(--r-ctl);
@@ -222,6 +300,7 @@ export const page = () => `<!doctype html>
       <input type="number" id="port" style="width:84px" min="1" max="65535">
     </span>
     <button id="streaming"></button>
+    <button id="theme" title="Switch between light and dark"></button>
     <button id="refresh" title="Re-read the record from disk">Refresh</button>
     <button id="testnew" title="Send one request to every model with no record yet">Test new</button>
     <button id="reset" class="danger" title="Forget every result and start over">Reset record</button>
@@ -234,6 +313,27 @@ export const page = () => `<!doctype html>
 
 <main>
   <div id="list"></div>
+
+  <!-- Every request the proxy served. The terminal says the same things, but
+       only until it scrolls away, and the one question worth asking after a
+       failure is which models were tried and what each of them said. -->
+  <section class="card" id="reqs">
+    <div class="reqs-top">
+      <h2>Requests</h2>
+      <div class="seg" id="reqfilter">
+        <button data-f="all" class="on">All</button>
+        <button data-f="failed">Failed</button>
+        <button data-f="fallback" title="Served, but not by the first model tried">Fallbacks</button>
+      </div>
+      <span class="spacer"></span>
+      <span id="reqcount"></span>
+      <button id="reqclear" class="danger">Clear</button>
+    </div>
+    <div class="reqs">
+      <div class="req-list" id="reqlist"></div>
+      <div class="req-detail" id="reqdetail"><p class="empty">Pick a request to see every model it tried.</p></div>
+    </div>
+  </section>
 </main>
 
 <div class="toast" id="toast"></div>
@@ -245,12 +345,51 @@ let records = {};
 let cooling = {};
 let kinds = ["tools", "image", "document"];
 let coverageFromServer = {};
+// What models.dev says about the configured models, keyed the same way the
+// record is. Empty when the catalogue could not be fetched, which is why
+// everything that reads it treats a miss as "not known" rather than "no".
+let catalogKnown = {};
+let requests = [];
+let reqFilter = "all";
+// The timestamp of the open request, not its position: the list is newest
+// first, so a request arriving while one is open would shift every index and
+// the detail pane would silently start describing a different request.
+let reqPicked = null;
 const expanded = new Set();
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const attr = (s) => esc(s).replace(/'/g, "&#39;");
 const keyOf = (baseUrl, model) => baseUrl + "|" + model;
+
+// --- theme ----------------------------------------------------------------
+// The system setting decides until the button is pressed; after that the
+// choice is remembered in this browser. Nothing server-side: it is a
+// preference of the screen you are looking at, not of the install.
+function currentTheme() {
+  return document.documentElement.dataset.theme ||
+    (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+}
+
+function paintTheme() {
+  $("theme").textContent = currentTheme() === "dark" ? "Light" : "Dark";
+}
+
+try {
+  const saved = localStorage.getItem("opencc-theme");
+  if (saved === "dark" || saved === "light") document.documentElement.dataset.theme = saved;
+} catch {
+  // Private windows and blocked storage: the system setting still applies.
+}
+
+function flipTheme() {
+  const next = currentTheme() === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem("opencc-theme", next); } catch {}
+  paintTheme();
+}
+
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", paintTheme);
 
 let toastTimer;
 function toast(msg) {
@@ -269,6 +408,9 @@ function openDialog(html, { onClose } = {}) {
   closeDialog = () => {
     $("scrim").classList.remove("show");
     $("dialog").innerHTML = "";
+    // Only the catalogue browser is wide; left on, it would stretch the
+    // next small dialog that opened.
+    $("dialog").classList.remove("wide");
     closeDialog = null;
     if (onClose) onClose();
   };
@@ -346,10 +488,62 @@ async function loadRecords() {
   }
 }
 
+async function loadCatalog() {
+  try {
+    const out = await api("/api/catalog");
+    catalogKnown = out.known || {};
+  } catch {
+    catalogKnown = {};
+  }
+}
+
+async function loadRequests() {
+  try {
+    requests = (await api("/api/requests")).items || [];
+  } catch {
+    requests = [];
+  }
+  renderRequests();
+}
+
 async function load() {
   state = await api("/api/state");
   await loadRecords();
   renderAll();
+  paintTheme();
+  // After the first paint: neither is needed to draw the page, and the
+  // catalogue is a network call that can take a moment on a cold cache.
+  await Promise.all([loadCatalog().then(renderAll), loadRequests()]);
+  listen();
+}
+
+// --- live updates ---------------------------------------------------------
+// The proxy and this panel are the same process, so a served request can be
+// pushed here instead of polled for. The event only says that something
+// happened; what it means is worked out by refetching, which keeps one copy
+// of that rule rather than two that drift.
+function listen() {
+  let source;
+  try {
+    source = new EventSource("/api/events");
+  } catch {
+    return; // no live updates; everything still works through Refresh
+  }
+  source.addEventListener("message", async (e) => {
+    let what;
+    try {
+      what = JSON.parse(e.data).what;
+    } catch {
+      return;
+    }
+    if (what === "request" || what === "requests-cleared") {
+      await loadRequests();
+      // A served request changes the record it was drawn from, so the
+      // per-model numbers above are stale the moment one lands.
+      await loadRecords();
+      renderAll();
+    }
+  });
 }
 
 // Two kinds of save. A structural change redraws the list because the list is
@@ -529,6 +723,41 @@ function kindCells(baseUrl, model) {
   }).join("") + "</span>";
 }
 
+// --- what models.dev knows ------------------------------------------------
+// Shown next to the record, never in place of it. These are published facts
+// about a model, and a provider can serve it under a different name, with a
+// shorter window, or behind a gateway that strips tool calling — so a row
+// with a green record and a grey "no tools" here means the record is right.
+const money = (n) =>
+  n === 0 ? "free" : n < 1 ? "$" + n.toFixed(2) : "$" + Math.round(n);
+
+function metaCells(baseUrl, model) {
+  const info = catalogKnown[keyOf(baseUrl, model)];
+  if (!info) return "";
+
+  const bits = [];
+  if (info.context) {
+    const k = Math.round(info.context / 1000);
+    bits.push([
+      k >= 1000 ? (k / 1000) + "M ctx" : k + "k ctx",
+      "Context window models.dev publishes for this model: " + info.context.toLocaleString() + " tokens",
+    ]);
+  }
+  if (info.input !== undefined && info.output !== undefined) {
+    bits.push([
+      money(info.input) + " / " + money(info.output),
+      "Price per million tokens in and out, as models.dev lists it",
+    ]);
+  }
+  if (!info.tools) bits.push(["no tools", "models.dev does not list this model as calling tools"]);
+  if (info.vision) bits.push(["vision", "models.dev lists this model as reading images"]);
+
+  if (!bits.length) return "";
+  return '<span class="meta">' +
+    bits.map((b) => '<span title="' + attr(b[1]) + '">' + esc(b[0]) + "</span>").join("·") +
+    "</span>";
+}
+
 function modelRow(p, index, model, position) {
   const off = (p.disabledModels || []).includes(model);
   const waitMs = cooling[keyOf(p.baseUrl, model)];
@@ -539,6 +768,7 @@ function modelRow(p, index, model, position) {
     (waitMs ? '<span class="chip wait" title="Rate limited or down. It goes to the back of the queue until this runs out.">' +
       Math.ceil(waitMs / 1000) + "s</span>" : "") +
     kindCells(p.baseUrl, model) +
+    metaCells(p.baseUrl, model) +
     '<span class="acts">' +
       '<button class="icon" data-act="moff" data-i="' + index + '" data-m="' + attr(model) + '" ' +
         'title="' + (off ? "Put this model back in the pot" : "Keep it listed but never call it") + '">' +
@@ -579,6 +809,7 @@ function providerCard(p, i) {
         '<input type="text" list="cat' + i + '" data-pick="' + i + '" placeholder="type or pick a model name">' +
         '<datalist id="cat' + i + '"></datalist>' +
         '<button data-act="madd" data-i="' + i + '">Add</button>' +
+        '<button data-act="browse" data-i="' + i + '" title="List everything this provider serves, and tick the ones you want">Browse</button>' +
       "</div>" +
 
       '<label>Models <span class="hint">order here means nothing; the record decides</span></label>' +
@@ -589,6 +820,90 @@ function providerCard(p, i) {
       "</div>" +
     "</div>" +
   "</details>";
+}
+
+// --- the request log ------------------------------------------------------
+function ago(at) {
+  const secs = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (secs < 60) return secs + "s ago";
+  if (secs < 3600) return Math.round(secs / 60) + "m ago";
+  if (secs < 86400) return Math.round(secs / 3600) + "h ago";
+  return new Date(at).toLocaleDateString();
+}
+
+const FILTERS = {
+  all: () => true,
+  failed: (r) => !r.ok,
+  fallback: (r) => r.fallback,
+};
+
+function renderRequests() {
+  const shown = requests.filter(FILTERS[reqFilter]);
+  const failed = requests.filter((r) => !r.ok).length;
+  const fell = requests.filter((r) => r.fallback).length;
+
+  $("reqcount").textContent = requests.length
+    ? requests.length + " kept · " + failed + " failed · " + fell + " fell back"
+    : "";
+
+  // The open request can fall off the end as older ones are pruned.
+  if (reqPicked !== null && !requests.some((r) => r.at === reqPicked)) reqPicked = null;
+
+  if (!shown.length) {
+    $("reqlist").innerHTML = '<p class="cat-none">' +
+      (requests.length
+        ? "No request matches this filter."
+        : "Nothing yet. Requests appear here as Claude Code makes them.") + "</p>";
+    renderDetail();
+    return;
+  }
+
+  $("reqlist").innerHTML = shown.map((r) => {
+    const dot = r.ok ? (r.fallback ? "" : "ok") : "bad";
+    const who = r.ok ? r.served : (r.status || "failed") + " after " + r.attempts.length + " tr" + (r.attempts.length === 1 ? "y" : "ies");
+    return '<button class="req' + (r.at === reqPicked ? " on" : "") + '" data-req="' + r.at + '">' +
+      '<span class="dot ' + dot + '" title="' + attr(r.ok ? (r.fallback ? "Served, but not by the first model tried" : "Served") : "Failed") + '"></span>' +
+      '<span class="when">' + esc(ago(r.at)) + "</span>" +
+      '<span class="who">' + esc(who) + "</span>" +
+      '<span class="when">' + esc(r.kind) + "</span>" +
+    "</button>";
+  }).join("");
+
+  renderDetail();
+}
+
+function renderDetail() {
+  const r = requests.find((x) => x.at === reqPicked);
+  if (!r) {
+    $("reqdetail").innerHTML = '<p class="empty">Pick a request to see every model it tried.</p>';
+    return;
+  }
+
+  const kb = Math.round(r.chars / 1024);
+  const facts = [
+    ["When", new Date(r.at).toLocaleTimeString() + " (" + ago(r.at) + ")"],
+    ["Asked for", r.model],
+    ["Needed", r.kind],
+    ["Size", r.chars.toLocaleString() + " chars" + (kb ? " (~" + kb + "kB)" : "") + ", " + r.tools + " tools"],
+    ["Streaming", r.stream ? "yes" : "no"],
+    ["Took", r.ms ? (r.ms / 1000).toFixed(1) + "s" : "-"],
+    ["Result", r.ok ? "served by " + r.served : "failed"],
+  ];
+
+  $("reqdetail").innerHTML =
+    facts.map((f) => '<div class="kv"><b>' + esc(f[0]) + "</b><span>" + esc(f[1]) + "</span></div>").join("") +
+    '<ul class="walk">' +
+      (r.attempts.length
+        ? r.attempts.map((a, i) =>
+            "<li>" + (i + 1) + ". " + esc(a.provider) + " / " + esc(a.model) +
+            " &rarr; " + esc(a.status === 0 ? "no answer" : a.status) +
+            (a.ms ? " in " + (a.ms / 1000).toFixed(1) + "s" : "") +
+            (a.verdict && a.verdict !== "ok" ? " (" + esc(a.verdict) + ")" : "") +
+            (a.error ? '<div class="err">' + esc(a.error) + "</div>" : "") +
+            "</li>").join("")
+        : "<li>No model was tried.</li>") +
+    "</ul>" +
+    (r.error && !r.ok ? '<div class="walk"><div class="err">' + esc(r.error) + "</div></div>" : "");
 }
 
 function renderAll() {
@@ -604,19 +919,129 @@ function renderAll() {
 // --- catalogue ------------------------------------------------------------
 // Fetched when a provider is first expanded rather than for all of them up
 // front: it is a network call per provider and most stay collapsed.
+// Why it failed is cached alongside the result. Keeping only the models
+// meant a provider that refused to list looked identical to one that served
+// an empty list, and the browser below then skipped the fetch and showed
+// "no models" with nothing to explain it.
 const catalogues = {};
+
+async function fetchCatalogue(i) {
+  if (catalogues[i]) return catalogues[i];
+  try {
+    const out = await api("/api/catalogue?index=" + i);
+    catalogues[i] = { models: out.models || [], error: out.error || "" };
+  } catch (err) {
+    catalogues[i] = { models: [], error: err.message };
+  }
+  return catalogues[i];
+}
+
 async function fillCatalogue(i) {
   const list = $("cat" + i);
   if (!list || list.dataset.done) return;
   list.dataset.done = "1";
-  if (!catalogues[i]) {
-    try {
-      catalogues[i] = (await api("/api/catalogue?index=" + i)).models || [];
-    } catch {
-      catalogues[i] = [];
-    }
+  const { models } = await fetchCatalogue(i);
+  if ($("cat" + i)) {
+    $("cat" + i).innerHTML = models.map((m) => '<option value="' + attr(m.id) + '"></option>').join("");
   }
-  list.innerHTML = catalogues[i].map((m) => '<option value="' + attr(m) + '"></option>').join("");
+}
+
+// --- browsing a provider's catalogue --------------------------------------
+// The datalist above is fine when you know the name. This is for when you do
+// not: the whole list, searchable, with what models.dev knows beside each
+// one, and several added at once.
+//
+// Typing a name you half-remember is how a model ends up configured under a
+// name the provider does not serve, which fails every request with a 404
+// that looks like the provider being down.
+async function browseDialog(i) {
+  const p = state.providers[i];
+  openDialog(
+    '<h2>' + esc(p.name || p.label) + "</h2>" +
+    "<p>Everything this provider lists. Ticked ones are already in your rotation.</p>" +
+    '<div class="cat-top">' +
+      '<input type="text" id="cat-q" placeholder="Search models" autocomplete="off">' +
+      '<label style="margin:0;text-transform:none;letter-spacing:0;font-size:12.5px;color:var(--ink-2);display:flex;gap:6px;align-items:center">' +
+        '<input type="checkbox" id="cat-free" style="width:auto"> Free only</label>' +
+    "</div>" +
+    '<div class="cat-list" id="cat-list"><p class="cat-none"><span class="spin"></span>Asking the provider…</p></div>' +
+    '<p class="err" id="cat-err"></p>' +
+    '<div class="acts">' +
+      '<button data-dlg="close">Close</button>' +
+      '<button class="primary" id="cat-add" disabled>Add selected</button>' +
+    "</div>",
+  );
+  $("dialog").classList.add("wide");
+
+  const { models, error } = await fetchCatalogue(i);
+  if (!$("cat-list")) return; // the dialog was closed while we waited
+  if (error) {
+    $("cat-err").textContent = "This provider would not list its models: " + error +
+      ". You can still add one by name in the box behind this dialog.";
+  }
+
+  const picked = new Set();
+
+  const draw = () => {
+    const q = $("cat-q").value.trim().toLowerCase();
+    const freeOnly = $("cat-free").checked;
+    const shown = models.filter((m) =>
+      (!q || m.id.toLowerCase().includes(q)) && (!freeOnly || m.input === 0));
+
+    $("cat-add").disabled = picked.size === 0;
+    $("cat-add").textContent = picked.size ? "Add " + picked.size + " model" + (picked.size === 1 ? "" : "s") : "Add selected";
+
+    if (!shown.length) {
+      $("cat-list").innerHTML = '<p class="cat-none">' +
+        (models.length ? "Nothing matches." : "This provider listed no models.") + "</p>";
+      return;
+    }
+
+    $("cat-list").innerHTML = shown.map((m) => {
+      const have = p.models.includes(m.id);
+      const bits = [];
+      if (m.context) bits.push(Math.round(m.context / 1000) + "k ctx");
+      if (m.input !== undefined && m.output !== undefined) bits.push(money(m.input) + " / " + money(m.output));
+      if (m.tools === false) bits.push("no tools");
+      if (m.vision) bits.push("vision");
+      return '<div class="cat-row" data-have="' + (have ? 1 : 0) + '">' +
+        '<input type="checkbox" data-cat="' + attr(m.id) + '"' +
+          (have ? " checked disabled" : picked.has(m.id) ? " checked" : "") + ">" +
+        "<label>" + esc(m.id) + "</label>" +
+        (bits.length ? '<span class="meta">' + esc(bits.join(" · ")) + "</span>" : "") +
+      "</div>";
+    }).join("");
+  };
+
+  $("cat-list").addEventListener("change", (e) => {
+    const id = e.target.dataset.cat;
+    if (!id) return;
+    if (e.target.checked) picked.add(id);
+    else picked.delete(id);
+    $("cat-add").disabled = picked.size === 0;
+    $("cat-add").textContent = picked.size ? "Add " + picked.size + " model" + (picked.size === 1 ? "" : "s") : "Add selected";
+  });
+  $("cat-q").addEventListener("input", draw);
+  $("cat-free").addEventListener("change", draw);
+
+  $("cat-add").addEventListener("click", async () => {
+    const add = [...picked].filter((m) => !p.models.includes(m));
+    if (!add.length) return;
+    $("cat-add").disabled = true;
+    p.models.push(...add);
+    try {
+      await save();
+      if (closeDialog) closeDialog();
+      toast("Added " + add.length + " model" + (add.length === 1 ? "" : "s"));
+    } catch (err) {
+      p.models = p.models.filter((m) => !add.includes(m));
+      $("cat-add").disabled = false;
+      $("cat-err").textContent = "Could not save: " + err.message;
+    }
+  });
+
+  draw();
+  $("cat-q").focus();
 }
 
 document.addEventListener("toggle", (e) => {
@@ -737,8 +1162,45 @@ document.addEventListener("click", async (e) => {
   const act = btn.dataset.act;
 
   if (btn.id === "add") { addProviderDialog(); return; }
+  if (btn.id === "theme") { flipTheme(); return; }
   if (btn.id === "streaming") { state.streaming = !state.streaming; await save({ redraw: false }); renderHeader(); return; }
-  if (btn.id === "refresh") { await loadRecords(); renderAll(); toast("Record refreshed"); return; }
+  if (btn.id === "refresh") {
+    await Promise.all([loadRecords(), loadCatalog(), loadRequests()]);
+    renderAll();
+    toast("Record refreshed");
+    return;
+  }
+
+  if (act === "browse") { await browseDialog(i); return; }
+
+  // --- the request log ---
+  if (btn.dataset.f) {
+    reqFilter = btn.dataset.f;
+    for (const b of $("reqfilter").children) b.classList.toggle("on", b === btn);
+    renderRequests();
+    return;
+  }
+
+  if (btn.dataset.req !== undefined) {
+    reqPicked = Number(btn.dataset.req);
+    renderRequests();
+    return;
+  }
+
+  if (btn.id === "reqclear") {
+    if (!requests.length) { toast("Nothing logged yet"); return; }
+    if (!await ask(
+      "Clear all " + requests.length + " logged requests?",
+      "This only empties the log. Nothing the models have learned is touched, and routing is unchanged.",
+      "Clear it",
+    )) return;
+    await api("/api/requests/clear", { method: "POST" });
+    reqPicked = null;
+    await loadRequests();
+    renderDetail();
+    toast("Cleared");
+    return;
+  }
 
   if (act === "cover") {
     await testNewModels(btn.dataset.kind);

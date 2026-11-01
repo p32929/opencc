@@ -16,3 +16,13 @@ export const CAPABILITIES_PATH = join(GLOBAL_CONFIG_DIR, "capabilities.json");
 // is a single atomic write, where read-modify-write on a document would lose
 // whichever update finished second.
 export const STATS_PATH = join(GLOBAL_CONFIG_DIR, "stats.jsonl");
+
+// What models.dev knows about each model: context window, price, and whether
+// it calls tools or reads images. Derived and refetchable, so it sits beside
+// the config rather than in it, and a stale copy is never fatal.
+export const MODELS_DEV_PATH = join(GLOBAL_CONFIG_DIR, "models-dev.json");
+
+// One line per request the proxy served, newest last. Summary only: which
+// models were tried, what each answered, which one ended up replying. No
+// bodies, no keys, so it stays small enough to keep around.
+export const REQUESTS_PATH = join(GLOBAL_CONFIG_DIR, "requests.jsonl");

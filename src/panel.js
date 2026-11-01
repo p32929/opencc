@@ -14,6 +14,9 @@ import { readStoredConfig, writeStoredConfig } from "./configStore.js";
 import { providersFromEnv, displayName, streamingFromEnv } from "./config.js";
 import { allStats, successRate, coolingFor, coverage, record, resetStats, NEEDED } from "./stats.js";
 import { warmUp, pendingModels } from "./warmup.js";
+import { loadCatalog, lookupModel, catalogAge, catalogSize } from "./modelsdev.js";
+import { listRequests, clearRequests, KEEP } from "./reqlog.js";
+import { bus } from "./events.js";
 import { page } from "./panelPage.js";
 
 const json = (res, status, body) => {
@@ -85,6 +88,11 @@ function listen(server, port) {
 }
 
 export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
+  // Warmed in the background so the first page load has it, and ignored if
+  // it fails: everything here works without a catalogue, just with less to
+  // show.
+  loadCatalog().catch(() => {});
+
   const server = createServer(async (req, res) => {
     const path = req.url.split("?")[0];
 
@@ -214,6 +222,79 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         return;
       }
 
+      // Every request the proxy has served, newest first. The page filters
+      // these itself: the whole list is at most a few hundred summaries.
+      if (req.method === "GET" && path === "/api/requests") {
+        json(res, 200, { keep: KEEP, items: listRequests() });
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/requests/clear") {
+        json(res, 200, clearRequests());
+        return;
+      }
+
+      // What models.dev says about the models you have configured: context
+      // window, price, and whether it lists them as calling tools or reading
+      // images. A hint shown beside the record, never instead of it.
+      if (req.method === "GET" && path === "/api/catalog") {
+        await loadCatalog();
+        const { providers } = loadState();
+        const known = {};
+        for (const p of providers) {
+          for (const model of p.models) {
+            const info = lookupModel(p.baseUrl, model);
+            if (info) known[p.baseUrl + "|" + model] = info;
+          }
+        }
+        json(res, 200, { known, size: catalogSize(), age: catalogAge() });
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/catalog/refresh") {
+        try {
+          await loadCatalog({ force: true });
+          json(res, 200, { size: catalogSize(), age: catalogAge() });
+        } catch (err) {
+          json(res, 200, { error: err.message, size: catalogSize(), age: catalogAge() });
+        }
+        return;
+      }
+
+      // Server-sent events, so a request served by the proxy shows up in the
+      // page without it polling. The payload is only ever "something
+      // changed": the page refetches what it needs, which keeps one copy of
+      // the rule for what each view shows.
+      if (req.method === "GET" && path === "/api/events") {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        });
+        res.write("retry: 2000\n\n");
+
+        const send = (what) => {
+          if (!res.writableEnded) res.write(`data: ${JSON.stringify({ what })}\n\n`);
+        };
+        const onRequest = () => send("request");
+        const onCleared = () => send("requests-cleared");
+        bus.on("request", onRequest);
+        bus.on("requests-cleared", onCleared);
+
+        // Proxies and browsers drop an idle event stream; a comment line
+        // every twenty seconds is enough to keep it open and costs nothing.
+        const beat = setInterval(() => {
+          if (!res.writableEnded) res.write(": beat\n\n");
+        }, 20000);
+
+        req.on("close", () => {
+          clearInterval(beat);
+          bus.off("request", onRequest);
+          bus.off("requests-cleared", onCleared);
+        });
+        return;
+      }
+
       // The provider's own catalogue, so you can pick a model instead of
       // typing one and finding out later it doesn't exist.
       if (req.method === "GET" && path === "/api/catalogue") {
@@ -230,9 +311,23 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
             headers,
             signal: AbortSignal.timeout(30000),
           });
+          // A backend that refuses to list is worth saying out loud rather
+          // than showing as an empty catalogue: "this provider has no
+          // models" and "this provider would not tell us" are different
+          // problems with different fixes.
+          if (!upstream.ok) {
+            json(res, 200, { models: [], error: `${upstream.status} ${(await upstream.text()).slice(0, 200)}` });
+            return;
+          }
           const body = await upstream.json();
           const data = Array.isArray(body) ? body : (body.data ?? []);
-          json(res, 200, { models: data.map((m) => m.id).filter(Boolean).sort() });
+          await loadCatalog();
+          const models = data
+            .map((m) => m.id)
+            .filter(Boolean)
+            .sort()
+            .map((id) => ({ id, ...(lookupModel(provider.baseUrl, id) ?? {}) }));
+          json(res, 200, { models });
         } catch (err) {
           json(res, 200, { models: [], error: err.message });
         }

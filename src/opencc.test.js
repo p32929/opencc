@@ -1794,3 +1794,169 @@ test("a system turn survives even with no top-level system field", () => {
   assert.deepEqual(out.messages.map((m) => m.role), ["system", "user"]);
   assert.equal(out.messages[0].content, "hook output");
 });
+
+// --- what models.dev knows -------------------------------------------------
+
+// Both of these run in their own HOME, in their own process. loadCatalog
+// writes its cache beside the config, and an in-process test overwrote the
+// real one with its fixture.
+const catalogProbe = async (body) => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-md-"));
+  const script = join(home, "run.mjs");
+  writeFileSync(script, `
+    import { loadCatalog, lookupModel, tooBigForCatalog } from ${JSON.stringify(new URL("./modelsdev.js", import.meta.url).href)};
+    ${body}
+  `);
+  return JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+};
+
+test("a model is matched past the spelling a provider happens to use", async () => {
+  const out = await catalogProbe(`
+    const fake = {
+      groq: { api: "https://api.groq.com/openai/v1", models: { "llama-3.3-70b": { limit: { context: 131072 }, cost: { input: 0.59, output: 0.79 }, tool_call: true } } },
+      other: { api: "https://other.test/v1", models: { "llama-3.3-70b": { limit: { context: 8000 }, tool_call: false } } },
+    };
+    await loadCatalog({ force: true, fetchImpl: async () => ({ ok: true, json: async () => fake }) });
+    const ctx = (url, name) => lookupModel(url, name)?.context ?? null;
+    console.log(JSON.stringify({
+      byHost: ctx("https://api.groq.com/openai/v1", "llama-3.3-70b"),
+      byOtherHost: ctx("https://other.test/v1", "llama-3.3-70b"),
+      viaProxy: ctx("https://proxy.example/zai", "llama-3.3-70b"),
+      normalised: ctx("https://proxy.example/x", "Llama_3.3_70B"),
+      vendorPrefix: ctx("https://proxy.example/x", "meta/llama-3.3-70b"),
+      unknown: ctx("https://proxy.example/x", "nothing-like-this"),
+    }));
+  `);
+
+  // The provider whose own URL matches answers first: the same name means
+  // different things at two backends.
+  assert.equal(out.byHost, 131072);
+  assert.equal(out.byOtherHost, 8000);
+  // An unknown host still gets an answer from whoever lists the name, which
+  // is what makes this work behind a key-rotating proxy.
+  assert.ok(out.viaProxy);
+  // Punctuation, case and a vendor prefix carry no meaning in a model name.
+  assert.ok(out.normalised, "normalised");
+  assert.ok(out.vendorPrefix, "vendor prefix dropped");
+  assert.equal(out.unknown, null);
+});
+
+test("the published window only ever rules a request out, never in", async () => {
+  const out = await catalogProbe(`
+    await loadCatalog({ force: true, fetchImpl: async () => ({ ok: true, json: async () => ({
+      p: { api: "https://p.test/v1", models: { small: { limit: { context: 1000 } }, nolimit: { cost: { input: 1, output: 2 } } } },
+    }) }) });
+    const big = (name, chars) => tooBigForCatalog("https://p.test/v1", name, chars);
+    console.log(JSON.stringify({
+      inside: big("small", 4000), edge: big("small", 5000), over: big("small", 9000),
+      noLimit: big("nolimit", 10000000), unknown: big("unknown-model", 10000000),
+    }));
+  `);
+
+  // 1000 tokens at the generous 5 chars/token this uses is 5000 characters.
+  assert.equal(out.inside, false, "comfortably inside");
+  assert.equal(out.edge, false, "exactly at the edge is not over");
+  assert.equal(out.over, true, "over even on the kindest reading");
+  // Nothing published, nothing claimed.
+  assert.equal(out.noLimit, false);
+  assert.equal(out.unknown, false);
+});
+
+test("what a model has actually done outranks what the catalogue says", async () => {
+  const { chooseOrder } = await import("./stats.js");
+  const attempts = [
+    { provider: { baseUrl: "https://a.test/v1" }, model: "tiny" },
+    { provider: { baseUrl: "https://b.test/v1" }, model: "roomy" },
+  ];
+  // Every model looks equally good on the record, so only the size rule
+  // can separate them.
+  const blank = { ok: 5, fail: 0, statuses: {}, days: {}, totalMs: 0, timed: 0, maxOk: 0, minTooBig: Infinity };
+  const catalogTooBig = (baseUrl) => baseUrl === "https://a.test/v1";
+
+  const demoted = chooseOrder(attempts, "tools", {
+    lookup: () => blank, lookupOther: () => null, rng: () => 0.5, chars: 50_000, catalogTooBig,
+  });
+  assert.equal(demoted.attempts[0].model, "roomy", "the one the catalogue rules out goes last");
+  assert.equal(demoted.tooSmall, 1);
+
+  // Once the model has taken a request this big, the catalogue is simply
+  // wrong about it and is ignored from then on.
+  const proven = { ...blank, maxOk: 60_000 };
+  const kept = chooseOrder(attempts, "tools", {
+    lookup: (baseUrl) => (baseUrl === "https://a.test/v1" ? proven : blank),
+    lookupOther: () => null, rng: () => 0.5, chars: 50_000, catalogTooBig,
+  });
+  assert.equal(kept.tooSmall, 0, "a request this size already went through");
+
+  // And with no catalogue at all the ordering is what it always was.
+  const none = chooseOrder(attempts, "tools", {
+    lookup: () => blank, lookupOther: () => null, rng: () => 0.5, chars: 50_000,
+  });
+  assert.equal(none.tooSmall, 0);
+});
+
+// --- the request log -------------------------------------------------------
+
+test("a request log entry keeps the whole walk, and marks a fallback", async () => {
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  // Its own HOME: this writes a file beside the real record.
+  const home = mkdtempSync(join(tmpdir(), "opencc-reqlog-"));
+  const script = join(home, "run.mjs");
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(script, `
+    import { logRequest, listRequests, clearRequests } from ${JSON.stringify(new URL("./reqlog.js", import.meta.url).href)};
+    logRequest({ at: 1, model: "claude", kind: "tools", chars: 10, tools: 2,
+      attempts: [{ provider: "a", model: "m1", status: 500, error: "x".repeat(900) }], status: 500, error: "all failed" });
+    logRequest({ at: 2, model: "claude", kind: "tools", chars: 10, tools: 2,
+      attempts: [{ provider: "a", model: "m1", status: 429 }, { provider: "b", model: "m2", status: 200 }], served: "b/m2" });
+    logRequest({ at: 3, model: "claude", kind: "text", chars: 10, tools: 0,
+      attempts: [{ provider: "b", model: "m2", status: 200 }], served: "b/m2" });
+    const items = listRequests();
+    console.log(JSON.stringify({
+      order: items.map((r) => r.at),
+      failed: items.filter((r) => !r.ok).length,
+      fallbacks: items.filter((r) => r.fallback).map((r) => r.at),
+      trimmed: items.find((r) => r.at === 1).attempts[0].error.length,
+      cleared: (clearRequests(), listRequests().length),
+    }));
+  `);
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+
+  assert.deepEqual(out.order, [3, 2, 1], "newest first");
+  assert.equal(out.failed, 1);
+  // Served by the second model tried, not the first: the one thing in this
+  // file worth finding quickly.
+  assert.deepEqual(out.fallbacks, [2], "one attempt is not a fallback, two is");
+  assert.ok(out.trimmed <= 401, "a long error is cut so the file stays small");
+  assert.equal(out.cleared, 0);
+});
+
+test("a half-written line does not take the whole log listing down", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, appendFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-reqlog-torn-"));
+  mkdirSync(join(home, ".opencc"), { recursive: true });
+  // What a process killed mid-append leaves behind.
+  appendFileSync(join(home, ".opencc", "requests.jsonl"),
+    JSON.stringify({ at: 1, ok: true, attempts: [] }) + "\n" + '{"at":2,"ok":fal');
+
+  const script = join(home, "run.mjs");
+  writeFileSync(script, `
+    import { listRequests } from ${JSON.stringify(new URL("./reqlog.js", import.meta.url).href)};
+    console.log(JSON.stringify(listRequests().map((r) => r.at)));
+  `);
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+  assert.deepEqual(out, [1], "the torn line is skipped, the good one still reads");
+});

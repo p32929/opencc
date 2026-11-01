@@ -4,6 +4,8 @@ import { config, getConfig, isConfigured, displayName } from "./config.js";
 import { pickModels, toOpenAIRequest, toAnthropicResponse, toAnthropicError } from "./translate.js";
 import { streamOpenAIToAnthropic, sendAnthropicAsStream } from "./stream.js";
 import { requirementsOf, describeNeeds, kindOf, chooseOrder, record, coolOff, cooledOffSuccessfully, verdictFor, isTooBig, TOO_BIG_VERDICT, STREAM_DIED_VERDICT } from "./stats.js";
+import { logRequest } from "./reqlog.js";
+import { tooBigForCatalog } from "./modelsdev.js";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -92,6 +94,10 @@ export async function callUpstream(
   chars = JSON.stringify(anthropicReq).length,
 ) {
   const failures = [];
+  // One entry per model actually asked, in the order they were tried. Handed
+  // back with the result so the request log can show the whole walk rather
+  // than only whichever model happened to answer.
+  const trail = [];
   const deadline = Date.now() + TOTAL_DEADLINE_MS;
   let lastStatus = 502;
   let headStatus = 0;
@@ -109,6 +115,7 @@ export async function callUpstream(
     return {
       status: 503,
       message: `No provider is available: all ${providers.length} are disabled. Run "opencc init" to enable one.`,
+      trail,
     };
   }
 
@@ -125,7 +132,11 @@ export async function callUpstream(
   const kind = kindOf(needs);
   // The size decides whether a model can take this at all, so it goes into
   // the ordering as well as into the record.
-  const ordered = stats.order(candidates, kind, { chars });
+  // models.dev's published context window, used only where opencc has not
+  // learned a model's own ceiling yet. A model the catalogue says cannot
+  // hold this request is demoted the same way one that has already refused
+  // a request this size is.
+  const ordered = stats.order(candidates, kind, { chars, catalogTooBig: tooBigForCatalog });
 
   console.log(
     `[opencc]   ${candidates.length} model(s) for ${describeNeeds(needs)}` +
@@ -245,6 +256,13 @@ export async function callUpstream(
       }
 
       console.error(`[opencc]   ${label} ${reason}`);
+      trail.push({
+        provider: displayName(provider),
+        model,
+        status: networkError ? 0 : upstream.status,
+        ms: Date.now() - startedAt,
+        error: reason,
+      });
       break;
     }
 
@@ -259,6 +277,7 @@ export async function callUpstream(
         stats.record({ baseUrl: provider.baseUrl, model, kind, status: headStatus, chars, verdict: "unreadable" });
         failures.push(`${displayName(provider)}/${model}: reply was not JSON: ${err.message}`);
         console.error(`[opencc]   ${label} answered with something that is not JSON`);
+        trail.push({ provider: displayName(provider), model, status: headStatus, ms: headMs, verdict: "unreadable", error: err.message });
         continue;
       }
 
@@ -274,21 +293,28 @@ export async function callUpstream(
       if (verdict !== "ok") {
         failures.push(`${displayName(provider)}/${model}: 200 but ${verdict}`);
         console.error(`[opencc]   ${label} -> 200 but ${verdict}, trying the next one`);
+        trail.push({ provider: displayName(provider), model, status: headStatus, ms: headMs, verdict, error: `200 but ${verdict}` });
         continue;
       }
 
       stats.settled(provider.baseUrl, model);
-      return { reply, provider, model, streamed: false };
+      trail.push({ provider: displayName(provider), model, status: headStatus, ms: headMs, verdict });
+      return { reply, provider, model, streamed: false, trail, ms: headMs };
     }
 
     if (upstream?.ok) {
+      const entry = { provider: displayName(provider), model, status: headStatus, ms: headMs };
+      trail.push(entry);
       return {
-        upstream, provider, model, streamed: streamUpstream,
+        upstream, provider, model, streamed: streamUpstream, trail, ms: headMs,
         // Called once the reply has been read. Until then this attempt is
         // not in the record at all.
-        report: (verdict) => stats.record({
-          baseUrl: provider.baseUrl, model, kind, status: headStatus, ms: headMs, verdict, chars,
-        }),
+        report: (verdict) => {
+          entry.verdict = verdict;
+          stats.record({
+            baseUrl: provider.baseUrl, model, kind, status: headStatus, ms: headMs, verdict, chars,
+          });
+        },
       };
     }
 
@@ -306,6 +332,7 @@ export async function callUpstream(
   return {
     status: lastStatus,
     message: `All ${ordered.attempts.length} provider/model attempt(s) failed:\n${failures.join("\n")}`,
+    trail,
   };
 }
 
@@ -327,29 +354,50 @@ async function handleMessages(anthropicReq, res) {
       ` tools=${(anthropicReq.tools ?? []).length} chars=${chars}`,
   );
 
+  const startedAt = Date.now();
   const result = await callUpstream(anthropicReq, live.providers, live.streaming, undefined, chars);
 
+  // Common to every outcome below; `served` and the rest are filled in by
+  // whichever branch actually ends the request.
+  const logged = {
+    at: startedAt,
+    model: anthropicReq.model,
+    kind: kindOf(requirementsOf(anthropicReq)),
+    chars,
+    tools: (anthropicReq.tools ?? []).length,
+    stream: Boolean(anthropicReq.stream),
+    attempts: result.trail ?? [],
+  };
+
   if (!result.upstream && !result.reply) {
+    logRequest({ ...logged, status: result.status, error: result.message, ms: Date.now() - startedAt });
     sendJson(res, result.status, toAnthropicError(result.status, result.message));
     return;
   }
+
+  const served = `${displayName(result.provider)}/${result.model}`;
 
   if (result.streamed) {
     try {
       const sent = await streamOpenAIToAnthropic(result.upstream, res, anthropicReq.model, result.provider.baseUrl);
       result.report(verdictFor(anthropicReq, sent));
+      logRequest({ ...logged, served, status: 200, ms: Date.now() - startedAt });
     } catch (err) {
       // The worst outcome there is: the reply started, Claude Code has half
       // of it, and there is no retrying. It used to be the one failure that
       // went unrecorded, so a model that did it reliably kept a clean sheet.
       console.error(`[opencc]   stream from ${result.model} died part way: ${err.message}`);
       result.report(STREAM_DIED_VERDICT);
+      // Not "served": the client got half a reply, which is a failure however
+      // the status line started out.
+      logRequest({ ...logged, status: 200, error: `stream died part way: ${err.message}`, ms: Date.now() - startedAt });
       if (!res.writableEnded) res.end();
     }
     return;
   }
 
   // Already read, checked and recorded inside the walk.
+  logRequest({ ...logged, served, status: 200, ms: Date.now() - startedAt });
   if (anthropicReq.stream) sendAnthropicAsStream(res, result.reply);
   else sendJson(res, 200, result.reply);
 }

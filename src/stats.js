@@ -665,12 +665,31 @@ export function knownTooSmall(entry, chars) {
   return Number.isFinite(entry.minTooBig) && chars >= entry.minTooBig;
 }
 
+// Is this model too small for a request of this size?
+//
+// What opencc has seen always wins. A model that has already refused a
+// request this size needs no second opinion, and one that has already taken
+// a request this size has disproved whatever the catalogue claims — the name
+// a provider serves may not be the build models.dev has on file. The
+// published window is consulted only where opencc knows nothing yet, which
+// is exactly the gap it exists to cover.
+function tooSmallFor(entry, chars, catalogTooBig, baseUrl, model) {
+  if (knownTooSmall(entry, chars)) return true;
+  if (!catalogTooBig) return false;
+  if (entry && Number.isFinite(entry.maxOk) && entry.maxOk >= chars) return false;
+  return Boolean(catalogTooBig(baseUrl, model, chars));
+}
+
 export function chooseOrder(attempts, kind, {
   lookup = statsFor,
   lookupOther = statsForOtherKinds,
   rng = Math.random,
   now = Date.now(),
   chars,
+  // (baseUrl, model, chars) => boolean. Left out in tests and wherever no
+  // catalogue has been loaded, which puts the ordering back to what the
+  // record alone says.
+  catalogTooBig = null,
 } = {}) {
   const rows = attempts.map((attempt, position) => {
     const { baseUrl } = attempt.provider;
@@ -682,7 +701,7 @@ export function chooseOrder(attempts, kind, {
       a,
       b,
       cooling: coolingFor(baseUrl, attempt.model, now),
-      tooSmall: knownTooSmall(entry, chars),
+      tooSmall: tooSmallFor(entry, chars, catalogTooBig, baseUrl, attempt.model),
       draw: betaSample(a, b, rng) - slowness(meanMs(entry)),
     };
   });
