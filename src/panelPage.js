@@ -305,6 +305,7 @@ export const page = () => `<!doctype html>
       <input type="number" id="port" style="width:84px" min="1" max="65535">
     </span>
     <button id="streaming"></button>
+    <button id="catalog" title="Context windows, prices and what each model can do, published by models.dev. Click to fetch it again.">models.dev</button>
     <button id="theme" title="Switch between light and dark"></button>
     <button id="refresh" title="Re-read the record from disk">Refresh</button>
     <button id="testnew" title="Send one request to every model with no record yet">Test new</button>
@@ -493,13 +494,37 @@ async function loadRecords() {
   }
 }
 
+let catalogInfo = { size: 0, age: null };
+
 async function loadCatalog() {
   try {
     const out = await api("/api/catalog");
     catalogKnown = out.known || {};
+    catalogInfo = { size: out.size || 0, age: out.age };
   } catch {
     catalogKnown = {};
+    catalogInfo = { size: 0, age: null };
   }
+  renderCatalogButton();
+}
+
+function renderCatalogButton() {
+  const btn = $("catalog");
+  if (!btn) return;
+
+  const mine = Object.keys(catalogKnown).length;
+  const total = state.providers.reduce(
+    (n, p) => n + p.models.filter((m) => !(p.disabledModels || []).includes(m)).length, 0);
+
+  btn.textContent = catalogInfo.size
+    ? "models.dev " + mine + "/" + total
+    : "models.dev —";
+
+  btn.title = catalogInfo.size
+    ? "models.dev knows " + mine + " of your " + total + " models: context window, price, tool calling and images. " +
+      "Fetched " + (catalogInfo.age === null ? "just now" : ago(Date.now() - catalogInfo.age)) + ", cached a day. " +
+      "The rest get tested with a real request instead. Click to fetch it again."
+    : "models.dev could not be reached, so every model has to be tested with a real request. Click to try again.";
 }
 
 async function loadRequests() {
@@ -953,6 +978,7 @@ function renderDetail() {
 
 function renderAll() {
   renderHeader();
+  renderCatalogButton();
   renderCoverage();
   if (!state.providers.length) {
     $("list").innerHTML = '<div class="nothing">No providers yet. Use <b>Add provider</b> above to set one up.</div>';
@@ -970,7 +996,8 @@ function renderAll() {
 // "no models" with nothing to explain it.
 const catalogues = {};
 
-async function fetchCatalogue(i) {
+async function fetchCatalogue(i, { fresh = false } = {}) {
+  if (fresh) delete catalogues[i];
   if (catalogues[i]) return catalogues[i];
   try {
     const out = await api("/api/catalogue?index=" + i);
@@ -981,11 +1008,11 @@ async function fetchCatalogue(i) {
   return catalogues[i];
 }
 
-async function fillCatalogue(i) {
+async function fillCatalogue(i, opts) {
   const list = $("cat" + i);
-  if (!list || list.dataset.done) return;
+  if (!list || (list.dataset.done && !opts?.fresh)) return;
   list.dataset.done = "1";
-  const { models } = await fetchCatalogue(i);
+  const { models } = await fetchCatalogue(i, opts);
   if ($("cat" + i)) {
     $("cat" + i).innerHTML = models.map((m) => '<option value="' + attr(m.id) + '"></option>').join("");
   }
@@ -1008,6 +1035,7 @@ async function browseDialog(i) {
       '<input type="text" id="cat-q" placeholder="Search models" autocomplete="off">' +
       '<label style="margin:0;text-transform:none;letter-spacing:0;font-size:12.5px;color:var(--ink-2);display:flex;gap:6px;align-items:center">' +
         '<input type="checkbox" id="cat-free" style="width:auto"> Free only</label>' +
+      '<button type="button" id="cat-reload" title="Ask the provider for its list again. A local server can swap which model it serves without the name here changing.">Refresh</button>' +
     "</div>" +
     '<div class="cat-list" id="cat-list"><p class="cat-none"><span class="spin"></span>Asking the provider…</p></div>' +
     '<p class="err" id="cat-err"></p>' +
@@ -1018,7 +1046,11 @@ async function browseDialog(i) {
   );
   $("dialog").classList.add("wide");
 
-  const { models, error } = await fetchCatalogue(i);
+  const first = await fetchCatalogue(i);
+  // Held in one array the reload below refills, so draw() always reads the
+  // current list without being handed a new reference each time.
+  const models = [...first.models];
+  const error = first.error;
   if (!$("cat-list")) return; // the dialog was closed while we waited
   if (error) {
     $("cat-err").textContent = "This provider would not list its models: " + error +
@@ -1068,6 +1100,19 @@ async function browseDialog(i) {
   });
   $("cat-q").addEventListener("input", draw);
   $("cat-free").addEventListener("change", draw);
+
+  $("cat-reload").addEventListener("click", async () => {
+    $("cat-reload").disabled = true;
+    $("cat-err").textContent = "";
+    $("cat-list").innerHTML = '<p class="cat-none"><span class="spin"></span>Asking the provider…</p>';
+    const next = await fetchCatalogue(i, { fresh: true });
+    if (!$("cat-list")) return;
+    models.length = 0;
+    models.push(...next.models);
+    if (next.error) $("cat-err").textContent = "This provider would not list its models: " + next.error;
+    $("cat-reload").disabled = false;
+    draw();
+  });
 
   $("cat-add").addEventListener("click", async () => {
     const add = [...picked].filter((m) => !p.models.includes(m));
@@ -1208,6 +1253,27 @@ document.addEventListener("click", async (e) => {
 
   if (btn.id === "add") { addProviderDialog(); return; }
   if (btn.id === "theme") { flipTheme(); return; }
+
+  if (btn.id === "catalog") {
+    btn.disabled = true;
+    btn.textContent = "fetching…";
+    try {
+      const out = await api("/api/catalog/refresh", { method: "POST" });
+      await loadCatalog();
+      renderAll();
+      // A refresh can make probes unnecessary, so what is still pending
+      // changes with it.
+      toast(out.error
+        ? "models.dev: " + out.error
+        : "models.dev: " + out.size.toLocaleString() + " models");
+    } catch (err) {
+      toast("Could not reach models.dev: " + err.message);
+    } finally {
+      btn.disabled = false;
+      renderCatalogButton();
+    }
+    return;
+  }
   if (btn.id === "streaming") { state.streaming = !state.streaming; await save({ redraw: false }); renderHeader(); return; }
   if (btn.id === "refresh") {
     await Promise.all([loadRecords(), loadCatalog(), loadRequests()]);
