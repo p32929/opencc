@@ -76,6 +76,15 @@ function loadState() {
 //
 // The request and the reply are both returned, trimmed, because "it failed"
 // without the body is the answer that sends you to curl.
+// Saying "ok" is not hard work. A backend that cannot manage it in ten
+// seconds is not one you want Claude Code waiting on, and a test that hangs
+// for two minutes tells you less than a fast failure does.
+//
+// This is the panel's budget only. A real request carries a large tool set
+// and legitimately runs to minutes, which is why the proxy's own timeout
+// (UPSTREAM_TIMEOUT_MS in server.js) is far longer and must stay that way.
+const TEST_TIMEOUT_MS = 10000;
+
 const DUMP_LIMIT = 4000;
 const trim = (text) => (text.length > DUMP_LIMIT ? text.slice(0, DUMP_LIMIT) + "\n…" : text);
 
@@ -96,7 +105,7 @@ async function testModel(provider, model) {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120000),
+      signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
     });
     const ms = Date.now() - startedAt;
     const text = await res.text();
@@ -123,7 +132,16 @@ async function testModel(provider, model) {
   } catch (err) {
     const ms = Date.now() - startedAt;
     record({ baseUrl: provider.baseUrl, model, kind: "text", status: 0, ms });
-    return { ok: false, status: 0, ms, sent: trim(sent), error: err.message };
+    // "The operation was aborted due to timeout" is the runtime's wording for
+    // something the person asked for, so say what actually happened.
+    const timedOut = err.name === "TimeoutError" || /timeout/i.test(err.message);
+    return {
+      ok: false,
+      status: 0,
+      ms,
+      sent: trim(sent),
+      error: timedOut ? `no answer within ${TEST_TIMEOUT_MS / 1000}s` : err.message,
+    };
   }
 }
 

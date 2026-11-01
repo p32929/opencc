@@ -1169,40 +1169,77 @@ function showTest(model, r) {
   ], { wide: true });
 }
 
-// One at a time, so a single key is not hit with a dozen requests at once and
-// made to answer with rate limits that say nothing about the models.
+// Every provider at once, a few models at a time from each.
+//
+// It used to be one request after another across the whole list, so testing
+// 74 models meant 74 round trips end to end. The limit worth respecting is
+// per key, not overall: hammering one provider with a dozen at once gets you
+// rate limits that say nothing about the models, while two providers in
+// parallel cost neither of them anything.
+var LANES = 4;
+
 async function testMany(items) {
-  var done = 0, ok = 0;
+  if (!items.length) return;
+
+  // One queue per provider, so a provider with 40 models cannot starve one
+  // with 2, and each queue is drained by its own small set of workers.
+  var queues = new Map();
+  items.forEach(function (t) {
+    if (!queues.has(t.i)) queues.set(t.i, []);
+    queues.get(t.i).push(t);
+  });
+
+  var done = 0;
+  var ok = 0;
   var bad = [];
   var stop = false;
+  var started = Date.now();
+
+  var now = h("p", { id: "tm-now" }, "Starting");
   openDialog([
-    h("h2", {}, h("span", { className: "spin" }), "Testing " + items.length + " models"),
-    h("p", { id: "tm-now" }, "One real request each, one at a time."),
+    h("h2", {}, h("span", { className: "spin" }), "Testing " + items.length + (items.length === 1 ? " model" : " models")),
+    h("p", {}, "One real request each, at most " + LANES + " at a time per provider. Anything that has not answered in 10 seconds is counted as a failure."),
+    now,
     h("div", { className: "btns" }, h("button", { onclick: function () { stop = true; } }, "Stop")),
   ]);
 
-  for (var n = 0; n < items.length; n++) {
-    if (stop) break;
-    var t = items[n];
-    var p = S.providers[t.i];
-    if (!p) continue;
-    if ($("tm-now")) $("tm-now").textContent = (done + 1) + " of " + items.length + ": " + (p.name || p.label) + " " + t.model;
-    try {
-      var r = await post("/api/test", { index: t.i, model: t.model });
-      if (r.ok) ok++;
-      else bad.push([t.model, (r.status || "no answer") + " " + (r.error || "")]);
-    } catch (e) {
-      bad.push([t.model, e.message]);
-    }
-    done++;
-  }
+  var tick = function (label) {
+    if (!$("tm-now")) return;
+    $("tm-now").textContent = done + " of " + items.length + " \\u00b7 " + ok + " answered" +
+      (label ? " \\u00b7 " + label : "");
+  };
 
+  var worker = async function (queue) {
+    while (queue.length && !stop) {
+      var t = queue.shift();
+      var p = S.providers[t.i];
+      if (!p) continue;
+      try {
+        var r = await post("/api/test", { index: t.i, model: t.model });
+        if (r.ok) ok += 1;
+        else bad.push([(p.name || p.label) + " / " + t.model, (r.status || "no answer") + " " + (r.error || "")]);
+      } catch (e) {
+        bad.push([(p.name || p.label) + " / " + t.model, e.message]);
+      }
+      done += 1;
+      tick(t.model);
+    }
+  };
+
+  var running = [];
+  queues.forEach(function (queue) {
+    for (var n = 0; n < Math.min(LANES, queue.length); n++) running.push(worker(queue));
+  });
+  await Promise.all(running);
+
+  var took = ((Date.now() - started) / 1000).toFixed(1);
   if (closeDialog) closeDialog();
   await loadRecord();
   drawAll();
-  if (!bad.length) { toast(ok + " of " + done + " answered"); return; }
+
+  if (!bad.length) { toast(ok + " of " + done + " answered in " + took + "s"); return; }
   openDialog([
-    h("h2", {}, ok + " of " + done + " answered"),
+    h("h2", {}, ok + " of " + done + " answered in " + took + "s"),
     h("p", {}, "These did not. They stay in the pot; routing simply learns to avoid them."),
     h("div", {}, bad.map(function (b) {
       return h("div", { className: "kv" }, h("b", {}, b[0]), h("span", {}, b[1]));
