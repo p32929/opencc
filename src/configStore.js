@@ -12,7 +12,7 @@ const joinModels = (models) => (Array.isArray(models) ? models.join(", ") : mode
 // `models` takes an array or a plain string. The order of either is only how
 // the file reads; what gets called is decided from the record in stats.jsonl.
 // `streaming` defaults to on, so it only gets written when it's switched off.
-export function writeStoredConfig({ providers, port, streaming = true }) {
+export function writeStoredConfig({ providers, port, streaming = true, rank = [] }) {
   mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
 
   const lines = [];
@@ -33,6 +33,10 @@ export function writeStoredConfig({ providers, port, streaming = true }) {
   lines.push("");
   lines.push(`PORT=${port || "3000"}`);
   if (!streaming) lines.push("STREAMING=off");
+  // Only written once you have actually ranked them. An empty key would read
+  // back as a preference for nothing, and no key at all is the honest way to
+  // say you have not expressed one.
+  if (rank.length) lines.push(`PROVIDER_RANK=${rank.join(", ")}`);
 
   writeFileSync(GLOBAL_CONFIG_PATH, lines.join("\n") + "\n", { mode: 0o600 });
 }

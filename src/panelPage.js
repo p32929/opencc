@@ -248,6 +248,19 @@ export const page = () => `<!doctype html>
   .dialog .err { color: var(--bad); min-height: 17px; font-size: 12.5px; margin-top: 8px; }
   .dialog .btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
   .dialog .btns .left { margin-right: auto; }
+  ol.rank { list-style: none; margin: 14px 0 0; padding: 0; }
+  ol.rank li {
+    display: flex; align-items: center; gap: 9px; padding: 8px 10px;
+    border: 1px solid var(--rule); border-radius: var(--r-s); margin-bottom: 5px;
+    background: var(--panel-2); cursor: grab;
+  }
+  ol.rank li.dragging { opacity: .4; }
+  ol.rank .grip { color: var(--ink-3); font-size: 12px; letter-spacing: -2px; }
+  ol.rank .n { font: 11px var(--mono); color: var(--ink-3); width: 24px; flex: none; }
+  ol.rank .nm { color: var(--ink); font-weight: 600; font-size: 13px; }
+  ol.rank .meta { margin-left: auto; }
+  ol.rank .up { display: flex; gap: 3px; flex: none; }
+
   pre.dump { background: var(--panel-2); border: 1px solid var(--rule); border-radius: var(--r-s); padding: 9px; font: 11.5px/1.5 var(--mono); max-height: 230px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: 5px 0 0; color: var(--ink-2); }
   .spin { display: inline-block; width: 12px; height: 12px; vertical-align: -1px; margin-right: 6px; border: 2px solid var(--rule-2); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -317,6 +330,7 @@ export const page = () => `<!doctype html>
             <option value="price">Sort by price</option>
             <option value="context">Sort by context</option>
           </select>
+          <button id="rank">Provider ranking</button>
           <button id="fold-all">Collapse all</button>
         </div>
         <div id="plist"></div>
@@ -395,7 +409,7 @@ function add(el, kids) {
 function put(el) { el.replaceChildren(); add(el, Array.prototype.slice.call(arguments, 1)); return el; }
 
 // --- state ----------------------------------------------------------------
-var S = { providers: [], port: "3000", streaming: true, version: "" };
+var S = { providers: [], port: "3000", streaming: true, rank: [], version: "" };
 var REC = {};        // "baseUrl|model" -> { kind: {ok, fail, statuses} }
 var COOL = {};
 var CAT = {};        // "baseUrl|model" -> models.dev facts, for configured models
@@ -469,6 +483,20 @@ function recOf(baseUrl, model) {
   return { ok: ok, fail: fail, total: ok + fail, pct: ok + fail ? Math.round((ok / (ok + fail)) * 100) : null };
 }
 function facts(baseUrl, model) { return CAT[key(baseUrl, model)] || null; }
+
+// Your provider ranking, best first, as a place per base URL. A provider you
+// have not ranked sorts after every one you have, rather than jumping to the
+// top just because it is new.
+function places() {
+  var m = new Map();
+  (S.rank || []).forEach(function (url, i) { m.set(url, i); });
+  return m;
+}
+function placeOfProvider(baseUrl) {
+  var at = places().get(baseUrl);
+  return at === undefined ? (S.rank || []).length + 1 : at;
+}
+var ranked = function () { return (S.rank || []).length > 1; };
 var isFree = function (d) { return Boolean(d) && d.input === 0 && d.output === 0; };
 var costOf = function (d) { return d && d.input !== undefined ? d.input + (d.output || 0) : Infinity; };
 
@@ -595,6 +623,7 @@ async function save(providers) {
     }),
     port: S.port,
     streaming: S.streaming,
+    rank: S.rank || [],
   };
   var before = list.length;
   S = await post("/api/state", payload);
@@ -706,7 +735,16 @@ function shownKeys() {
 }
 
 function drawProviders() {
-  var sections = S.providers.map(function (p, i) {
+  // Keep each provider's own index: everything else on this page addresses
+  // them by it, so the display order cannot be allowed to shift it.
+  var withIndex = S.providers.map(function (p, i) { return { p: p, i: i }; });
+  if (ranked()) {
+    withIndex.sort(function (a, b) { return placeOfProvider(a.p.baseUrl) - placeOfProvider(b.p.baseUrl); });
+  }
+
+  var sections = withIndex.map(function (entry) {
+    var p = entry.p;
+    var i = entry.i;
     var list = LISTS[i] || { models: [], loading: true, error: "" };
     var names = namesFor(p, i);
     var rows = names.all.filter(function (id) { return matches(id, facts(p.baseUrl, id)); });
@@ -756,6 +794,8 @@ function drawProviders() {
           },
         }) : null,
         h("div", { className: "who" },
+          ranked() ? h("span", { className: "tag acc", title: "Your ranking: #" + (placeOfProvider(p.baseUrl) + 1) },
+            "#" + (placeOfProvider(p.baseUrl) + 1)) : null,
           h("span", { className: "nm" }, p.name || p.label),
           p.disabled ? h("span", { className: "tag" }, "off") : null,
           list.loading ? h("span", { className: "tag" }, "loading")
@@ -834,6 +874,8 @@ function drawProviders() {
   $("pick-all").indeterminate = on.length > 0 && on.length < shown.length;
   $("pick-all").disabled = !shown.length;
   $("fold-all").textContent = S.providers.length && SHUT.size >= S.providers.length ? "Expand all" : "Collapse all";
+  $("rank").textContent = ranked() ? "Ranking \\u2713" : "Provider ranking";
+  $("rank").disabled = S.providers.length < 2;
   drawPicks();
 }
 
@@ -900,7 +942,12 @@ async function removeModels(items) {
 // --- your models table ----------------------------------------------------
 var COLS = {
   model: { label: "Model", how: "text", get: function (t) { return t.model; } },
-  provider: { label: "Provider", how: "text", get: function (t) { return t.name; } },
+  // By your ranking when you have one, by name when you do not. The header
+  // says which, so a sort by "Provider" is never a mystery.
+  provider: {
+    label: "Provider", how: "text",
+    get: function (t) { return ranked() ? placeOfProvider(t.baseUrl) : t.name; },
+  },
   context: { label: "Context", num: true, get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.context ? d.context : 0; } },
   tools: { label: "Tools", get: function (t) { var d = facts(t.baseUrl, t.model); return d ? (d.tools ? 1 : 0) : -1; } },
   images: { label: "Images", get: function (t) { var d = facts(t.baseUrl, t.model); return d ? (d.vision ? 1 : 0) : -1; } },
@@ -942,7 +989,10 @@ function sortRows(list) {
   return withAt.map(function (x) { return x.t; });
 }
 
-var firstDir = function (k) { return COLS[k].how ? "up" : "down"; };
+var firstDir = function (k) {
+  if (k === "provider") return "up"; // best first, or A to Z
+  return COLS[k].how ? "up" : "down";
+};
 function clickSort(k) {
   var at = null;
   SORT.forEach(function (s) { if (s.key === k) at = s; });
@@ -983,6 +1033,13 @@ function drawMine() {
     picked.length ? h("button", { className: "sm danger", onclick: function () { removeModels(picked); } }, "Take " + picked.length + " out") : null,
     picked.length ? h("button", { className: "sm ghost", onclick: function () { MINE.clear(); drawMine(); } }, "Clear") : null,
     SORT.length ? h("button", { className: "sm", onclick: function () { SORT = []; drawMine(); } }, "Clear sort") : null,
+    S.providers.length > 1 ? h("button", {
+      className: "sm" + (ranked() ? " on" : ""),
+      title: ranked()
+        ? "You have ranked your providers. Click to change or clear it."
+        : "Say which providers you would rather use. It tilts the draw; it does not override the record.",
+      onclick: rankingDialog,
+    }, ranked() ? "Ranking \\u2713" : "Provider ranking") : null,
     list.length ? h("button", { className: "sm", title: "Ask models.dev again for context, price and abilities", onclick: refreshCatalog }, "Refresh from models.dev") : null,
     list.length ? h("button", { className: "sm", onclick: function () { testMany(view); } }, "Test all") : null);
 
@@ -1153,6 +1210,90 @@ async function testMany(items) {
     h("div", { className: "btns" },
       h("button", { className: "primary", onclick: function () { if (closeDialog) closeDialog(); } }, "Close")),
   ], { wide: true });
+}
+
+// --- provider ranking -----------------------------------------------------
+// Drag the providers into the order you would rather use them.
+//
+// It is a preference, not a running order. opencc still picks from what each
+// model has actually done; this only tilts the draw, enough to separate two
+// models the record cannot tell apart and nowhere near enough to float one
+// that keeps failing.
+function rankingDialog() {
+  var order = S.providers.slice().sort(function (a, b) {
+    return placeOfProvider(a.baseUrl) - placeOfProvider(b.baseUrl) || byName(a.name || a.label, b.name || b.label);
+  });
+
+  var list = h("ol", { className: "rank" });
+  var held = null;
+
+  var draw = function () {
+    put(list, order.map(function (p, i) {
+      return h("li", { draggable: true, "data-url": p.baseUrl },
+        h("span", { className: "grip", "aria-hidden": "true" }, "\\u22ee\\u22ee"),
+        h("span", { className: "n" }, "#" + (i + 1)),
+        h("span", { className: "nm" }, p.name || p.label),
+        p.disabled ? h("span", { className: "tag" }, "off") : null,
+        h("span", { className: "meta" }, p.models.length + " in pot"),
+        h("span", { className: "up" },
+          h("button", {
+            className: "sm", type: "button", disabled: i === 0, "aria-label": "Move up",
+            onclick: function () { order.splice(i - 1, 0, order.splice(i, 1)[0]); draw(); },
+          }, "\\u2191"),
+          h("button", {
+            className: "sm", type: "button", disabled: i === order.length - 1, "aria-label": "Move down",
+            onclick: function () { order.splice(i + 1, 0, order.splice(i, 1)[0]); draw(); },
+          }, "\\u2193")));
+    }));
+  };
+
+  // Dragging is the quick way; the arrows are the one that works with a
+  // keyboard and on a touch screen.
+  list.addEventListener("dragstart", function (e) {
+    held = e.target.closest("li");
+    if (held) held.classList.add("dragging");
+  });
+  list.addEventListener("dragend", function () {
+    if (held) held.classList.remove("dragging");
+    held = null;
+    order = [].slice.call(list.children).map(function (li) {
+      return S.providers.find(function (p) { return p.baseUrl === li.dataset.url; });
+    }).filter(Boolean);
+    draw();
+  });
+  list.addEventListener("dragover", function (e) {
+    e.preventDefault();
+    var over = e.target.closest("li");
+    if (!held || !over || over === held) return;
+    var box = over.getBoundingClientRect();
+    list.insertBefore(held, e.clientY > box.top + box.height / 2 ? over.nextSibling : over);
+  });
+
+  draw();
+
+  openDialog([
+    h("h2", {}, "Provider ranking"),
+    h("p", {}, "Drag into order, best first. This is a preference, not a running order: " +
+      "which model answers is still drawn from the Record column, and ranking only " +
+      "separates models the record cannot tell apart."),
+    list,
+    h("div", { className: "btns" },
+      (S.rank || []).length
+        ? h("button", { className: "left", onclick: async function () {
+            S.rank = [];
+            if (closeDialog) closeDialog();
+            await save();
+            toast("Ranking cleared: the record decides on its own");
+          } }, "Clear ranking")
+        : null,
+      h("button", { onclick: function () { if (closeDialog) closeDialog(); } }, "Cancel"),
+      h("button", { className: "primary", onclick: async function () {
+        S.rank = order.map(function (p) { return p.baseUrl; });
+        if (closeDialog) closeDialog();
+        await save();
+        toast("Ranking saved");
+      } }, "Save ranking")),
+  ]);
 }
 
 // --- provider form --------------------------------------------------------
@@ -1365,6 +1506,7 @@ $("go-prov").addEventListener("click", function () { location.hash = "#providers
 $("q").addEventListener("input", function (e) { query = e.target.value; drawProviders(); });
 $("free").addEventListener("change", function (e) { freeOnly = e.target.checked; drawProviders(); });
 $("sort").addEventListener("change", function (e) { catSort = e.target.value; drawProviders(); });
+$("rank").addEventListener("click", rankingDialog);
 $("fold-all").addEventListener("click", function () {
   if (SHUT.size >= S.providers.length) SHUT.clear();
   else S.providers.forEach(function (p, i) { SHUT.add(i); });

@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { readStoredConfig, writeStoredConfig } from "./configStore.js";
-import { providersFromEnv, displayName, streamingFromEnv } from "./config.js";
+import { providersFromEnv, displayName, streamingFromEnv, rankFromEnv } from "./config.js";
 import { allStats, successRate, coolingFor, record, resetStats } from "./stats.js";
 import { loadCatalog, lookupModel, catalogAge, catalogSize } from "./modelsdev.js";
 import { listRequests, clearRequests, KEEP } from "./reqlog.js";
@@ -60,6 +60,7 @@ function loadState() {
     providers: providersFromEnv(stored).map((p) => ({ ...p, label: displayName(p) })),
     port: stored.PORT || "3000",
     streaming: streamingFromEnv(stored),
+    rank: rankFromEnv(stored),
     version,
   };
 }
@@ -207,6 +208,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
           providers: body.providers ?? [],
           port: body.port,
           streaming: body.streaming !== false,
+          rank: Array.isArray(body.rank) ? body.rank : [],
         });
         json(res, 200, loadState());
         // The proxy may have been waiting for exactly this.

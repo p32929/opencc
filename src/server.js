@@ -92,6 +92,9 @@ export async function callUpstream(
   // Serialising a request is not free - a big one runs to most of a
   // millisecond - and the caller has usually measured it already.
   chars = JSON.stringify(anthropicReq).length,
+  // Your provider ranking, best first. Empty is the default and means the
+  // record decides on its own.
+  rank = config.rank,
 ) {
   const failures = [];
   // One entry per model actually asked, in the order they were tried. Handed
@@ -145,7 +148,11 @@ export async function callUpstream(
   // learned a model's own ceiling yet. A model the catalogue says cannot
   // hold this request is demoted the same way one that has already refused
   // a request this size is.
-  const ordered = stats.order(candidates, kind, { chars, catalogTooBig: tooBigForCatalog });
+  const ordered = stats.order(candidates, kind, {
+    chars,
+    catalogTooBig: tooBigForCatalog,
+    rank,
+  });
 
   console.log(
     `[opencc]   ${candidates.length} model(s) for ${describeNeeds(needs)}` +
@@ -364,7 +371,9 @@ async function handleMessages(anthropicReq, res) {
   );
 
   const startedAt = Date.now();
-  const result = await callUpstream(anthropicReq, live.providers, live.streaming, undefined, chars);
+  const result = await callUpstream(
+    anthropicReq, live.providers, live.streaming, undefined, chars, live.rank,
+  );
 
   // Common to every outcome below; `served` and the rest are filled in by
   // whichever branch actually ends the request.

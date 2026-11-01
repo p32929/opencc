@@ -645,6 +645,31 @@ function tooSmallFor(entry, chars, catalogTooBig, baseUrl, model) {
   return Boolean(catalogTooBig(baseUrl, model, chars));
 }
 
+// How much your ranking is allowed to be worth.
+//
+// A thumb on the scale, not an override. The draw it is added to runs 0..1
+// and is dominated by what each model has actually done, so this is enough to
+// separate two models the record cannot tell apart and far too small to float
+// a model that keeps failing above one that works. Rank the providers however
+// you like: a top-ranked model that 400s every time still sinks.
+const PREFERENCE = 0.04;
+
+// Best-first list of base URLs -> a bonus per provider, best getting the most
+// and worst getting none. An empty ranking gives everyone nothing, which
+// leaves the ordering exactly as it was before any of this existed.
+export function preferenceOf(rank = []) {
+  if (rank.length < 2) return () => 0;
+  const place = new Map(rank.map((baseUrl, i) => [baseUrl, i]));
+  const last = rank.length - 1;
+  return (baseUrl) => {
+    const at = place.get(baseUrl);
+    // Not ranked at all: treated as the bottom rather than the top, so adding
+    // a provider never quietly promotes it above ones you have ranked.
+    if (at === undefined) return 0;
+    return PREFERENCE * (1 - at / last);
+  };
+}
+
 export function chooseOrder(attempts, kind, {
   lookup = statsFor,
   lookupOther = statsForOtherKinds,
@@ -655,7 +680,11 @@ export function chooseOrder(attempts, kind, {
   // catalogue has been loaded, which puts the ordering back to what the
   // record alone says.
   catalogTooBig = null,
+  // Your provider ranking, best first. Empty means no preference.
+  rank = [],
 } = {}) {
+  const prefer = preferenceOf(rank);
+
   const rows = attempts.map((attempt, position) => {
     const { baseUrl } = attempt.provider;
     const entry = lookup(baseUrl, attempt.model, kind);
@@ -667,7 +696,7 @@ export function chooseOrder(attempts, kind, {
       b,
       cooling: coolingFor(baseUrl, attempt.model, now),
       tooSmall: tooSmallFor(entry, chars, catalogTooBig, baseUrl, attempt.model),
-      draw: betaSample(a, b, rng) - slowness(meanMs(entry)),
+      draw: betaSample(a, b, rng) - slowness(meanMs(entry)) + prefer(baseUrl),
     };
   });
 

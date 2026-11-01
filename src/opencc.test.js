@@ -1897,3 +1897,106 @@ test("one provider reads as singular", async () => {
   );
   assert.match(out.message, /The provider is set up/);
 });
+
+// --- provider ranking ------------------------------------------------------
+
+// An aggregate as stats.js actually builds one. belief() reads the decayed
+// day buckets rather than the running totals, so a fixture with an empty
+// `days` is an untried model however big its ok/fail look.
+function record(ok, fail) {
+  const today = Math.floor(Date.now() / 86400000);
+  return {
+    ok, fail, statuses: {}, totalMs: 0, timed: 0, maxOk: 0, minTooBig: Infinity,
+    days: { [today]: { ok, fail, weighted: fail } },
+  };
+}
+
+test("ranking separates models the record cannot tell apart", async () => {
+  const { chooseOrder } = await import("./stats.js");
+  const attempts = [
+    { provider: { baseUrl: "https://slowpoke/v1" }, model: "m" },
+    { provider: { baseUrl: "https://favourite/v1" }, model: "m" },
+  ];
+  // Identical records, so only the ranking can order them. The counts have to
+  // live in a day bucket: that is what belief() decays and reads.
+  const same = record(20, 2);
+  const rank = ["https://favourite/v1", "https://slowpoke/v1"];
+
+  const out = chooseOrder(attempts, "tools", {
+    lookup: () => same, lookupOther: () => null, rng: () => 0.5, rank,
+  });
+  assert.equal(out.attempts[0].provider.baseUrl, "https://favourite/v1");
+
+  // and with no ranking at all nothing is added, so the order is whatever the
+  // draw said — here a tie, broken by position.
+  const none = chooseOrder(attempts, "tools", {
+    lookup: () => same, lookupOther: () => null, rng: () => 0.5,
+  });
+  assert.equal(none.attempts[0].provider.baseUrl, "https://slowpoke/v1", "first in, no preference applied");
+});
+
+test("ranking cannot float a model that keeps failing", async () => {
+  const { chooseOrder } = await import("./stats.js");
+  const attempts = [
+    { provider: { baseUrl: "https://broken/v1" }, model: "m" },
+    { provider: { baseUrl: "https://works/v1" }, model: "m" },
+  ];
+  const records = {
+    "https://broken/v1": record(0, 40),
+    "https://works/v1": record(40, 0),
+  };
+  // The broken one is ranked top. It must still lose.
+  const rank = ["https://broken/v1", "https://works/v1"];
+
+  for (const rng of [() => 0.1, () => 0.5, () => 0.9]) {
+    const out = chooseOrder(attempts, "tools", {
+      lookup: (baseUrl) => records[baseUrl], lookupOther: () => null, rng, rank,
+    });
+    assert.equal(out.attempts[0].provider.baseUrl, "https://works/v1",
+      "the record outranks the ranking, whatever the draw");
+  }
+});
+
+test("a provider you have not ranked sorts below the ones you have", async () => {
+  const { preferenceOf } = await import("./stats.js");
+  const prefer = preferenceOf(["https://a/v1", "https://b/v1", "https://c/v1"]);
+
+  assert.ok(prefer("https://a/v1") > prefer("https://b/v1"), "best gets the most");
+  assert.ok(prefer("https://b/v1") > prefer("https://c/v1"));
+  assert.equal(prefer("https://c/v1"), 0, "last ranked gets nothing");
+  // A provider added after you ranked must not jump the queue.
+  assert.equal(prefer("https://brand-new/v1"), 0);
+
+  // One provider, or none, is not a ranking.
+  assert.equal(preferenceOf(["https://a/v1"])("https://a/v1"), 0);
+  assert.equal(preferenceOf([])("https://a/v1"), 0);
+});
+
+test("the ranking survives a round trip through the config file", async () => {
+  const { mkdtempSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-rank-"));
+  const script = join(home, "run.mjs");
+  const here = new URL(".", import.meta.url).pathname;
+  writeFileSync(script, `
+    import { writeStoredConfig, readStoredConfig } from "${join(here, "configStore.js")}";
+    import { rankFromEnv } from "${join(here, "config.js")}";
+    const providers = [
+      { name: "a", baseUrl: "https://a.test/v1", apiKey: "", models: ["m"] },
+      { name: "b", baseUrl: "https://b.test/v1", apiKey: "", models: ["m"] },
+    ];
+    writeStoredConfig({ providers, port: "9753", rank: ["https://b.test/v1", "https://a.test/v1"] });
+    const back = rankFromEnv(readStoredConfig());
+    writeStoredConfig({ providers, port: "9753" });
+    console.log(JSON.stringify({ back, cleared: rankFromEnv(readStoredConfig()) }));
+  `);
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+
+  assert.deepEqual(out.back, ["https://b.test/v1", "https://a.test/v1"]);
+  // Not written at all when there is none, rather than written empty: an
+  // empty key would read back as a preference for nothing.
+  assert.deepEqual(out.cleared, []);
+});

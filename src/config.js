@@ -103,6 +103,18 @@ export function providersFromEnv(values) {
 // first, then hand it to Claude Code as a single-shot stream.
 // Exported so anything rewriting the config preserves the setting rather than
 // guessing at it.
+// Which providers you would rather use, best first, by base URL.
+//
+// Absent means no preference at all, which is the default and is not the same
+// as "the order they happen to sit in the file". Only the ranking dialog
+// writes this, so a preference is never inferred from how you added them.
+export function rankFromEnv(values) {
+  return (values.PROVIDER_RANK || "")
+    .split(",")
+    .map((url) => url.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+}
+
 export function streamingFromEnv(values) {
   return !["off", "false", "0", "no"].includes((values.STREAMING || "on").trim().toLowerCase());
 }
@@ -116,6 +128,7 @@ function readConfig() {
 
   return {
     providers: providersFromEnv(merged),
+    rank: rankFromEnv(merged),
     port: Number(merged.PORT || 3000),
     streaming,
   };
