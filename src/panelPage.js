@@ -190,6 +190,15 @@ export const page = () => `<!doctype html>
   .picks .n { font-weight: 600; color: var(--ink); margin-right: auto; }
 
   /* --- your models table ------------------------------------------------ */
+  .filters {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--rule);
+    border-radius: var(--r); padding: 9px 11px; margin-bottom: 10px;
+  }
+  .filters input[type=search] { flex: 1; min-width: 160px; font-family: inherit; }
+  .filters select { width: auto; flex: none; }
+  .filters .spacer { flex: 1; }
+
   .mt-top { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 10px; min-height: 30px; }
   .mt-top .sorts { margin-right: auto; font-size: 12.5px; color: var(--ink-3); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .chip { display: inline-flex; align-items: center; gap: 5px; background: var(--panel); border: 1px solid var(--rule-2); border-radius: 99px; padding: 3px 5px 3px 9px; font-size: 11.5px; color: var(--ink-2); }
@@ -389,6 +398,27 @@ export const page = () => `<!doctype html>
             a request is drawn from the Record column, fresh every time, so load spreads over what works.</p>
         </div>
         <div class="acts"><button class="primary" id="go-prov">Add models</button></div>
+      </div>
+      <div class="filters" id="filters">
+        <input type="search" id="f-q" placeholder="Search your models">
+        <select id="f-works" aria-label="Filter by test result">
+          <option value="">Any result</option>
+          <option value="works">Works</option>
+          <option value="failed">Failed</option>
+          <option value="untested">Not tested</option>
+        </select>
+        <select id="f-can" aria-label="Filter by what it can do">
+          <option value="">Any ability</option>
+          <option value="tools">Calls tools</option>
+          <option value="images">Reads images</option>
+          <option value="thinking">Thinks</option>
+          <option value="unknown">Not on models.dev</option>
+        </select>
+        <select id="f-prov" aria-label="Filter by provider"><option value="">Any provider</option></select>
+        <label class="chk"><input type="checkbox" id="f-free"> Free only</label>
+        <span class="spacer"></span>
+        <span id="f-count" class="meta"></span>
+        <button id="f-clear" class="sm ghost" hidden>Clear filters</button>
       </div>
       <div class="mt-top" id="mt-top"></div>
       <div id="run"></div>
@@ -1003,6 +1033,33 @@ async function removeModels(items) {
   toast(n === 1 ? items[0].model + " taken out" : n + " models taken out");
 }
 
+function drawFilters(total, shown) {
+  var sel = $("f-prov");
+  var want = S.providers.filter(function (p) { return p.models.length; });
+  // Rebuilt only when the set changes, or picking one would reset itself on
+  // every redraw.
+  if (sel.options.length !== want.length + 1) {
+    put(sel, h("option", { value: "" }, "Any provider"), want.map(function (p) {
+      return h("option", { value: p.baseUrl }, (p.name || p.label) + " (" + p.models.length + ")");
+    }));
+  }
+  if (sel.value !== FILTER.prov) sel.value = FILTER.prov;
+  if ($("f-q").value !== FILTER.q && document.activeElement !== $("f-q")) $("f-q").value = FILTER.q;
+  $("f-works").value = FILTER.works;
+  $("f-can").value = FILTER.can;
+  $("f-free").checked = FILTER.free;
+
+  $("f-count").textContent = filtering() ? shown + " of " + total + " shown" : total + " models";
+  $("f-clear").hidden = !filtering();
+  $("filters").hidden = total === 0;
+}
+
+function clearFilters() {
+  FILTER = { q: "", works: "", can: "", prov: "", free: false };
+  $("f-q").value = "";
+  drawMine();
+}
+
 // --- the last test, per model ---------------------------------------------
 // What a test came to, in one word: works, its status code, empty, no answer
 // or failed. Null while it runs, or before it has been tested.
@@ -1146,6 +1203,47 @@ var COLS = {
   },
 };
 
+// What the table is narrowed to. Everything that acts on "all" acts on what
+// is shown instead, which is the point: narrow to the ones that failed and
+// Take out, or to the ones that call tools and Test, without picking through
+// a thousand rows by hand.
+var FILTER = { q: "", works: "", can: "", prov: "", free: false };
+
+var filtering = function () {
+  return Boolean(FILTER.q || FILTER.works || FILTER.can || FILTER.prov || FILTER.free);
+};
+
+function passes(t) {
+  if (FILTER.prov && t.baseUrl !== FILTER.prov) return false;
+
+  if (FILTER.q) {
+    var q = FILTER.q.toLowerCase();
+    if (t.model.toLowerCase().indexOf(q) < 0 && String(t.name).toLowerCase().indexOf(q) < 0) return false;
+  }
+
+  if (FILTER.works) {
+    var r = TRIES[pk(t.i, t.model)];
+    var state = !r || r.going ? "untested" : r.ok ? "works" : "failed";
+    if (state !== FILTER.works) return false;
+  }
+
+  var d = facts(t.baseUrl, t.model);
+  if (FILTER.can === "unknown") {
+    if (d) return false;
+  } else if (FILTER.can) {
+    if (!d) return false;
+    if (FILTER.can === "tools" && !d.tools) return false;
+    if (FILTER.can === "images" && !d.vision) return false;
+    if (FILTER.can === "thinking" && !d.reasoning) return false;
+  }
+
+  // Unknown price is not free: a model models.dev has never heard of has not
+  // told anyone it costs nothing.
+  if (FILTER.free && !(d && d.input === 0 && d.output === 0)) return false;
+
+  return true;
+}
+
 function rows() {
   var out = [];
   S.providers.forEach(function (p, i) {
@@ -1213,8 +1311,10 @@ function yesNo(v) {
 }
 
 function drawMine() {
-  var list = rows();
+  var all = rows();
+  var list = all.filter(passes);
   var view = sortRows(list);
+  drawFilters(all.length, list.length);
 
   MINE.forEach(function (k) {
     var t = unpk(k);
@@ -1247,14 +1347,19 @@ function drawMine() {
     }, ranked() ? "Ranking \\u2713" : "Provider ranking") : null,
     list.length ? h("button", { className: "sm", title: "Ask models.dev again for context, price and abilities", onclick: refreshCatalog }, "Refresh from models.dev") : null,
     list.length ? h("button", { className: "sm", disabled: Boolean(running),
-      onclick: function () { testMany(view); } }, "Test all") : null);
+      title: filtering() ? "Only the models these filters show" : "Every model in the pot",
+      onclick: function () { testMany(view); } },
+      filtering() ? "Test these " + view.length : "Test all") : null);
 
   if (!list.length) {
     put($("outcomes"));
     put($("mt"), h("div", { className: "card" }, !ready
       ? h("div", { className: "loading" }, h("span", { className: "spin" }), "Loading your models")
-      : h("div", { className: "empty" },
-          "Nothing in the pot yet. ", h("a", { href: "#providers" }, "Pick some models under Providers"), ".")));
+      : all.length
+        ? h("div", { className: "empty" }, "No model matches these filters. ",
+            h("button", { className: "sm", onclick: clearFilters }, "Clear filters"))
+        : h("div", { className: "empty" },
+            "Nothing in the pot yet. ", h("a", { href: "#providers" }, "Pick some models under Providers"), ".")));
     return;
   }
 
@@ -1276,8 +1381,11 @@ function drawMine() {
         h("th", {}, h("input", {
           type: "checkbox", checked: allOn, indeterminate: picked.length > 0 && !allOn,
           "aria-label": "Select all",
+          title: filtering() ? "Select the models shown" : "Select all",
           onchange: function () {
-            if (allOn) MINE.clear();
+            // What is shown, not what exists: with a filter on, "all" means
+            // the rows you can see.
+            if (allOn) view.forEach(function (t) { MINE.delete(pk(t.i, t.model)); });
             else view.forEach(function (t) { MINE.add(pk(t.i, t.model)); });
             lastRow = null;
             drawMine();
@@ -1936,6 +2044,13 @@ $("go-prov").addEventListener("click", function () { location.hash = "#providers
 $("q").addEventListener("input", function (e) { query = e.target.value; drawProviders(); });
 $("free").addEventListener("change", function (e) { freeOnly = e.target.checked; drawProviders(); });
 $("sort").addEventListener("change", function (e) { catSort = e.target.value; drawProviders(); });
+$("f-q").addEventListener("input", function (e) { FILTER.q = e.target.value; drawMine(); });
+$("f-works").addEventListener("change", function (e) { FILTER.works = e.target.value; drawMine(); });
+$("f-can").addEventListener("change", function (e) { FILTER.can = e.target.value; drawMine(); });
+$("f-prov").addEventListener("change", function (e) { FILTER.prov = e.target.value; drawMine(); });
+$("f-free").addEventListener("change", function (e) { FILTER.free = e.target.checked; drawMine(); });
+$("f-clear").addEventListener("click", clearFilters);
+
 $("rank").addEventListener("click", rankingDialog);
 $("fold-all").addEventListener("click", function () {
   if (SHUT.size >= S.providers.length) SHUT.clear();
