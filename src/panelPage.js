@@ -401,21 +401,63 @@ export const page = () => `<!doctype html>
       </div>
       <div class="filters" id="filters">
         <input type="search" id="f-q" placeholder="Search your models">
-        <select id="f-works" aria-label="Filter by test result">
+        <select id="f-prov" aria-label="Provider"><option value="">Any provider</option></select>
+        <select id="f-works" aria-label="Test result">
           <option value="">Any result</option>
           <option value="works">Works</option>
           <option value="failed">Failed</option>
           <option value="untested">Not tested</option>
         </select>
-        <select id="f-can" aria-label="Filter by what it can do">
-          <option value="">Any ability</option>
-          <option value="tools">Calls tools</option>
-          <option value="images">Reads images</option>
-          <option value="thinking">Thinks</option>
-          <option value="unknown">Not on models.dev</option>
+        <!-- Each ability on its own, so they combine: tools yes and images no
+             is a question you can actually ask. -->
+        <select id="f-tools" aria-label="Tool calling">
+          <option value="">Tools: any</option>
+          <option value="yes">Calls tools</option>
+          <option value="no">No tools</option>
         </select>
-        <select id="f-prov" aria-label="Filter by provider"><option value="">Any provider</option></select>
-        <label class="chk"><input type="checkbox" id="f-free"> Free only</label>
+        <select id="f-thinking" aria-label="Thinking">
+          <option value="">Thinking: any</option>
+          <option value="yes">Thinks</option>
+          <option value="no">No thinking</option>
+        </select>
+        <select id="f-images" aria-label="Images">
+          <option value="">Images: any</option>
+          <option value="yes">Reads images</option>
+          <option value="no">No images</option>
+        </select>
+        <select id="f-count-of" aria-label="How many abilities">
+          <option value="">Abilities: any</option>
+          <option value="3">3 of 3</option>
+          <option value="2">2 of 3</option>
+          <option value="1">1 of 3</option>
+          <option value="0">0 of 3</option>
+        </select>
+        <select id="f-ctx" aria-label="Context window">
+          <option value="">Context: any</option>
+          <option value="1000000">1M or more</option>
+          <option value="256000">256k or more</option>
+          <option value="128000">128k or more</option>
+          <option value="32000">32k or more</option>
+          <option value="0">under 32k</option>
+        </select>
+        <select id="f-price" aria-label="Price">
+          <option value="">Price: any</option>
+          <option value="free">Free</option>
+          <option value="1">Under $1 / M in</option>
+          <option value="5">Under $5 / M in</option>
+          <option value="over">$5 / M in or more</option>
+        </select>
+        <select id="f-known" aria-label="Known to models.dev">
+          <option value="">Known: any</option>
+          <option value="yes">On models.dev</option>
+          <option value="no">Not found</option>
+        </select>
+        <select id="f-state" aria-label="In rotation">
+          <option value="">State: any</option>
+          <option value="live">In rotation</option>
+          <option value="parked">Parked</option>
+          <option value="off">Provider off</option>
+        </select>
         <span class="spacer"></span>
         <span id="f-count" class="meta"></span>
         <button id="f-clear" class="sm ghost" hidden>Clear filters</button>
@@ -1045,17 +1087,32 @@ function drawFilters(total, shown) {
   }
   if (sel.value !== FILTER.prov) sel.value = FILTER.prov;
   if ($("f-q").value !== FILTER.q && document.activeElement !== $("f-q")) $("f-q").value = FILTER.q;
-  $("f-works").value = FILTER.works;
-  $("f-can").value = FILTER.can;
-  $("f-free").checked = FILTER.free;
+  for (var key in CONTROLS) {
+    if ($(CONTROLS[key]).value !== FILTER[key]) $(CONTROLS[key]).value = FILTER[key];
+  }
 
   $("f-count").textContent = filtering() ? shown + " of " + total + " shown" : total + " models";
   $("f-clear").hidden = !filtering();
   $("filters").hidden = total === 0;
 }
 
+// Which control drives which part of the filter. One table, so adding a
+// filter is one line here and one <select> rather than four places to keep
+// in step.
+var CONTROLS = {
+  works: "f-works",
+  tools: "f-tools",
+  thinking: "f-thinking",
+  images: "f-images",
+  count: "f-count-of",
+  ctx: "f-ctx",
+  price: "f-price",
+  known: "f-known",
+  state: "f-state",
+};
+
 function clearFilters() {
-  FILTER = { q: "", works: "", can: "", prov: "", free: false };
+  FILTER = Object.assign({}, BLANK_FILTER);
   $("f-q").value = "";
   drawMine();
 }
@@ -1207,13 +1264,33 @@ var COLS = {
 // is shown instead, which is the point: narrow to the ones that failed and
 // Take out, or to the ones that call tools and Test, without picking through
 // a thousand rows by hand.
-var FILTER = { q: "", works: "", can: "", prov: "", free: false };
+var BLANK_FILTER = {
+  q: "", prov: "", works: "",
+  tools: "", thinking: "", images: "",
+  count: "", ctx: "", price: "", known: "", state: "",
+};
+var FILTER = Object.assign({}, BLANK_FILTER);
 
 var filtering = function () {
-  return Boolean(FILTER.q || FILTER.works || FILTER.can || FILTER.prov || FILTER.free);
+  return Object.keys(BLANK_FILTER).some(function (k) { return FILTER[k] !== BLANK_FILTER[k]; });
 };
 
+// Each ability on its own, so they combine. "Calls tools but cannot read
+// images" is a real question and a single dropdown could not ask it.
+//
+// A model models.dev has never heard of is not a no: it has said nothing.
+// So an ability filter of either kind leaves those out, and "Not found" is
+// its own choice rather than something to infer from empty columns.
+function can(d, key) {
+  if (!d) return null;
+  if (key === "tools") return Boolean(d.tools);
+  if (key === "thinking") return Boolean(d.reasoning);
+  return Boolean(d.vision);
+}
+
 function passes(t) {
+  var d = facts(t.baseUrl, t.model);
+
   if (FILTER.prov && t.baseUrl !== FILTER.prov) return false;
 
   if (FILTER.q) {
@@ -1227,19 +1304,45 @@ function passes(t) {
     if (state !== FILTER.works) return false;
   }
 
-  var d = facts(t.baseUrl, t.model);
-  if (FILTER.can === "unknown") {
-    if (d) return false;
-  } else if (FILTER.can) {
-    if (!d) return false;
-    if (FILTER.can === "tools" && !d.tools) return false;
-    if (FILTER.can === "images" && !d.vision) return false;
-    if (FILTER.can === "thinking" && !d.reasoning) return false;
+  var abilities = ["tools", "thinking", "images"];
+  for (var i = 0; i < abilities.length; i++) {
+    var want = FILTER[abilities[i]];
+    if (!want) continue;
+    var has = can(d, abilities[i]);
+    if (has === null) return false;
+    if ((want === "yes") !== has) return false;
   }
 
-  // Unknown price is not free: a model models.dev has never heard of has not
-  // told anyone it costs nothing.
-  if (FILTER.free && !(d && d.input === 0 && d.output === 0)) return false;
+  if (FILTER.count !== "") {
+    if (!d) return false;
+    var n = (d.tools ? 1 : 0) + (d.reasoning ? 1 : 0) + (d.vision ? 1 : 0);
+    if (n !== Number(FILTER.count)) return false;
+  }
+
+  if (FILTER.ctx !== "") {
+    if (!d || !d.context) return false;
+    var least = Number(FILTER.ctx);
+    if (least === 0 ? d.context >= 32000 : d.context < least) return false;
+  }
+
+  if (FILTER.price) {
+    // An unknown price is not a cheap one, and it is certainly not free.
+    if (!d || d.input === undefined) return false;
+    if (FILTER.price === "free") {
+      if (!(d.input === 0 && d.output === 0)) return false;
+    } else if (FILTER.price === "over") {
+      if (d.input < 5) return false;
+    } else if (d.input >= Number(FILTER.price)) {
+      return false;
+    }
+  }
+
+  if (FILTER.known === "yes" && !d) return false;
+  if (FILTER.known === "no" && d) return false;
+
+  if (FILTER.state === "live" && (t.off || t.parked)) return false;
+  if (FILTER.state === "parked" && !t.parked) return false;
+  if (FILTER.state === "off" && !t.off) return false;
 
   return true;
 }
@@ -2045,10 +2148,13 @@ $("q").addEventListener("input", function (e) { query = e.target.value; drawProv
 $("free").addEventListener("change", function (e) { freeOnly = e.target.checked; drawProviders(); });
 $("sort").addEventListener("change", function (e) { catSort = e.target.value; drawProviders(); });
 $("f-q").addEventListener("input", function (e) { FILTER.q = e.target.value; drawMine(); });
-$("f-works").addEventListener("change", function (e) { FILTER.works = e.target.value; drawMine(); });
-$("f-can").addEventListener("change", function (e) { FILTER.can = e.target.value; drawMine(); });
 $("f-prov").addEventListener("change", function (e) { FILTER.prov = e.target.value; drawMine(); });
-$("f-free").addEventListener("change", function (e) { FILTER.free = e.target.checked; drawMine(); });
+Object.keys(CONTROLS).forEach(function (key) {
+  $(CONTROLS[key]).addEventListener("change", function (e) {
+    FILTER[key] = e.target.value;
+    drawMine();
+  });
+});
 $("f-clear").addEventListener("click", clearFilters);
 
 $("rank").addEventListener("click", rankingDialog);
