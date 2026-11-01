@@ -427,53 +427,6 @@ export function allStats() {
   return rows;
 }
 
-// How many of your models can serve a given kind of request, as far as anyone
-// knows. One definition, used by the panel's coverage strip and by the check
-// that decides whether the proxy is worth exposing at all.
-//
-// "untried" is deliberately its own number rather than being lumped in with
-// "cannot": a model nobody has asked is not a model that failed, and the
-// difference decides whether a gap is a real problem or just unknown.
-// `says` is an optional second opinion — models.dev's published facts, via
-// catalogSays — consulted only where opencc has asked nothing yet. What a
-// model has actually done always wins: the catalogue describes a model, and
-// what matters here is whether this backend serves it that way.
-//
-// `proven` counts how much of `can` came from a real request, so the panel
-// can say which it is rather than presenting both as the same thing.
-export function coverage(providers, kind, lookup = statsFor, says = () => null) {
-  let can = 0;
-  let cannot = 0;
-  let untried = 0;
-  let proven = 0;
-
-  for (const provider of providers) {
-    if (provider.disabled) continue;
-    const parked = provider.disabledModels ?? [];
-    for (const model of provider.models) {
-      if (parked.includes(model)) continue;
-
-      const entry = lookup(provider.baseUrl, model, kind);
-      if (entry && entry.ok + entry.fail > 0) {
-        if (entry.ok > 0) {
-          can += 1;
-          proven += 1;
-        } else {
-          cannot += 1;
-        }
-        continue;
-      }
-
-      const published = says(provider.baseUrl, model, kind);
-      if (published === true) can += 1;
-      else if (published === false) cannot += 1;
-      else untried += 1;
-    }
-  }
-
-  return { can, cannot, untried, proven };
-}
-
 // --- short-term availability -----------------------------------------------
 
 // Rate limits and outages are not a judgement about the model, they are a

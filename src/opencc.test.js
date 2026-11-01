@@ -849,41 +849,6 @@ test("compaction shares a day out across statuses without losing any", () => {
   assert.equal(shares.reduce((sum, s) => sum + s.n, 0), count, "every result accounted for");
 });
 
-// --- warm-up ---------------------------------------------------------------
-
-import { pendingModels } from "./warmup.js";
-
-test("only models with no record are warmed up", () => {
-  const providers = [
-    { baseUrl: "https://one/v1", name: "one", models: ["fresh", "known"], disabled: false },
-    { baseUrl: "https://two/v1", name: "two", models: ["also-fresh"], disabled: false },
-    { baseUrl: "https://off/v1", name: "off", models: ["skipped"], disabled: true },
-  ];
-  const lookup = (baseUrl, model) => (model === "known" ? { ok: 3, fail: 1 } : null);
-
-  const groups = pendingModels(providers, "tools", lookup);
-  assert.deepEqual(
-    groups.map((g) => [g.provider.name, g.models]),
-    [["one", ["fresh"]], ["two", ["also-fresh"]]],
-    "a model with a record is left alone, and a disabled provider is skipped entirely",
-  );
-});
-
-test("a model whose record is empty still counts as pending", () => {
-  const providers = [{ baseUrl: "https://one/v1", name: "one", models: ["m"], disabled: false }];
-  const groups = pendingModels(providers, "tools", () => ({ ok: 0, fail: 0 }));
-  assert.deepEqual(groups[0].models, ["m"], "zero of zero is not a record");
-});
-
-test("parked models are not warmed up", () => {
-  const providers = [{
-    baseUrl: "https://one/v1", name: "one",
-    models: ["live", "parked"], disabledModels: ["parked"], disabled: false,
-  }];
-  assert.deepEqual(pendingModels(providers, "tools", () => null)[0].models, ["live"]);
-});
-
-
 test("a reset moves the log aside rather than deleting it", async (t) => {
   // Its own HOME, so the real record is never in reach of this test.
   const { mkdtempSync, writeFileSync, existsSync, readFileSync } = await import("node:fs");
@@ -1002,17 +967,6 @@ test("--reset-stats on an empty record says so and keeps any earlier backup", as
     "a reset with nothing to reset must not overwrite what is already there");
 });
 
-test("a failure reason is pulled out of whatever shape the provider used", async () => {
-  const { reason } = await import("./warmup.js");
-
-  assert.equal(reason('{"error":{"message":"rate limit exceeded"}}'), "rate limit exceeded");
-  assert.equal(reason('{"message":"model not found"}'), "model not found");
-  assert.equal(reason('{"status":403,"title":"Forbidden","detail":"Authorization failed"}'), "Authorization failed");
-  assert.equal(reason('{"status":403,"title":"Forbidden"}'), "Forbidden");
-  assert.equal(reason('{"error":"bad request"}'), "bad request");
-  assert.match(reason("<!DOCTYPE html>\n<html><title>Error 403</title></html>"), /^Error 403/);
-  assert.equal(reason("  plain  text  "), "plain text");
-});
 
 test("a result written by another process is picked up without a restart", async () => {
   // The panel tests a newly added model in its own process. A proxy already
@@ -1064,7 +1018,7 @@ test("the proxy stays down until a provider exists, then comes up on its own", a
   const panelPort = 3491;
   const proxyPort = 3492;
   const child = spawn(process.execPath, [
-    join(here, "cli.js"), "--panel-port", String(panelPort), "--port", String(proxyPort), "--no-warmup",
+    join(here, "cli.js"), "--panel-port", String(panelPort), "--port", String(proxyPort),
   ], { env: { ...process.env, HOME: home, OPENCC_NO_BROWSER: "1" }, stdio: "ignore" });
 
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1100,82 +1054,24 @@ test("the proxy stays down until a provider exists, then comes up on its own", a
   }
 });
 
-test("each kind of request is tracked separately for what still needs testing", () => {
-  const providers = [{
-    baseUrl: "https://one/v1", name: "one", models: ["m"], disabled: false,
-  }];
-  // tried for tools, never for images
-  const lookup = (baseUrl, model, kind) => (kind === "tools" ? { ok: 3, fail: 0 } : null);
 
-  assert.equal(pendingModels(providers, "tools", lookup).length, 0, "tools is covered");
-  assert.deepEqual(pendingModels(providers, "image", lookup)[0].models, ["m"], "images is not");
-});
 
-import { deadlineFor, warmUp } from "./warmup.js";
 
-test("the warm-up deadline scales with the longest provider queue", () => {
-  assert.ok(deadlineFor(8) > deadlineFor(2), "eight models need more runway than two");
-  assert.equal(deadlineFor(0), deadlineFor(1), "never zero");
-  assert.ok(deadlineFor(1000) <= 600000, "but it is capped");
-});
-
-test("a probe the deadline cut short is not held against the model", async (t) => {
-  const realFetch = globalThis.fetch;
-  t.after(() => (globalThis.fetch = realFetch));
-
-  // The first model answers; the second is still waiting when the deadline
-  // fires, which is exactly the case that used to record a false failure.
-  globalThis.fetch = async (url, init) => {
-    if (JSON.parse(init.body).model === "quick") {
-      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { tool_calls: [{}] } }] }) };
-    }
-    await new Promise((resolve, reject) => {
-      init.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
-    });
-  };
-
-  const saved = [];
-  await warmUp(
-    [{ baseUrl: "https://one/v1", name: "one", models: ["quick", "slow"], disabled: false, disabledModels: [] }],
-    { deadlineMs: 150, save: (row) => saved.push(row), lookup: () => null },
-  );
-
-  assert.deepEqual(saved.map((r) => r.model), ["quick"], "only the one that got a real turn");
-});
 
 // --- is it worth exposing the proxy at all ---------------------------------
 
-import { coverage } from "./stats.js";
 
 const pot = (models, parked = []) => [{
   baseUrl: "https://one/v1", name: "one", models, disabledModels: parked, disabled: false,
 }];
 
-test("coverage separates what works, what does not, and what nobody asked", () => {
-  const records = { good: { ok: 5, fail: 1 }, bad: { ok: 0, fail: 9 } };
-  const out = coverage(pot(["good", "bad", "new"]), "tools", (b, m) => records[m] ?? null);
-  assert.deepEqual(out, { can: 1, cannot: 1, untried: 1, proven: 1 });
-});
 
-test("coverage ignores parked models and switched-off providers", () => {
-  const lookup = () => ({ ok: 3, fail: 0 });
-  assert.equal(coverage(pot(["a", "b"], ["b"]), "tools", lookup).can, 1, "parked does not count");
 
-  const off = [{ baseUrl: "https://x/v1", models: ["a"], disabled: true, disabledModels: [] }];
-  assert.deepEqual(coverage(off, "tools", lookup), { can: 0, cannot: 0, untried: 0, proven: 0 });
-});
-
-test("an untried model is not the same as one that cannot", () => {
-  // The proxy starts on untried and refuses on proven-incapable, so these
-  // two must never collapse into one number.
-  const untried = coverage(pot(["m"]), "tools", () => null);
-  const proven = coverage(pot(["m"]), "tools", () => ({ ok: 0, fail: 20 }));
-
-  assert.deepEqual(untried, { can: 0, cannot: 0, untried: 1, proven: 0 });
-  assert.deepEqual(proven, { can: 0, cannot: 1, untried: 0, proven: 0 });
-});
-
-test("the proxy refuses to expose when nothing can call tools, and starts when something can", async () => {
+test("a model with nothing but failures no longer keeps the proxy down", async () => {
+  // It used to: the proxy refused to start unless something had proved it
+  // could call tools, which meant probing every model on every cold start to
+  // answer what models.dev already answers. A model that fails is a routing
+  // problem, and routing handles it by drawing something else.
   const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join, dirname } = await import("node:path");
@@ -1184,9 +1080,9 @@ test("the proxy refuses to expose when nothing can call tools, and starts when s
   const home = mkdtempSync(join(tmpdir(), "opencc-gate-"));
   mkdirSync(join(home, ".opencc"));
   const here = dirname(new URL(import.meta.url).pathname);
-  const panelPort = 3561;
-  const proxyPort = 3562;
 
+  const panelPort = 3493;
+  const proxyPort = 3494;
   writeFileSync(join(home, ".opencc", ".env"), [
     "OPENAI_BASE_URL=https://example.test/v1",
     "OPENAI_API_KEY=",
@@ -1195,18 +1091,15 @@ test("the proxy refuses to expose when nothing can call tools, and starts when s
     "",
   ].join("\n"));
 
-  // proven unable: tried for tools, never once succeeded
+  // Ten failures and not one success.
   const seed = join(home, "seed.mjs");
-  const write = (status) => {
-    writeFileSync(seed,
-      `import { record } from "${join(here, "stats.js")}";\n` +
-      `record({ baseUrl: "https://example.test/v1", model: "m", kind: "tools", status: ${status} });\n`);
-    execFileSync(process.execPath, [seed], { env: { ...process.env, HOME: home } });
-  };
-  for (let i = 0; i < 10; i++) write(400);
+  writeFileSync(seed,
+    `import { record } from "${join(here, "stats.js")}";\n` +
+    `for (let i = 0; i < 10; i++) record({ baseUrl: "https://example.test/v1", model: "m", kind: "tools", status: 400 });\n`);
+  execFileSync(process.execPath, [seed], { env: { ...process.env, HOME: home } });
 
   const child = spawn(process.execPath, [
-    join(here, "cli.js"), "--panel-port", String(panelPort), "--port", String(proxyPort), "--no-warmup",
+    join(here, "cli.js"), "--panel-port", String(panelPort), "--port", String(proxyPort),
   ], { env: { ...process.env, HOME: home, OPENCC_NO_BROWSER: "1" }, stdio: "ignore" });
 
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1218,23 +1111,8 @@ test("the proxy refuses to expose when nothing can call tools, and starts when s
   };
 
   try {
-    for (let i = 0; i < 40 && !(await up(panelPort)); i++) await wait(100);
-    assert.equal(await up(panelPort), true, "the panel is up so you can fix it");
-    assert.equal(await up(proxyPort), false, "the proxy is not, because nothing can call tools");
-
-    // one success changes the answer
-    write(200);
-    await fetch(`http://localhost:${panelPort}/api/state`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        providers: [{ baseUrl: "https://example.test/v1", apiKey: "", models: ["m"], disabled: false, disabledModels: [] }],
-        port: String(proxyPort), streaming: true,
-      }),
-    });
-
     for (let i = 0; i < 40 && !(await up(proxyPort)); i++) await wait(100);
-    assert.equal(await up(proxyPort), true, "and it comes up once something proves it can");
+    assert.equal(await up(proxyPort), true, "there is a provider with a model, so it serves");
   } finally {
     child.kill();
   }
@@ -1955,100 +1833,7 @@ test("a half-written line does not take the whole log listing down", async () =>
 
 // --- the catalogue removes work, it does not replace the record ------------
 
-test("a model models.dev vouches for is not probed again", async () => {
-  const { pendingModels } = await import("./warmup.js");
-  const providers = [{
-    baseUrl: "https://p.test/v1",
-    models: ["published-yes", "published-no", "never-heard-of-it"],
-    disabledModels: [],
-  }];
-  const nothingRecorded = () => null;
-  const says = (baseUrl, model) =>
-    model === "published-yes" ? true : model === "published-no" ? false : null;
 
-  // Published either way is an answer, so neither costs a request. Only the
-  // model nobody has published anything about is worth asking.
-  const [group] = pendingModels(providers, "tools", nothingRecorded, says);
-  assert.deepEqual(group.models, ["never-heard-of-it"]);
 
-  // With no catalogue at all every model is still probed, which is what
-  // happens when models.dev cannot be reached.
-  const [all] = pendingModels(providers, "tools", nothingRecorded, () => null);
-  assert.equal(all.models.length, 3);
-});
 
-test("a model that has already been asked is never probed, whatever is published", async () => {
-  const { pendingModels } = await import("./warmup.js");
-  const providers = [{ baseUrl: "https://p.test/v1", models: ["m"], disabledModels: [] }];
-  const hasRecord = () => ({ ok: 0, fail: 3 });
 
-  // It failed three times here. The catalogue saying it should work is not a
-  // reason to go and ask a fourth.
-  assert.deepEqual(pendingModels(providers, "tools", hasRecord, () => true), []);
-});
-
-test("coverage says how much of what it counts was actually checked", async () => {
-  const { coverage } = await import("./stats.js");
-  const providers = [{
-    baseUrl: "https://p.test/v1",
-    models: ["worked", "failed", "published-yes", "published-no", "unknown"],
-    disabledModels: [],
-  }];
-  const lookup = (baseUrl, model) =>
-    model === "worked" ? { ok: 4, fail: 0 } : model === "failed" ? { ok: 0, fail: 4 } : null;
-  const says = (baseUrl, model) =>
-    model === "published-yes" ? true : model === "published-no" ? false : null;
-
-  const out = coverage(providers, "tools", lookup, says);
-  assert.deepEqual(out, { can: 2, cannot: 2, untried: 1, proven: 1 });
-  // One of the two in `can` was proved by a real request; the other is only
-  // published. The panel says which, rather than showing them as the same.
-  assert.equal(out.can - out.proven, 1);
-});
-
-test("a real result overrules the catalogue in both directions", async () => {
-  const { coverage } = await import("./stats.js");
-  const providers = [{ baseUrl: "https://p.test/v1", models: ["m"], disabledModels: [] }];
-
-  // Published as capable, but it has failed every time it was asked here.
-  const failed = coverage(providers, "tools", () => ({ ok: 0, fail: 5 }), () => true);
-  assert.deepEqual(failed, { can: 0, cannot: 1, untried: 0, proven: 0 });
-
-  // Published as incapable, but it has done it here. A gateway can serve a
-  // model the catalogue does not have on file under a name that it does.
-  const worked = coverage(providers, "tools", () => ({ ok: 5, fail: 0 }), () => false);
-  assert.deepEqual(worked, { can: 1, cannot: 0, untried: 0, proven: 1 });
-});
-
-test("documents are never answered by the catalogue, only by asking", async () => {
-  const { catalogSays, loadCatalog, forgetCatalog } = await import("./modelsdev.js");
-  const { mkdtempSync, writeFileSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
-  const { execFileSync } = await import("node:child_process");
-
-  const home = mkdtempSync(join(tmpdir(), "opencc-doc-"));
-  const script = join(home, "run.mjs");
-  writeFileSync(script, `
-    import { loadCatalog, catalogSays } from ${JSON.stringify(new URL("./modelsdev.js", import.meta.url).href)};
-    await loadCatalog({ force: true, fetchImpl: async () => ({ ok: true, json: async () => ({
-      p: { api: "https://p.test/v1", models: { m: {
-        tool_call: true, modalities: { input: ["text", "image"] }, limit: { context: 1000 },
-      } } },
-    }) }) });
-    console.log(JSON.stringify({
-      tools: catalogSays("https://p.test/v1", "m", "tools"),
-      image: catalogSays("https://p.test/v1", "m", "image"),
-      document: catalogSays("https://p.test/v1", "m", "document"),
-      unknownModel: catalogSays("https://p.test/v1", "other", "tools"),
-    }));
-  `);
-  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
-
-  assert.equal(out.tools, true);
-  assert.equal(out.image, true);
-  // There is no published field for it: whether a backend accepts a PDF as an
-  // OpenAI `file` part is a property of the endpoint, not of the model.
-  assert.equal(out.document, null, "documents always have to be asked about");
-  assert.equal(out.unknownModel, null, "silence is not a no");
-});

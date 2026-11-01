@@ -1,22 +1,25 @@
 // The admin panel's single page. Kept as one string so opencc stays
 // dependency-free and there's nothing to build.
 //
-// There is nothing here for priority and nothing for capabilities, because
-// neither is something you set any more. Priority is read off what the
-// models have actually done, which is the only thing deciding what gets
-// called. Capabilities are read off models.dev where it knows the model, and
-// off a real request where it does not — the page marks which is which,
-// since one of the two has been checked and the other has not.
+// Two pages, answering two different questions.
 //
-// What is left is the part opencc cannot work out for itself: which backends
-// exist, what their keys are, and which models to put in the pot.
+//   Providers    what is on offer. Every model each backend serves,
+//                searchable across all of them, tick what you want.
+//   Your models  what is in the pot, as one table sortable by any column.
+//
+// What a model can do is read from models.dev: context window, price, tool
+// calling, images. Nothing here probes for it. Which model answers a given
+// request is a separate question, decided by what each one has actually done,
+// and the Record column is that number.
 const DARK = `
-      --bg: #0e1116; --panel: #151922; --panel-2: #1c222d;
-      --rule: #272e3a; --ink: #e7eaef; --ink-2: #aeb7c4; --ink-3: #828d9c;
-      --accent: #4d7dee; --accent-ink: #fff;
-      --ok: #6fd3a5; --ok-bg: #12291f;
-      --warn: #e4b261; --warn-bg: #2a2112;
-      --bad: #f08c8c; --bad-bg: #2c1818;`;
+    --bg: #0c0e12; --side: #10131a; --panel: #151922; --panel-2: #1b202a;
+    --rule: #262d39; --rule-2: #323a48; --hover: #1d2330;
+    --ink: #e7eaef; --ink-2: #aeb7c4; --ink-3: #7d8799;
+    --accent: #4d7dee; --accent-soft: rgba(77, 125, 238, .14); --accent-ink: #fff;
+    --ok: #6fd3a5; --ok-bg: rgba(111, 211, 165, .13);
+    --warn: #e4b261; --warn-bg: rgba(228, 178, 97, .13);
+    --bad: #f08c8c; --bad-bg: rgba(240, 140, 140, .13);
+    color-scheme: dark;`;
 
 export const page = () => `<!doctype html>
 <html lang="en">
@@ -24,933 +27,1193 @@ export const page = () => `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>opencc</title>
+<script>
+  // Before first paint, so a dark page never flashes white.
+  try {
+    var t = localStorage.getItem("opencc-theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
 <style>
-  /* One accent, neutral everything else. Two radii: 6px for containers,
-     4px for controls. Nothing else gets a corner. */
   :root {
-    --bg: #fbfbfc; --panel: #fff; --panel-2: #f4f6f8;
-    --rule: #e2e6eb; --ink: #161a21; --ink-2: #495362; --ink-3: #78828f;
-    --accent: #2b5fd9; --accent-ink: #fff;
-    --ok: #106844; --ok-bg: #e2f0e9;
-    --warn: #8a5806; --warn-bg: #f8eedc;
-    --bad: #9b2c2c; --bad-bg: #f7e7e7;
-    --r-box: 6px; --r-ctl: 4px;
+    --bg: #f7f8fa; --side: #fbfbfc; --panel: #fff; --panel-2: #f4f6f8;
+    --rule: #e4e7ec; --rule-2: #d3d8e0; --hover: #f0f2f5;
+    --ink: #161a21; --ink-2: #4b5563; --ink-3: #7b8595;
+    --accent: #2b5fd9; --accent-soft: #e9effc; --accent-ink: #fff;
+    --ok: #0f6b45; --ok-bg: #e4f2eb;
+    --warn: #8a5806; --warn-bg: #f9f0de;
+    --bad: #9b2c2c; --bad-bg: #f8e8e8;
+    --r: 8px; --r-s: 5px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: light;
   }
-  /* Dark twice over: once for the system setting, and once for the button in
-     the header. The media query is held off when the button has explicitly
-     asked for light, so a choice made here outlives the system flipping at
-     sunset. */
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) { ${DARK} }
-  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { ${DARK} } }
   :root[data-theme="dark"] { ${DARK} }
+
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink-2);
     font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
   }
-  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code, .mono { font-family: var(--mono); }
+  a { color: var(--accent); }
 
-  header {
-    position: sticky; top: 0; z-index: 20;
-    background: var(--panel); border-bottom: 1px solid var(--rule);
-    padding: 14px 20px;
+  /* --- frame ------------------------------------------------------------ */
+  .app { display: grid; grid-template-columns: 216px minmax(0, 1fr); min-height: 100vh; }
+  aside {
+    background: var(--side); border-right: 1px solid var(--rule);
+    padding: 16px 12px; position: sticky; top: 0; height: 100vh;
+    display: flex; flex-direction: column; gap: 4px; overflow-y: auto;
   }
-  .bar-top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-  h1 { font-size: 17px; color: var(--ink); margin: 0; letter-spacing: -.01em; }
-  #summary { font: 12.5px ui-monospace, monospace; color: var(--ink-3); }
-  .spacer { flex: 1; min-width: 0; }
-  .field-inline { display: flex; align-items: center; gap: 6px; }
-  .field-inline > span { font-size: 12px; color: var(--ink-3); white-space: nowrap; }
-  .sub { color: var(--ink-3); font-size: 12.5px; margin: 7px 0 0; }
-  .banner {
-    margin: 10px 0 0; padding: 9px 12px; border-radius: var(--r-ctl);
-    font-size: 13px; background: var(--warn-bg); color: var(--warn);
-    border: 1px solid currentColor;
+  .brand { display: flex; align-items: baseline; gap: 7px; padding: 0 8px 14px; }
+  .brand b { font-size: 16px; color: var(--ink); letter-spacing: -.01em; }
+  .brand small { font: 11px var(--mono); color: var(--ink-3); }
+  nav a {
+    display: flex; align-items: center; gap: 9px; padding: 8px 9px;
+    border-radius: var(--r-s); color: var(--ink-2); text-decoration: none; font-size: 13.5px;
   }
-  .banner.hide { display: none; }
+  nav a:hover { background: var(--hover); color: var(--ink); }
+  nav a.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  nav a .n { margin-left: auto; font: 11px var(--mono); color: var(--ink-3); }
+  nav a.on .n { color: var(--accent); }
+  .side-foot { margin-top: auto; padding-top: 14px; border-top: 1px solid var(--rule); display: grid; gap: 8px; }
+  .side-foot label { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); margin-bottom: 4px; }
+  .side-foot .row { display: flex; gap: 6px; }
+  .side-foot .row button { flex: 1; }
 
-  /* What Claude Code needs, and whether anything can serve it. The first
-     thing on the page, because a missing capability is the one problem the
-     per-model rows cannot show you: it is a property of the whole set. */
-  .cover { display: flex; gap: 8px; flex-wrap: wrap; margin: 11px 0 0; }
-  .cap {
-    display: flex; align-items: center; gap: 9px;
-    border: 1px solid var(--rule); border-radius: var(--r-ctl);
-    padding: 8px 11px; background: var(--panel-2);
+  main { padding: 22px 24px 60px; min-width: 0; }
+  @media (max-width: 760px) {
+    .app { grid-template-columns: minmax(0, 1fr); }
+    aside { position: static; height: auto; }
+    nav { display: flex; flex-wrap: wrap; gap: 4px; }
+    main { padding: 16px 14px 48px; }
   }
-  .cap.good { border-color: var(--ok); background: var(--ok-bg); }
-  .cap.none { border-color: var(--bad); background: var(--bad-bg); }
-  .cap.unk { border-color: var(--warn); background: var(--warn-bg); }
-  .cap b { font-size: 13px; color: var(--ink); font-weight: 600; }
-  .cap .n { font: 12px ui-monospace, monospace; }
-  .cap.good .n { color: var(--ok); }
-  .cap.none .n { color: var(--bad); }
-  .cap.unk .n { color: var(--warn); }
-  .cap button { padding: 4px 8px; font-size: 11.5px; }
-  main { padding: 16px 20px 72px; }
-  @media (max-width: 640px) {
-    header { padding: 12px 14px; }
-    main { padding: 12px 14px 56px; }
-  }
+  .page { display: none; }
+  .page.on { display: block; animation: in .16s ease-out; }
+  @keyframes in { from { opacity: 0; transform: translateY(3px); } }
+  @media (prefers-reduced-motion: reduce) { .page.on { animation: none; } }
 
-  input[type=text], input[type=password], input[type=number] {
-    width: 100%; padding: 7px 9px; border: 1px solid var(--rule);
-    border-radius: var(--r-ctl); background: var(--bg); color: var(--ink);
-    font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+  .head { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
+  .head h1 { font-size: 19px; color: var(--ink); margin: 0 0 3px; letter-spacing: -.015em; }
+  .head .lead { margin: 0; color: var(--ink-3); font-size: 13px; max-width: 72ch; }
+  .head .acts { margin-left: auto; display: flex; gap: 7px; flex-wrap: wrap; }
+
+  /* --- controls --------------------------------------------------------- */
+  input[type=text], input[type=password], input[type=number], input[type=search], select {
+    width: 100%; padding: 7px 9px; border: 1px solid var(--rule-2);
+    border-radius: var(--r-s); background: var(--panel); color: var(--ink);
+    font: 13px var(--mono);
   }
+  select { font-family: inherit; }
   input::placeholder { color: var(--ink-3); }
-  input:focus-visible, button:focus-visible, summary:focus-visible {
+  input:focus-visible, button:focus-visible, select:focus-visible, a:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 1px;
   }
-  label {
-    display: block; font-size: 11px; text-transform: uppercase;
-    letter-spacing: .06em; color: var(--ink-3); margin: 14px 0 5px;
-  }
-  label .hint { text-transform: none; letter-spacing: 0; color: var(--ink-3); }
+  input[type=checkbox] { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer; flex: none; }
   button {
     font: 500 12.5px/1 ui-sans-serif, system-ui, sans-serif; cursor: pointer;
-    background: var(--panel-2); color: var(--ink); border: 1px solid var(--rule);
-    border-radius: var(--r-ctl); padding: 7px 10px;
+    background: var(--panel); color: var(--ink); border: 1px solid var(--rule-2);
+    border-radius: var(--r-s); padding: 7px 10px; white-space: nowrap;
   }
-  button:hover:not(:disabled) { border-color: var(--ink-3); }
+  button:hover:not(:disabled) { background: var(--hover); }
   button:active:not(:disabled) { transform: translateY(1px); }
-  button:disabled { opacity: .4; cursor: default; }
+  button:disabled { opacity: .45; cursor: default; }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
   button.danger { color: var(--bad); }
-  button.icon { padding: 4px 8px; font-size: 12px; }
+  button.ghost { border-color: transparent; background: transparent; color: var(--ink-2); }
+  button.ghost:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
+  button.sm { padding: 4px 7px; font-size: 11.5px; }
+  .fld label { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); margin: 13px 0 4px; }
+  .fld label .hint { text-transform: none; letter-spacing: 0; }
 
-  .prov {
-    background: var(--panel); border: 1px solid var(--rule);
-    border-radius: var(--r-box); margin-bottom: 8px;
+  .tag {
+    font: 600 10px/1 var(--mono); text-transform: uppercase; letter-spacing: .04em;
+    padding: 3px 5px; border-radius: 3px; background: var(--panel-2); color: var(--ink-3); white-space: nowrap;
   }
-  .prov[data-off="1"] .head-name { color: var(--ink-3); text-decoration: line-through; }
-  .prov summary {
-    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 11px 13px; cursor: pointer; list-style: none;
-  }
-  .prov summary::-webkit-details-marker { display: none; }
-  .caret { color: var(--ink-3); font-size: 11px; width: 10px; flex: none; }
-  .prov[open] .caret { transform: rotate(90deg); }
-  .head-name { color: var(--ink); font-weight: 600; font-size: 14px; }
-  .head-url { color: var(--ink-3); font-size: 12px; }
-  .body { padding: 0 13px 14px; border-top: 1px solid var(--rule); }
-  .two { display: flex; gap: 12px; flex-wrap: wrap; }
-  .two > div { flex: 1; min-width: 240px; }
+  .tag.ok { background: var(--ok-bg); color: var(--ok); }
+  .tag.bad { background: var(--bad-bg); color: var(--bad); }
+  .tag.warn { background: var(--warn-bg); color: var(--warn); }
+  .tag.acc { background: var(--accent-soft); color: var(--accent); }
+  .muted { color: var(--ink-3); }
+  .meta { font: 11px var(--mono); color: var(--ink-3); white-space: nowrap; }
 
-  /* The add box sits above the list, not under it: with a dozen models in a
-     list, putting it last means scrolling past everything to add one more. */
-  .addbar {
-    display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
-    background: var(--panel-2); border: 1px solid var(--rule);
-    border-radius: var(--r-ctl); padding: 8px; margin-top: 6px;
+  /* --- providers page --------------------------------------------------- */
+  .card { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); overflow: hidden; }
+  .cat-top {
+    display: flex; align-items: center; gap: 9px; padding: 10px 13px;
+    border-bottom: 1px solid var(--rule); flex-wrap: wrap;
   }
-  .addbar input { flex: 1; min-width: 190px; background: var(--panel); }
-  .mlist { margin-top: 8px; }
-  .m {
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-    padding: 7px 2px; border-bottom: 1px solid var(--rule);
-  }
-  .m:last-child { border-bottom: 0; }
-  .m[data-off="1"] { opacity: .5; }
-  .m code { font-size: 12.5px; color: var(--ink); flex: 1; min-width: 180px; word-break: break-all; }
-  .m .acts { display: flex; gap: 4px; flex: none; }
+  .cat-top input[type=search] { flex: 1; min-width: 150px; font-family: inherit; }
+  .cat-top select, .cat-top button { flex: none; width: auto; }
+  .chk { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; white-space: nowrap; }
 
-  /* The record, per kind of request. This replaced the capability chips:
-     "does it call tools" and "is it any good at calling tools" turned out to
-     be the same question, and this answers both with the same number. */
-  .kinds { display: flex; gap: 4px; flex: none; }
-  .k {
-    font: 11px/1 ui-monospace, monospace; padding: 5px 6px;
-    border-radius: var(--r-ctl); white-space: nowrap; min-width: 76px; text-align: center;
+  .prov { border-bottom: 1px solid var(--rule); }
+  .prov:last-child { border-bottom: 0; }
+  .prov-h {
+    display: flex; align-items: center; gap: 9px; padding: 9px 13px;
+    background: var(--panel-2); cursor: pointer; flex-wrap: wrap;
   }
-  .k.good { color: var(--ok); background: var(--ok-bg); }
-  .k.mid { color: var(--warn); background: var(--warn-bg); }
-  .k.poor { color: var(--bad); background: var(--bad-bg); }
-  .k.none { color: var(--ink-3); background: var(--panel-2); }
-  /* Published, not proven: deliberately quieter than a real result, because
-     it is a weaker claim. */
-  .k.pub { color: var(--ink-3); background: var(--panel-2); border: 1px dashed var(--rule); padding: 4px 5px; }
-  .chip {
-    font: 600 10.5px/1 ui-monospace, monospace; text-transform: uppercase;
-    letter-spacing: .04em; padding: 4px 6px; border-radius: var(--r-ctl); white-space: nowrap;
-  }
-  .chip.no { color: var(--bad); background: var(--bad-bg); }
-  .chip.wait { color: var(--warn); background: var(--warn-bg); }
-  .chip.flat { color: var(--ink-3); background: var(--panel-2); }
-  .empty-list { color: var(--ink-3); font-size: 12.5px; padding: 10px 2px; border-bottom: 0; }
-  .nothing {
-    background: var(--panel); border: 1px dashed var(--rule);
-    border-radius: var(--r-box); padding: 36px; text-align: center; color: var(--ink-3);
-  }
+  .prov-h:hover { background: var(--hover); }
+  .prov.off .prov-h .nm { color: var(--ink-3); text-decoration: line-through; }
+  .prov-h .fold { border: 0; background: none; color: var(--ink-3); padding: 2px; font-size: 11px; transition: transform .14s; }
+  .prov.shut .fold { transform: rotate(-90deg); }
+  .prov.shut .rows, .prov.shut .note { display: none; }
+  .prov-h .who { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; overflow: hidden; }
+  .prov-h .nm { font-weight: 600; font-size: 14px; color: var(--ink); white-space: nowrap; }
+  .prov-h .url { font: 11px var(--mono); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .by-name { display: flex; gap: 5px; flex: none; }
+  .by-name input { width: 148px; font-size: 12px; padding: 5px 7px; }
 
-  .scrim {
-    position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40;
-    display: none; align-items: center; justify-content: center; padding: 20px;
-    backdrop-filter: blur(2px);
+  .rows { max-height: 62vh; overflow: auto; }
+  .mrow {
+    display: flex; align-items: center; gap: 9px; padding: 6px 13px 6px 30px;
+    border-top: 1px solid var(--rule); font-size: 13px;
   }
-  .scrim.show { display: flex; }
-  .dialog {
-    background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-box);
-    padding: 20px 22px; width: 100%; max-width: 520px;
-    max-height: calc(100vh - 40px); overflow: auto;
-  }
-  .dialog h2 { font-size: 16px; color: var(--ink); margin: 0 0 8px; }
-  .dialog p { margin: 0 0 4px; color: var(--ink-3); font-size: 13px; }
-  .dialog .err { color: var(--bad); min-height: 17px; font-size: 12.5px; margin-top: 8px; }
-  .dialog .acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
-  .kv { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--rule); font-size: 13px; }
-  .kv:last-of-type { border-bottom: 0; }
-  .kv b { color: var(--ink); font-weight: 600; min-width: 86px; }
-  .now { font: 12.5px ui-monospace, monospace; color: var(--ink); word-break: break-all; min-height: 18px; }
-  .spin {
-    display: inline-block; width: 13px; height: 13px; vertical-align: -2px; margin-right: 7px;
-    border: 2px solid var(--rule); border-top-color: var(--accent); border-radius: 50%;
-    animation: spin .7s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) {
-    .spin { animation-duration: 2.4s; }
-    button:active:not(:disabled) { transform: none; }
-  }
+  .mrow:hover { background: var(--hover); }
+  .mrow.taken { background: var(--accent-soft); }
+  .mrow .id { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12.5px; color: var(--ink); cursor: pointer; word-break: break-all; }
+  .mrow.taken .id { font-weight: 600; }
+  .note { padding: 10px 13px 12px 30px; font-size: 12.5px; color: var(--ink-3); border-top: 1px solid var(--rule); }
+  .note.err { color: var(--bad); }
 
-  /* --- what models.dev knows, shown beside the record ------------------ */
-  .meta {
-    display: flex; gap: 5px; flex: none; align-items: center;
-    font: 11px/1 ui-monospace, monospace; color: var(--ink-3);
+  .picks {
+    display: flex; align-items: center; gap: 9px; padding: 9px 13px; flex-wrap: wrap;
+    border-top: 1px solid var(--accent); background: var(--accent-soft); font-size: 13px;
   }
-  .meta span { white-space: nowrap; }
+  .picks .n { font-weight: 600; color: var(--ink); margin-right: auto; }
 
-  /* --- the request log ------------------------------------------------- */
-  .card {
-    background: var(--panel); border: 1px solid var(--rule);
-    border-radius: var(--r-box); margin-top: 16px;
-  }
-  .reqs-top {
-    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 11px 13px; border-bottom: 1px solid var(--rule);
-  }
-  .reqs-top h2 { font-size: 14px; color: var(--ink); margin: 0; font-weight: 600; }
-  .seg { display: flex; border: 1px solid var(--rule); border-radius: var(--r-ctl); overflow: hidden; }
-  .seg button { border: 0; border-radius: 0; background: var(--panel); padding: 6px 11px; }
-  .seg button + button { border-left: 1px solid var(--rule); }
+  /* --- your models table ------------------------------------------------ */
+  .mt-top { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 10px; min-height: 30px; }
+  .mt-top .sorts { margin-right: auto; font-size: 12.5px; color: var(--ink-3); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; background: var(--panel); border: 1px solid var(--rule-2); border-radius: 99px; padding: 3px 5px 3px 9px; font-size: 11.5px; color: var(--ink-2); }
+  .chip button { border: 0; background: none; padding: 0 2px; color: var(--ink-3); font-size: 12px; }
+
+  .mt-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); }
+  table.mt { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.mt th, table.mt td { padding: 7px 9px; text-align: left; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  table.mt thead th { background: var(--panel-2); position: sticky; top: 0; z-index: 1; font-weight: 600; font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; }
+  table.mt thead th button { border: 0; background: none; padding: 2px 0; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; }
+  table.mt thead th button:hover { color: var(--ink); background: none; }
+  table.mt thead th button.on { color: var(--accent); }
+  table.mt tbody tr:last-child td { border-bottom: 0; }
+  table.mt tbody tr:hover { background: var(--hover); }
+  table.mt tr.picked { background: var(--accent-soft); }
+  table.mt tr.dim td { opacity: .45; }
+  table.mt td.m { font-family: var(--mono); font-size: 12.5px; color: var(--ink); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+  table.mt td.num, table.mt th.num { text-align: right; font-family: var(--mono); font-size: 12px; }
+  .yes { color: var(--ok); font-weight: 700; }
+  .no { color: var(--ink-3); }
+  .acts { display: flex; gap: 4px; align-items: center; }
+  .empty { padding: 40px; text-align: center; color: var(--ink-3); }
+
+  /* --- requests --------------------------------------------------------- */
+  .seg { display: flex; border: 1px solid var(--rule-2); border-radius: var(--r-s); overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 6px 11px; }
+  .seg button + button { border-left: 1px solid var(--rule-2); }
   .seg button.on { background: var(--accent); color: var(--accent-ink); }
-  #reqcount { font: 12px ui-monospace, monospace; color: var(--ink-3); }
-
-  /* Two panes side by side, stacked once there is no room: the detail is
-     long lines of error text, which is unreadable in a narrow column. */
-  .reqs { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); min-height: 150px; }
-  @media (max-width: 860px) { .reqs { grid-template-columns: minmax(0, 1fr); } }
-  .req-list { max-height: 420px; overflow: auto; border-right: 1px solid var(--rule); }
-  @media (max-width: 860px) {
-    .req-list { border-right: 0; border-bottom: 1px solid var(--rule); max-height: 260px; }
-  }
-  .req {
-    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-    padding: 8px 13px; border: 0; border-bottom: 1px solid var(--rule);
-    border-radius: 0; background: transparent; font-size: 12.5px;
-  }
-  .req:hover { background: var(--panel-2); }
-  .req.on { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
-  .req .when { font: 11.5px ui-monospace, monospace; color: var(--ink-3); flex: none; }
+  .reqs { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); }
+  @media (max-width: 900px) { .reqs { grid-template-columns: minmax(0, 1fr); } }
+  .req-list { max-height: 440px; overflow: auto; border-right: 1px solid var(--rule); }
+  @media (max-width: 900px) { .req-list { border-right: 0; border-bottom: 1px solid var(--rule); max-height: 240px; } }
+  .req { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 8px 13px; border: 0; border-bottom: 1px solid var(--rule); border-radius: 0; background: none; font-size: 12.5px; }
+  .req:hover { background: var(--hover); }
+  .req.on { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+  .req .when { font: 11.5px var(--mono); color: var(--ink-3); flex: none; }
   .req .who { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
   .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--ink-3); }
-  .dot.ok { background: var(--ok); }
-  .dot.bad { background: var(--bad); }
-  .req-detail { padding: 13px; overflow: auto; max-height: 420px; font-size: 12.5px; }
-  .req-detail .empty { color: var(--ink-3); }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .req-detail { padding: 13px; overflow: auto; max-height: 440px; font-size: 12.5px; }
+  .kv { display: flex; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--rule); }
+  .kv b { color: var(--ink); font-weight: 600; min-width: 92px; flex: none; }
+  .kv span { word-break: break-word; }
   .walk { margin: 10px 0 0; padding: 0; list-style: none; }
-  .walk li {
-    padding: 7px 0; border-bottom: 1px solid var(--rule);
-    font: 12px ui-monospace, monospace; color: var(--ink-2);
-  }
+  .walk li { padding: 7px 0; border-bottom: 1px solid var(--rule); font: 12px var(--mono); }
   .walk li:last-child { border-bottom: 0; }
   .walk .err { color: var(--bad); white-space: pre-wrap; word-break: break-word; margin-top: 3px; }
 
-  /* --- browsing a provider's catalogue --------------------------------- */
-  .dialog.wide { max-width: 720px; }
-  .cat-top { display: flex; gap: 8px; align-items: center; margin: 12px 0 8px; flex-wrap: wrap; }
-  .cat-top input[type=text] { flex: 1; min-width: 180px; }
-  .cat-list { border: 1px solid var(--rule); border-radius: var(--r-ctl); max-height: 46vh; overflow: auto; }
-  .cat-row {
-    display: flex; align-items: center; gap: 9px; padding: 7px 10px;
-    border-bottom: 1px solid var(--rule);
-  }
-  .cat-row:last-child { border-bottom: 0; }
-  .cat-row:hover { background: var(--panel-2); }
-  .cat-row input { flex: none; margin: 0; }
-  .cat-row label { margin: 0; text-transform: none; letter-spacing: 0; font-size: 12.5px;
-    color: var(--ink); font-family: ui-monospace, monospace; flex: 1; min-width: 0;
-    word-break: break-all; cursor: pointer; }
-  .cat-row .meta { font-size: 11px; }
-  .cat-row[data-have="1"] label { color: var(--ink-3); }
-  .cat-none { padding: 14px; color: var(--ink-3); font-size: 12.5px; }
-
-  .toast {
-    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 50;
-    background: var(--ink); color: var(--bg); padding: 8px 13px; border-radius: var(--r-ctl);
-    font-size: 13px; opacity: 0; transition: opacity .18s; pointer-events: none;
-  }
+  /* --- dialog / toast --------------------------------------------------- */
+  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40; display: none; align-items: center; justify-content: center; padding: 20px; }
+  .scrim.show { display: flex; }
+  .dialog { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); padding: 18px 20px; width: 100%; max-width: 520px; max-height: calc(100vh - 40px); overflow: auto; }
+  .dialog.wide { max-width: 760px; }
+  .dialog h2 { font-size: 16px; color: var(--ink); margin: 0 0 6px; }
+  .dialog p { margin: 0 0 4px; color: var(--ink-3); font-size: 13px; }
+  .dialog .err { color: var(--bad); min-height: 17px; font-size: 12.5px; margin-top: 8px; }
+  .dialog .btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+  .dialog .btns .left { margin-right: auto; }
+  pre.dump { background: var(--panel-2); border: 1px solid var(--rule); border-radius: var(--r-s); padding: 9px; font: 11.5px/1.5 var(--mono); max-height: 230px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: 5px 0 0; color: var(--ink-2); }
+  .spin { display: inline-block; width: 12px; height: 12px; vertical-align: -1px; margin-right: 6px; border: 2px solid var(--rule-2); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 2.4s; } }
+  .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 50; background: var(--ink); color: var(--bg); padding: 9px 14px; border-radius: var(--r-s); font-size: 13px; opacity: 0; transition: opacity .18s; pointer-events: none; max-width: 80vw; }
   .toast.show { opacity: 1; }
+  .toast.bad { background: var(--bad); color: #fff; }
 </style>
 </head>
 <body>
-<header>
-  <div class="bar-top">
-    <h1>opencc</h1>
-    <span id="summary"></span>
-    <span class="spacer"></span>
-    <span class="field-inline">
-      <span title="The port the proxy listens on when you run opencc. Editing it here changes that setting; it starts nothing.">Proxy port</span>
-      <input type="number" id="port" style="width:84px" min="1" max="65535">
-    </span>
-    <button id="streaming"></button>
-    <button id="catalog" title="Context windows, prices and what each model can do, published by models.dev. Click to fetch it again.">models.dev</button>
-    <button id="theme" title="Switch between light and dark"></button>
-    <button id="refresh" title="Re-read the record from disk">Refresh</button>
-    <button id="testnew" title="Send one request to every model with no record yet">Test new</button>
-    <button id="reset" class="danger" title="Forget every result and start over">Reset record</button>
-    <button class="primary" id="add">Add provider</button>
-  </div>
-  <p class="sub" id="where"></p>
-  <div class="cover" id="cover"></div>
-  <p class="banner hide" id="banner"></p>
-</header>
-
-<main>
-  <div id="list"></div>
-
-  <!-- Every request the proxy served. The terminal says the same things, but
-       only until it scrolls away, and the one question worth asking after a
-       failure is which models were tried and what each of them said. -->
-  <section class="card" id="reqs">
-    <div class="reqs-top">
-      <h2>Requests</h2>
-      <div class="seg" id="reqfilter">
-        <button data-f="all" class="on">All</button>
-        <button data-f="failed">Failed</button>
-        <button data-f="fallback" title="Served, but not by the first model tried">Fallbacks</button>
+<div class="app">
+  <aside>
+    <div class="brand"><b>opencc</b><small id="ver"></small></div>
+    <nav id="nav">
+      <a href="#models" data-page="models">Your models <span class="n" id="n-models"></span></a>
+      <a href="#providers" data-page="providers">Providers <span class="n" id="n-prov"></span></a>
+      <a href="#requests" data-page="requests">Requests <span class="n" id="n-reqs"></span></a>
+    </nav>
+    <div class="side-foot">
+      <div>
+        <label for="port">Proxy port</label>
+        <input type="number" id="port" min="1" max="65535">
       </div>
-      <span class="spacer"></span>
-      <span id="reqcount"></span>
-      <button id="reqclear" class="danger">Clear</button>
+      <div class="row">
+        <button id="streaming"></button>
+        <button id="theme" title="Light or dark"></button>
+      </div>
+      <button id="catalog"></button>
+      <button id="reset" class="danger" title="Forget every result and start over">Reset record</button>
     </div>
-    <div class="reqs">
-      <div class="req-list" id="reqlist"></div>
-      <div class="req-detail" id="reqdetail"><p class="empty">Pick a request to see every model it tried.</p></div>
-    </div>
-  </section>
-</main>
+  </aside>
 
-<div class="toast" id="toast"></div>
+  <main>
+    <section class="page" id="page-models">
+      <div class="head">
+        <div>
+          <h1>Your models</h1>
+          <p class="lead">Everything opencc can route to. Order here means nothing: which one answers
+            a request is drawn from the Record column, fresh every time, so load spreads over what works.</p>
+        </div>
+        <div class="acts"><button class="primary" id="go-prov">Add models</button></div>
+      </div>
+      <div class="mt-top" id="mt-top"></div>
+      <div id="mt"></div>
+    </section>
+
+    <section class="page" id="page-providers">
+      <div class="head">
+        <div>
+          <h1>Providers</h1>
+          <p class="lead">Every model your backends serve. Click one to put it in the pot, or tick
+            several. Context, price and abilities come from models.dev.</p>
+        </div>
+        <div class="acts"><button class="primary" id="add-prov">Add a provider</button></div>
+      </div>
+      <div class="card">
+        <div class="cat-top">
+          <input type="checkbox" id="pick-all" title="Select every model shown">
+          <input type="search" id="q" placeholder="Search every model">
+          <label class="chk"><input type="checkbox" id="free"> Free only</label>
+          <select id="sort" aria-label="Sort models">
+            <option value="name">Sort by name</option>
+            <option value="price">Sort by price</option>
+            <option value="context">Sort by context</option>
+          </select>
+          <button id="fold-all">Collapse all</button>
+        </div>
+        <div id="plist"></div>
+        <div class="picks" id="picks" hidden></div>
+      </div>
+    </section>
+
+    <section class="page" id="page-requests">
+      <div class="head">
+        <div>
+          <h1>Requests</h1>
+          <p class="lead">What the proxy actually served: which models were tried, what each
+            answered, and which one replied.</p>
+        </div>
+        <div class="acts">
+          <div class="seg" id="reqfilter">
+            <button data-f="all" class="on">All</button>
+            <button data-f="failed">Failed</button>
+            <button data-f="fallback" title="Served, but not by the first model tried">Fallbacks</button>
+          </div>
+          <button id="reqclear" class="danger">Clear</button>
+        </div>
+      </div>
+      <div class="card reqs">
+        <div class="req-list" id="reqlist"></div>
+        <div class="req-detail" id="reqdetail"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
 <div class="scrim" id="scrim" role="dialog" aria-modal="true"><div class="dialog" id="dialog"></div></div>
+<div class="toast" id="toast" role="status"></div>
 
 <script>
-let state = { providers: [], port: "3000", streaming: true };
-let records = {};
-let cooling = {};
-let kinds = ["tools", "image", "document"];
-let coverageFromServer = {};
-// What models.dev says about the configured models, keyed the same way the
-// record is. Empty when the catalogue could not be fetched, which is why
-// everything that reads it treats a miss as "not known" rather than "no".
-let catalogKnown = {};
-let requests = [];
-let reqFilter = "all";
-// The timestamp of the open request, not its position: the list is newest
-// first, so a request arriving while one is open would shift every index and
-// the detail pane would silently start describing a different request.
-let reqPicked = null;
-const expanded = new Set();
+"use strict";
+var $ = function (id) { return document.getElementById(id); };
 
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const attr = (s) => esc(s).replace(/'/g, "&#39;");
-const keyOf = (baseUrl, model) => baseUrl + "|" + model;
+// Tiny DOM builder. Everything goes through it rather than innerHTML, so a
+// model name with an angle bracket in it cannot break the page.
+function h(tag, props) {
+  var el = document.createElement(tag);
+  props = props || {};
+  for (var k in props) {
+    var v = props[k];
+    if (v === null || v === undefined || v === false) continue;
+    if (k.slice(0, 2) === "on") el.addEventListener(k.slice(2), v);
+    else if (k in el) el[k] = v;
+    else el.setAttribute(k, v);
+  }
+  add(el, Array.prototype.slice.call(arguments, 2));
+  return el;
+}
+function add(el, kids) {
+  for (var i = 0; i < kids.length; i++) {
+    var k = kids[i];
+    if (k === null || k === undefined || k === false) continue;
+    if (Array.isArray(k)) add(el, k);
+    else el.append(k);
+  }
+}
+function put(el) { el.replaceChildren(); add(el, Array.prototype.slice.call(arguments, 1)); return el; }
 
-// --- theme ----------------------------------------------------------------
-// The system setting decides until the button is pressed; after that the
-// choice is remembered in this browser. Nothing server-side: it is a
-// preference of the screen you are looking at, not of the install.
+// --- state ----------------------------------------------------------------
+var S = { providers: [], port: "3000", streaming: true, version: "" };
+var REC = {};        // "baseUrl|model" -> { kind: {ok, fail, statuses} }
+var COOL = {};
+var CAT = {};        // "baseUrl|model" -> models.dev facts, for configured models
+var CATINFO = { size: 0, age: null };
+var LISTS = {};      // provider index -> { models, error, loading }
+var REQS = [];
+var reqFilter = "all";
+var reqPicked = null;
+
+var PICKED = new Set();   // "i|model" ticked in the catalogue
+var MINE = new Set();     // "i|model" ticked in the table
+var SHUT = new Set();     // collapsed providers
+var SORT = [];
+var query = "";
+var freeOnly = false;
+var catSort = "name";
+var lastRow = null;
+
+var key = function (baseUrl, model) { return baseUrl + "|" + model; };
+var pk = function (i, model) { return i + "|" + model; };
+var unpk = function (k) {
+  var at = k.indexOf("|");
+  return { i: Number(k.slice(0, at)), model: k.slice(at + 1) };
+};
+
+// --- small helpers --------------------------------------------------------
+var toastTimer;
+function toast(msg, bad) {
+  var t = $("toast");
+  t.textContent = msg;
+  t.className = "toast show" + (bad ? " bad" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { t.className = "toast"; }, bad ? 6000 : 2400);
+}
+
+function kTok(n) {
+  if (!n) return "-";
+  if (n >= 1000000) return (Math.round(n / 100000) / 10) + "M";
+  if (n >= 1000) return Math.round(n / 1000) + "k";
+  return String(n);
+}
+function usd(x) {
+  if (x === null || x === undefined) return "-";
+  if (x === 0) return "free";
+  if (x < 0.01) return "$" + x.toFixed(4);
+  if (x < 1) return "$" + x.toFixed(3).replace(/0$/, "");
+  return "$" + x.toFixed(2);
+}
+function ago(at) {
+  var s = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  return new Date(at).toLocaleDateString();
+}
+function byName(a, b) {
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+}
+
+// What this model has actually done, across every kind of request. This is
+// the number routing is drawn from, so it is the one column that is about
+// opencc rather than about models.dev.
+function recOf(baseUrl, model) {
+  var r = REC[key(baseUrl, model)] || {};
+  var ok = 0, fail = 0;
+  for (var k in r) { ok += r[k].ok; fail += r[k].fail; }
+  return { ok: ok, fail: fail, total: ok + fail, pct: ok + fail ? Math.round((ok / (ok + fail)) * 100) : null };
+}
+function facts(baseUrl, model) { return CAT[key(baseUrl, model)] || null; }
+var isFree = function (d) { return Boolean(d) && d.input === 0 && d.output === 0; };
+var costOf = function (d) { return d && d.input !== undefined ? d.input + (d.output || 0) : Infinity; };
+
+// --- api ------------------------------------------------------------------
+async function api(path, opts) {
+  var res = await fetch(path, opts);
+  if (!res.ok) {
+    var body = await res.json().catch(function () { return {}; });
+    throw new Error(body.error || ("HTTP " + res.status));
+  }
+  return res.json();
+}
+function post(path, body) {
+  return api(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+}
+
+// --- dialogs --------------------------------------------------------------
+var closeDialog = null;
+function openDialog(nodes, opts) {
+  put($("dialog"), nodes);
+  $("dialog").className = "dialog" + (opts && opts.wide ? " wide" : "");
+  $("scrim").classList.add("show");
+  closeDialog = function () {
+    $("scrim").classList.remove("show");
+    $("dialog").replaceChildren();
+    closeDialog = null;
+    if (opts && opts.onClose) opts.onClose();
+  };
+  var first = $("dialog").querySelector("input, button");
+  if (first) first.focus();
+}
+document.addEventListener("keydown", function (e) { if (e.key === "Escape" && closeDialog) closeDialog(); });
+$("scrim").addEventListener("mousedown", function (e) { if (e.target === $("scrim") && closeDialog) closeDialog(); });
+
+function ask(title, body, yes) {
+  return new Promise(function (resolve) {
+    var done = false;
+    openDialog([
+      h("h2", {}, title),
+      h("p", {}, body),
+      h("div", { className: "btns" },
+        h("button", { onclick: function () { if (closeDialog) closeDialog(); } }, "Cancel"),
+        h("button", { className: "primary danger", onclick: function () {
+          done = true; resolve(true); if (closeDialog) closeDialog();
+        } }, yes)),
+    ], { onClose: function () { if (!done) resolve(false); } });
+  });
+}
+
+// --- loading --------------------------------------------------------------
+async function loadState() { S = await api("/api/state"); }
+
+async function loadRecord() {
+  try {
+    var out = await api("/api/stats");
+    COOL = out.cooling || {};
+    REC = {};
+    out.rows.forEach(function (row) {
+      var k = key(row.baseUrl, row.model);
+      (REC[k] || (REC[k] = {}))[row.kind] = row;
+    });
+  } catch (e) { REC = {}; COOL = {}; }
+}
+
+async function loadCatalog() {
+  try {
+    var out = await api("/api/catalog");
+    CAT = out.known || {};
+    CATINFO = { size: out.size || 0, age: out.age };
+  } catch (e) { CAT = {}; CATINFO = { size: 0, age: null }; }
+  drawCatalogButton();
+}
+
+async function loadRequests() {
+  try { REQS = (await api("/api/requests")).items || []; } catch (e) { REQS = []; }
+  drawRequests();
+}
+
+// A provider's own model list. Fetched once and kept, because it is a network
+// round trip per provider and the Providers page wants all of them at once to
+// search across.
+async function loadList(i, fresh) {
+  if (LISTS[i] && !fresh) return LISTS[i];
+  LISTS[i] = { models: (LISTS[i] && LISTS[i].models) || [], loading: true, error: "" };
+  drawProviders();
+  try {
+    var out = await api("/api/catalogue?index=" + i);
+    LISTS[i] = { models: out.models || [], loading: false, error: out.error || "" };
+  } catch (e) {
+    LISTS[i] = { models: [], loading: false, error: e.message };
+  }
+  drawProviders();
+  return LISTS[i];
+}
+
+async function save(providers) {
+  var list = providers || S.providers;
+  var payload = {
+    providers: list.map(function (p) {
+      return {
+        name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey,
+        models: p.models, disabled: p.disabled, disabledModels: p.disabledModels || [],
+      };
+    }),
+    port: S.port,
+    streaming: S.streaming,
+  };
+  var before = list.length;
+  S = await post("/api/state", payload);
+  if (S.providers.length < before) toast("A provider needs a base URL and at least one model, so it was not kept", true);
+  drawAll();
+}
+
+// --- pages ----------------------------------------------------------------
+var PAGES = ["models", "providers", "requests"];
+function current() {
+  var want = location.hash.slice(1);
+  return PAGES.indexOf(want) >= 0 ? want : "models";
+}
+function showPage() {
+  var now = current();
+  PAGES.forEach(function (p) { $("page-" + p).classList.toggle("on", p === now); });
+  Array.prototype.forEach.call(document.querySelectorAll("nav a"), function (a) {
+    a.classList.toggle("on", a.dataset.page === now);
+  });
+  if (now === "providers") {
+    S.providers.forEach(function (p, i) { if (!LISTS[i]) loadList(i); });
+  }
+}
+window.addEventListener("hashchange", showPage);
+
+// --- sidebar --------------------------------------------------------------
 function currentTheme() {
   return document.documentElement.dataset.theme ||
     (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
 }
+function drawTheme() { $("theme").textContent = currentTheme() === "dark" ? "Light" : "Dark"; }
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawTheme);
 
-function paintTheme() {
-  $("theme").textContent = currentTheme() === "dark" ? "Light" : "Dark";
-}
-
-try {
-  const saved = localStorage.getItem("opencc-theme");
-  if (saved === "dark" || saved === "light") document.documentElement.dataset.theme = saved;
-} catch {
-  // Private windows and blocked storage: the system setting still applies.
-}
-
-function flipTheme() {
-  const next = currentTheme() === "dark" ? "light" : "dark";
-  document.documentElement.dataset.theme = next;
-  try { localStorage.setItem("opencc-theme", next); } catch {}
-  paintTheme();
-}
-
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", paintTheme);
-
-let toastTimer;
-function toast(msg) {
-  $("toast").textContent = msg;
-  $("toast").classList.add("show");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => $("toast").classList.remove("show"), 2000);
-}
-
-// --- dialogs --------------------------------------------------------------
-let closeDialog = null;
-
-function openDialog(html, { onClose } = {}) {
-  $("dialog").innerHTML = html;
-  $("scrim").classList.add("show");
-  closeDialog = () => {
-    $("scrim").classList.remove("show");
-    $("dialog").innerHTML = "";
-    // Only the catalogue browser is wide; left on, it would stretch the
-    // next small dialog that opened.
-    $("dialog").classList.remove("wide");
-    closeDialog = null;
-    if (onClose) onClose();
-  };
-  const first = $("dialog").querySelector("input, button");
-  if (first) first.focus();
-}
-
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && closeDialog) closeDialog();
-});
-$("scrim").addEventListener("mousedown", (e) => {
-  if (e.target === $("scrim") && closeDialog) closeDialog();
-});
-
-function showWorking(title, note, { bar = false } = {}) {
-  openDialog(
-    '<h2><span class="spin"></span>' + esc(title) + "</h2><p>" + esc(note) + "</p>" +
-    (bar ? '<div class="bar"><i id="barFill"></i></div><p class="sub" id="count">Starting</p>' : "") +
-    '<p class="now" id="now"></p>',
-  );
-}
-
-function showResult(title, pairs, note) {
-  openDialog(
-    "<h2>" + esc(title) + "</h2>" +
-    (note ? "<p>" + esc(note) + "</p>" : "") +
-    '<div style="margin-top:10px">' +
-      pairs.map((p) => '<div class="kv"><b>' + esc(p[0]) + "</b><span>" + esc(p[1]) + "</span></div>").join("") +
-    "</div>" +
-    '<div class="acts"><button class="primary" data-dlg="close">Close</button></div>',
-  );
-}
-
-function ask(title, body, confirmLabel) {
-  return new Promise((resolve) => {
-    let answered = false;
-    openDialog(
-      "<h2>" + esc(title) + "</h2><p>" + esc(body) + "</p>" +
-      '<div class="acts">' +
-        '<button data-dlg="close">Cancel</button>' +
-        '<button class="primary danger" data-dlg="yes">' + esc(confirmLabel) + "</button>" +
-      "</div>",
-      { onClose: () => { if (!answered) resolve(false); } },
-    );
-    $("dialog").querySelector('[data-dlg="yes"]').addEventListener("click", () => {
-      answered = true;
-      resolve(true);
-      if (closeDialog) closeDialog();
+function drawCatalogButton() {
+  var total = 0, known = 0;
+  S.providers.forEach(function (p) {
+    (p.models || []).forEach(function (m) {
+      total++;
+      if (facts(p.baseUrl, m)) known++;
     });
   });
+  var b = $("catalog");
+  b.textContent = CATINFO.size ? "models.dev " + known + "/" + total : "models.dev -";
+  b.title = CATINFO.size
+    ? "models.dev knows " + known + " of your " + total + " models: context window, price, tool calling and images. " +
+      CATINFO.size.toLocaleString() + " models on file, fetched " +
+      (CATINFO.age === null ? "just now" : ago(Date.now() - CATINFO.age)) +
+      ", cached a day. Click to fetch it again."
+    : "models.dev could not be reached, so nothing is known about what your models can do. Click to try again.";
 }
 
-// --- api ------------------------------------------------------------------
-async function api(path, opts) {
-  const res = await fetch(path, opts);
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.status);
-  return res.json();
+function drawSidebar() {
+  $("ver").textContent = S.version || "";
+  if (document.activeElement !== $("port")) $("port").value = S.port;
+  $("streaming").textContent = "Streaming " + (S.streaming ? "on" : "off");
+  $("streaming").title = S.streaming
+    ? "Replies stream through as they are written. Click to switch off."
+    : "Replies are read in full upstream and re-streamed. Click to switch on.";
+  var live = S.providers.filter(function (p) { return !p.disabled; });
+  var models = live.reduce(function (n, p) {
+    return n + p.models.filter(function (m) { return (p.disabledModels || []).indexOf(m) < 0; }).length;
+  }, 0);
+  $("n-models").textContent = models || "";
+  $("n-prov").textContent = S.providers.length || "";
+  $("n-reqs").textContent = REQS.length || "";
+  drawTheme();
+  drawCatalogButton();
 }
 
-async function loadRecords() {
-  try {
-    const out = await api("/api/stats");
-    kinds = out.kinds || kinds;
-    cooling = out.cooling || {};
-    coverageFromServer = out.coverage || {};
-    records = {};
-    for (const row of out.rows) {
-      const k = keyOf(row.baseUrl, row.model);
-      (records[k] || (records[k] = {}))[row.kind] = row;
-    }
-  } catch {
-    records = {};
-    cooling = {};
-    coverageFromServer = {};
-  }
+// --- providers page -------------------------------------------------------
+function abilityTags(d) {
+  if (!d) return null;
+  return [
+    d.context ? h("span", { className: "meta", title: "Context window models.dev publishes: " + d.context.toLocaleString() + " tokens" }, kTok(d.context) + " ctx") : null,
+    d.input !== undefined ? h("span", { className: "meta", title: "Price per million tokens, in / out" }, usd(d.input) + " / " + usd(d.output)) : null,
+    d.tools === false ? h("span", { className: "tag", title: "models.dev says this model does not call tools" }, "no tools") : null,
+    d.vision ? h("span", { className: "tag", title: "models.dev says this model reads images" }, "vision") : null,
+  ];
 }
 
-let catalogInfo = { size: 0, age: null };
-
-async function loadCatalog() {
-  try {
-    const out = await api("/api/catalog");
-    catalogKnown = out.known || {};
-    catalogInfo = { size: out.size || 0, age: out.age };
-  } catch {
-    catalogKnown = {};
-    catalogInfo = { size: 0, age: null };
-  }
-  renderCatalogButton();
+function matches(id, d) {
+  if (query && id.toLowerCase().indexOf(query.toLowerCase()) < 0) return false;
+  if (freeOnly && !isFree(d)) return false;
+  return true;
 }
 
-function renderCatalogButton() {
-  const btn = $("catalog");
-  if (!btn) return;
-
-  const mine = Object.keys(catalogKnown).length;
-  const total = state.providers.reduce(
-    (n, p) => n + p.models.filter((m) => !(p.disabledModels || []).includes(m)).length, 0);
-
-  btn.textContent = catalogInfo.size
-    ? "models.dev " + mine + "/" + total
-    : "models.dev —";
-
-  btn.title = catalogInfo.size
-    ? "models.dev knows " + mine + " of your " + total + " models: context window, price, tool calling and images. " +
-      "Fetched " + (catalogInfo.age === null ? "just now" : ago(Date.now() - catalogInfo.age)) + ", cached a day. " +
-      "The rest get tested with a real request instead. Click to fetch it again."
-    : "models.dev could not be reached, so every model has to be tested with a real request. Click to try again.";
+// Every name this provider has: the ones it lists, plus any in your config it
+// does not. A local server that swapped builds, or a name typed by hand,
+// belongs on screen, or taking it out would mean editing the file.
+function namesFor(p, i) {
+  var list = LISTS[i] || { models: [] };
+  var listed = list.models.map(function (m) { return m.id; });
+  var extra = p.models.filter(function (m) { return listed.indexOf(m) < 0; });
+  return { listed: listed, all: listed.concat(extra) };
 }
 
-async function loadRequests() {
-  try {
-    requests = (await api("/api/requests")).items || [];
-  } catch {
-    requests = [];
-  }
-  renderRequests();
-}
-
-async function load() {
-  state = await api("/api/state");
-  await loadRecords();
-  renderAll();
-  paintTheme();
-  // After the first paint: neither is needed to draw the page, and the
-  // catalogue is a network call that can take a moment on a cold cache.
-  await Promise.all([loadCatalog().then(renderAll), loadRequests()]);
-  listen();
-}
-
-// --- live updates ---------------------------------------------------------
-// The proxy and this panel are the same process, so a served request can be
-// pushed here instead of polled for. The event only says that something
-// happened; what it means is worked out by refetching, which keeps one copy
-// of that rule rather than two that drift.
-function listen() {
-  let source;
-  try {
-    source = new EventSource("/api/events");
-  } catch {
-    return; // no live updates; everything still works through Refresh
-  }
-  source.addEventListener("message", async (e) => {
-    let what;
-    try {
-      what = JSON.parse(e.data).what;
-    } catch {
-      return;
-    }
-    if (what === "request" || what === "requests-cleared") {
-      await loadRequests();
-      // A served request changes the record it was drawn from, so the
-      // per-model numbers above are stale the moment one lands.
-      await loadRecords();
-      renderAll();
-    }
-  });
-}
-
-// Two kinds of save. A structural change redraws the list because the list is
-// what changed. Typing in a field does not: redrawing threw away focus,
-// scroll position and anything half-typed in the next field.
-async function save({ redraw = true } = {}) {
-  const payload = {
-    providers: state.providers.map((p) => ({
-      name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey,
-      models: p.models, disabled: p.disabled, disabledModels: p.disabledModels || [],
-    })),
-    port: state.port,
-    streaming: state.streaming,
-  };
-
-  const before = state.providers.length;
-  state = await api("/api/state", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-  });
-
-  if (state.providers.length < before) {
-    renderAll();
-    toast("A provider needs a base URL and at least one model, so it was not kept");
-    return;
-  }
-
-  if (redraw) renderAll();
-  else renderHeader();
-
-  await testNewModels();
-}
-
-// Any model nobody has sent a tool request to yet gets one now, rather than
-// waiting for the next time the proxy starts. The results go into the shared
-// log, so a proxy already running starts using them without a restart.
-async function testNewModels(kind = "tools") {
-  let pending;
-  try {
-    pending = await api("/api/warmup/pending?kind=" + kind);
-  } catch {
-    return;
-  }
-  if (!pending.total) return;
-
-  const what = { tools: "tool calling", image: "images", document: "PDFs" }[kind];
-  showWorking(
-    "Testing " + pending.total + " model" + (pending.total === 1 ? "" : "s") + " for " + what,
-    "One small request each. A slow backend can take a moment.",
-    { bar: true },
-  );
-
-  const poll = setInterval(async () => {
-    try {
-      const p = await (await fetch("/api/warmup/progress")).json();
-      if (!p || !p.total || !$("barFill")) return;
-      $("barFill").style.width = Math.round((p.done / p.total) * 100) + "%";
-      $("count").textContent = p.done + " of " + p.total + " done";
-      $("now").textContent = p.current || "";
-    } catch {
-      // The dialog is cosmetic; a dropped poll should not surface an error.
-    }
-  }, 400);
-
-  try {
-    const out = await api("/api/warmup", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind }),
+function shownKeys() {
+  var out = [];
+  S.providers.forEach(function (p, i) {
+    namesFor(p, i).all.forEach(function (id) {
+      if (matches(id, facts(p.baseUrl, id))) out.push(pk(i, id));
     });
-    const ok = out.results.filter((r) => r.status >= 200 && r.status < 300);
-    const failed = out.results.filter((r) => !(r.status >= 200 && r.status < 300));
+  });
+  return out;
+}
 
-    clearInterval(poll);
-    if (closeDialog) closeDialog();
-    await loadRecords();
-    renderAll();
+function drawProviders() {
+  var sections = S.providers.map(function (p, i) {
+    var list = LISTS[i] || { models: [], loading: true, error: "" };
+    var names = namesFor(p, i);
+    var rows = names.all.filter(function (id) { return matches(id, facts(p.baseUrl, id)); });
 
-    if (failed.length === 0) {
-      toast(ok.length + " of " + out.results.length + " answered");
-    } else {
-      showResult(
-        ok.length + " of " + out.results.length + " answered",
-        failed.map((r) => [r.model, (r.status === 0 ? "no answer" : r.status) + "  " + (r.error || "")]),
-        "These cannot do it. They stay in the list for everything else.",
-      );
-    }
-  } catch (err) {
-    clearInterval(poll);
-    if (closeDialog) closeDialog();
-    toast("Could not test: " + err.message);
+    rows.sort(function (a, b) {
+      var da = facts(p.baseUrl, a), db = facts(p.baseUrl, b);
+      if (catSort === "price") return (costOf(da) - costOf(db)) || byName(a, b);
+      if (catSort === "context") return ((db && db.context ? db.context : 0) - (da && da.context ? da.context : 0)) || byName(a, b);
+      return byName(a, b);
+    });
+
+    if ((query || freeOnly) && !rows.length) return null;
+
+    var shut = SHUT.has(i);
+    var ticked = rows.filter(function (id) { return PICKED.has(pk(i, id)); });
+
+    return h("div", { className: "prov" + (p.disabled ? " off" : "") + (shut ? " shut" : "") },
+      h("div", { className: "prov-h", onclick: function (e) {
+        if (e.target.closest("button, input, label, form")) return;
+        if (shut) SHUT.delete(i); else SHUT.add(i);
+        drawProviders();
+      } },
+        h("button", { className: "fold", type: "button", "aria-label": "Fold " + (p.name || p.label) }, "\\u25be"),
+        rows.length ? h("input", {
+          type: "checkbox",
+          checked: ticked.length > 0 && ticked.length === rows.length,
+          title: "Select all of this provider's models shown",
+          onchange: function (e) {
+            rows.forEach(function (id) {
+              if (e.target.checked) PICKED.add(pk(i, id)); else PICKED.delete(pk(i, id));
+            });
+            drawProviders();
+          },
+        }) : null,
+        h("div", { className: "who" },
+          h("span", { className: "nm" }, p.name || p.label),
+          p.disabled ? h("span", { className: "tag" }, "off") : null,
+          list.loading ? h("span", { className: "tag" }, "loading")
+            : list.error ? h("span", { className: "tag bad", title: "This backend would not list its models: " + list.error }, "no list")
+            : h("span", { className: "tag" }, names.listed.length + " listed"),
+          h("span", { className: "tag acc" }, p.models.length + " in pot"),
+          h("span", { className: "url", title: p.baseUrl }, p.baseUrl)),
+        h("form", { className: "by-name", onsubmit: function (e) {
+          e.preventDefault();
+          var box = e.target.elements.name;
+          var id = box.value.trim();
+          if (!id) return;
+          if (p.models.indexOf(id) >= 0) { toast(id + " is already in the pot"); return; }
+          box.value = "";
+          addModels([{ i: i, model: id }]);
+        } },
+          h("input", { type: "text", name: "name", placeholder: "model name",
+            title: "Add a model by its exact name, including one this provider does not list" }),
+          h("button", { className: "sm" }, "Add")),
+        h("button", { className: "sm", title: "Ask this provider for its model list again",
+          onclick: function () { loadList(i, true); } }, "Refresh"),
+        h("button", { className: "sm", onclick: function () { providerForm(i); } }, "Edit")),
+
+      rows.length ? h("div", { className: "rows" }, rows.map(function (id) {
+        var d = facts(p.baseUrl, id);
+        var have = p.models.indexOf(id) >= 0;
+        return h("div", { className: "mrow" + (have ? " taken" : "") },
+          h("input", {
+            type: "checkbox", checked: PICKED.has(pk(i, id)), "aria-label": "Select " + id,
+            onchange: function (e) {
+              if (e.target.checked) PICKED.add(pk(i, id)); else PICKED.delete(pk(i, id));
+              drawPicks();
+            },
+          }),
+          h("span", { className: "id",
+            title: have ? "In the pot. Click to take it out." : "Click to put it in the pot.",
+            onclick: function () {
+              if (have) removeModels([{ i: i, model: id }]); else addModels([{ i: i, model: id }]);
+            } }, id),
+          isFree(d) ? h("span", { className: "tag ok", title: "models.dev lists this model at $0" }, "free") : null,
+          // Only when there is a list to be absent from. A provider that
+          // would not list anything makes every model "not listed", which is
+          // noise about the provider dressed up as news about the model.
+          names.listed.length && names.listed.indexOf(id) < 0
+            ? h("span", { className: "tag warn", title: "This provider does not list this name. It may have been typed by hand, or the backend may have changed what it serves." }, "not listed")
+            : null,
+          abilityTags(d),
+          have ? h("button", { className: "sm", onclick: function () { testOne(i, id); } }, "Test") : null);
+      })) : null,
+
+      list.error ? h("div", { className: "note err" },
+        "Could not list its models: " + list.error + " ",
+        h("button", { className: "sm", onclick: function () { loadList(i, true); } }, "Try again"),
+        h("div", { className: "muted", style: "margin-top:4px" }, "You can still add one by name above.")) : null,
+      !list.loading && !list.error && !names.all.length
+        ? h("div", { className: "note" }, "This provider listed no models. Add one by name above.") : null);
+  }).filter(Boolean);
+
+  put($("plist"), sections.length ? sections : h("div", { className: "empty" },
+    !S.providers.length ? "No providers yet. Use Add a provider."
+      : freeOnly && !query ? "No provider lists a model at $0. A provider whose list has no prices cannot say."
+      : "Nothing matches."));
+
+  var shown = shownKeys();
+  var on = shown.filter(function (k) { return PICKED.has(k); });
+  $("pick-all").checked = on.length > 0 && on.length === shown.length;
+  $("pick-all").indeterminate = on.length > 0 && on.length < shown.length;
+  $("pick-all").disabled = !shown.length;
+  $("fold-all").textContent = S.providers.length && SHUT.size >= S.providers.length ? "Expand all" : "Collapse all";
+  drawPicks();
+}
+
+function drawPicks() {
+  var all = [];
+  PICKED.forEach(function (k) {
+    var t = unpk(k);
+    if (S.providers[t.i]) all.push(t);
+  });
+  var toAdd = all.filter(function (t) { return S.providers[t.i].models.indexOf(t.model) < 0; });
+  var toTake = all.filter(function (t) { return S.providers[t.i].models.indexOf(t.model) >= 0; });
+
+  $("picks").hidden = !all.length;
+  if (!all.length) return;
+  put($("picks"),
+    h("span", { className: "n" }, all.length + " selected"),
+    h("button", { className: "sm ghost", onclick: function () { PICKED.clear(); drawProviders(); } }, "Clear"),
+    toTake.length ? h("button", { className: "sm", onclick: function () { testMany(toTake); } }, "Test " + toTake.length) : null,
+    toTake.length ? h("button", { className: "sm danger", onclick: function () { removeModels(toTake); } }, "Take " + toTake.length + " out") : null,
+    toAdd.length ? h("button", { className: "sm primary", onclick: function () { addModels(toAdd); } }, "Add " + toAdd.length + " to the pot") : null);
+}
+
+function copyProviders() {
+  return S.providers.map(function (p) {
+    return Object.assign({}, p, { models: p.models.slice(), disabledModels: (p.disabledModels || []).slice() });
+  });
+}
+
+async function addModels(items) {
+  var next = copyProviders();
+  var n = 0;
+  items.forEach(function (t) {
+    if (next[t.i] && next[t.i].models.indexOf(t.model) < 0) { next[t.i].models.push(t.model); n++; }
+  });
+  if (!n) return;
+  PICKED.clear();
+  await save(next);
+  toast(n === 1 ? items[0].model + " added" : n + " models added");
+}
+
+async function removeModels(items) {
+  var next = copyProviders();
+  var n = 0;
+  items.forEach(function (t) {
+    var p = next[t.i];
+    if (!p) return;
+    var at = p.models.indexOf(t.model);
+    if (at < 0) return;
+    p.models.splice(at, 1);
+    p.disabledModels = p.disabledModels.filter(function (m) { return m !== t.model; });
+    n++;
+  });
+  if (!n) return;
+
+  // A provider with no models left is not routable, and the server drops it
+  // along with its key. Saying so beats watching a row vanish.
+  var emptied = next.filter(function (p) { return p.models.length === 0; });
+  if (emptied.length) {
+    var ok = await ask(
+      "Take the last model out of " + (emptied[0].name || emptied[0].baseUrl) + "?",
+      "A provider with no models cannot be routed to, so it is dropped along with its API key. Switch it off instead to keep both.",
+      "Take it out");
+    if (!ok) return;
   }
+  PICKED.clear();
+  MINE.clear();
+  await save(next);
+  toast(n === 1 ? items[0].model + " taken out" : n + " models taken out");
 }
 
-// What Claude Code asks for, and what your models can actually do.
-//
-// A model row shows one model. This shows the set: Claude Code sends plain
-// text, tool calls and sometimes images, and if nothing in the pot can serve
-// one of those, every request of that kind fails no matter how many models
-// you have. That is not visible anywhere else on the page.
-const NEEDS = [
-  { kind: "tools", label: "Tool calling", why: "reading and editing files" },
-  { kind: "image", label: "Images", why: "screenshots you paste" },
-  { kind: "document", label: "PDFs", why: "PDFs you attach" },
-];
-
-function renderCoverage() {
-  $("cover").innerHTML = NEEDS.map((need) => {
-    const c = { ...need, ...(coverageFromServer[need.kind] ?? { can: 0, cannot: 0, untried: 0, proven: 0 }) };
-    const cls = c.can > 0 ? "good" : c.untried > 0 ? "unk" : "none";
-    const count = c.can > 0
-      ? c.can + (c.can === 1 ? " model" : " models")
-      : c.untried > 0 ? "not tested" : "none";
-
-    // Where the number comes from, because "models.dev says so" and "it did
-    // it here" are not the same claim and only one of them is checked.
-    const published = c.can - (c.proven ?? 0);
-    const note = c.can > 0
-      ? c.can + " of your models can do this — " +
-        (published === 0 ? "all proven by a real request"
-          : c.proven === 0 ? "all from models.dev, none tried here yet"
-          : c.proven + " proven here, " + published + " published by models.dev")
-      : c.untried > 0
-        ? (need.kind === "document"
-            ? "Nobody has asked. models.dev has no field for PDFs, so this one always has to be tested"
-            : "Nobody has asked, and models.dev does not list these models")
-        : "Nothing can do this. Requests needing it will fail.";
-
-    // Only the models nothing can answer for. For PDFs that is always all of
-    // them: there is no published field for whether a backend takes one.
-    const button = c.untried > 0
-      ? '<button data-act="cover" data-kind="' + c.kind + '" title="' + attr("Send one real request to the " +
-          c.untried + " model(s) nothing has answered for yet") + '">Test ' + c.untried + "</button>"
-      : "";
-
-    return '<span class="cap ' + cls + '" title="' + attr(c.label + ": " + note + ". Needed for " + c.why + ".") + '">' +
-      "<b>" + c.label + "</b>" +
-      '<span class="n">' + count + "</span>" +
-      button +
-    "</span>";
-  }).join("");
-}
-
-// --- rendering ------------------------------------------------------------
-function renderHeader() {
-  const total = state.providers.length;
-  const off = state.providers.filter((p) => p.disabled).length;
-  const models = state.providers.reduce((n, p) => n + p.models.length, 0);
-  const parked = state.providers.reduce((n, p) => n + (p.disabledModels || []).length, 0);
-
-  $("port").value = state.port;
-  $("streaming").textContent = "Streaming: " + (state.streaming ? "on" : "off");
-  $("summary").textContent = total
-    ? total + " providers" + (off ? ", " + off + " off" : "") + " · " +
-      (models - parked) + " models in rotation" + (parked ? " (" + parked + " parked)" : "")
-    : "nothing configured";
-
-  $("where").textContent =
-    "Which model answers a request is worked out from what each one has done before, drawn fresh every time, " +
-    "so load spreads instead of landing on one model. This panel is on localhost:" + (location.port || "80") +
-    " and only edits settings; the proxy listens on " + state.port + " when you run opencc.";
-
-  const banner = $("banner");
-  if (total && total - off === 0) {
-    banner.textContent = "Every provider is switched off, so nothing can be routed. Turn one back on below.";
-    banner.classList.remove("hide");
-  } else {
-    banner.classList.add("hide");
-  }
-}
-
-// One cell per kind of request, which is where a model's abilities show up.
-//
-// A record always wins. Where there is none, models.dev's published answer
-// is shown instead and marked as such: a tick here means "published", not
-// "tried". The difference matters, because the catalogue describes a model
-// and what is being configured is a backend that serves it — a gateway can
-// strip tool calling from a model that has it.
-function kindCells(baseUrl, model) {
-  const rec = records[keyOf(baseUrl, model)] || {};
-
-  return '<span class="kinds">' + kinds.map((kind) => {
-    const row = rec[kind];
-    if (!row || row.ok + row.fail === 0) {
-      const doing = { tools: "call tools", image: "read images", document: "read PDFs" }[kind] ?? kind;
-      const published = says(baseUrl, model, kind);
-      if (published === true) {
-        return '<span class="k pub" title="' + attr("models.dev says this model can " + doing +
-          ". Nothing has asked this backend for it yet, so it is published rather than proven.") + '">' + kind + " ✓</span>";
-      }
-      if (published === false) {
-        return '<span class="k pub" title="' + attr("models.dev says this model cannot " + doing +
-          ". It stays in the rotation and still gets its turn; this is what is published, not a verdict.") + '">' + kind + " ✗</span>";
-      }
-      // models.dev has no field at all for PDFs, so that one is never its
-      // silence about a model — it is silence about the whole question.
-      return '<span class="k none" title="' + attr(kind === "document"
-        ? "Nothing has sent this model a PDF. models.dev has no field for it either: whether a backend takes one is a property of the endpoint, not the model."
-        : "Nothing has asked this model to " + doing + ", and models.dev does not list it") + '">' + kind + " -</span>";
-    }
-    const total = row.ok + row.fail;
-    const pct = Math.round((row.ok / total) * 100);
-    const cls = pct >= 60 ? "good" : pct >= 20 ? "mid" : "poor";
-    const seen = Object.entries(row.statuses || {})
-      .map((e) => (e[0] === "0" ? "no answer" : e[0]) + " x" + e[1]).join(", ");
-    return '<span class="k ' + cls + '" title="' + attr(kind + ": " + row.ok + " of " + total + " answered. " + seen) + '">' +
-      kind + " " + pct + "%</span>";
-  }).join("") + "</span>";
-}
-
-// --- what models.dev knows ------------------------------------------------
-// Shown next to the record, never in place of it. These are published facts
-// about a model, and a provider can serve it under a different name, with a
-// shorter window, or behind a gateway that strips tool calling — so a row
-// with a green record and a grey "no tools" here means the record is right.
-const money = (n) =>
-  n === 0 ? "free" : n < 1 ? "$" + n.toFixed(2) : "$" + Math.round(n);
-
-// The same question coverage asks on the server: what does models.dev say
-// about this kind of request, or null when it cannot say. Documents are
-// always null — no published field describes whether a backend takes a PDF.
-function says(baseUrl, model, kind) {
-  const info = catalogKnown[keyOf(baseUrl, model)];
-  if (!info) return null;
-  if (kind === "tools") return info.tools;
-  if (kind === "image") return info.vision;
-  return null;
-}
-
-function metaCells(baseUrl, model) {
-  const info = catalogKnown[keyOf(baseUrl, model)];
-  if (!info) return "";
-
-  const bits = [];
-  if (info.context) {
-    const k = Math.round(info.context / 1000);
-    bits.push([
-      k >= 1000 ? (k / 1000) + "M ctx" : k + "k ctx",
-      "Context window models.dev publishes for this model: " + info.context.toLocaleString() + " tokens",
-    ]);
-  }
-  if (info.input !== undefined && info.output !== undefined) {
-    bits.push([
-      money(info.input) + " / " + money(info.output),
-      "Price per million tokens in and out, as models.dev lists it",
-    ]);
-  }
-  if (!info.tools) bits.push(["no tools", "models.dev does not list this model as calling tools"]);
-  if (info.vision) bits.push(["vision", "models.dev lists this model as reading images"]);
-
-  if (!bits.length) return "";
-  return '<span class="meta">' +
-    bits.map((b) => '<span title="' + attr(b[1]) + '">' + esc(b[0]) + "</span>").join("·") +
-    "</span>";
-}
-
-function modelRow(p, index, model, position) {
-  const off = (p.disabledModels || []).includes(model);
-  const waitMs = cooling[keyOf(p.baseUrl, model)];
-
-  return '<div class="m" data-off="' + (off ? 1 : 0) + '">' +
-    "<code>" + esc(model) + "</code>" +
-    (off ? '<span class="chip no">parked</span>' : "") +
-    (waitMs ? '<span class="chip wait" title="Rate limited or down. It goes to the back of the queue until this runs out.">' +
-      Math.ceil(waitMs / 1000) + "s</span>" : "") +
-    kindCells(p.baseUrl, model) +
-    metaCells(p.baseUrl, model) +
-    '<span class="acts">' +
-      '<button class="icon" data-act="moff" data-i="' + index + '" data-m="' + attr(model) + '" ' +
-        'title="' + (off ? "Put this model back in the pot" : "Keep it listed but never call it") + '">' +
-        (off ? "Unpark" : "Park") + "</button>" +
-      '<button class="icon" data-act="test" data-i="' + index + '" data-m="' + attr(model) + '" ' +
-        'title="Send one real tool-calling request, the same probe the warm-up uses. The result counts toward the record.">Test</button>' +
-      '<button class="icon danger" data-act="mdel" data-i="' + index + '" data-pos="' + position + '">Remove</button>' +
-    "</span>" +
-  "</div>";
-}
-
-function providerCard(p, i) {
-  const parked = (p.disabledModels || []).length;
-
-  return '<details class="prov" data-i="' + i + '" data-off="' + (p.disabled ? 1 : 0) + '"' + (expanded.has(i) ? " open" : "") + ">" +
-    "<summary>" +
-      '<span class="caret">▶</span>' +
-      '<span class="head-name">' + esc(p.name || p.label) + "</span>" +
-      '<span class="head-url">' + esc(p.baseUrl) + "</span>" +
-      '<span class="chip flat">' + p.models.length + " models" + (parked ? ", " + parked + " parked" : "") + "</span>" +
-      (p.disabled ? '<span class="chip no">off</span>' : "") +
-      '<span class="spacer"></span>' +
-      '<button class="icon" data-act="toggle" data-i="' + i + '">' + (p.disabled ? "Turn on" : "Turn off") + "</button>" +
-      '<button class="icon danger" data-act="del" data-i="' + i + '">Delete</button>' +
-    "</summary>" +
-    '<div class="body">' +
-      '<div class="two">' +
-        "<div><label>Name <span class=\\"hint\\">optional</span></label>" +
-          '<input type="text" data-f="name" data-i="' + i + '" value="' + attr(p.name) + '" placeholder="' + attr(p.label) + '"></div>' +
-        "<div><label>Base URL</label>" +
-          '<input type="text" data-f="baseUrl" data-i="' + i + '" value="' + attr(p.baseUrl) + '"></div>' +
-        "<div><label>API key <span class=\\"hint\\">blank if the backend needs none</span></label>" +
-          '<input type="password" data-f="apiKey" data-i="' + i + '" value="' + attr(p.apiKey) + '"></div>' +
-      "</div>" +
-
-      "<label>Add a model</label>" +
-      '<div class="addbar">' +
-        '<input type="text" list="cat' + i + '" data-pick="' + i + '" placeholder="type or pick a model name">' +
-        '<datalist id="cat' + i + '"></datalist>' +
-        '<button data-act="madd" data-i="' + i + '">Add</button>' +
-        '<button data-act="browse" data-i="' + i + '" title="List everything this provider serves, and tick the ones you want">Browse</button>' +
-      "</div>" +
-
-      '<label>Models <span class="hint">order here means nothing; the record decides</span></label>' +
-      '<div class="mlist">' +
-        (p.models.length
-          ? p.models.map((m, pos) => modelRow(p, i, m, pos)).join("")
-          : '<div class="m empty-list">none yet, so this provider gets skipped</div>') +
-      "</div>" +
-    "</div>" +
-  "</details>";
-}
-
-// --- the request log ------------------------------------------------------
-function ago(at) {
-  const secs = Math.max(0, Math.round((Date.now() - at) / 1000));
-  if (secs < 60) return secs + "s ago";
-  if (secs < 3600) return Math.round(secs / 60) + "m ago";
-  if (secs < 86400) return Math.round(secs / 3600) + "h ago";
-  return new Date(at).toLocaleDateString();
-}
-
-const FILTERS = {
-  all: () => true,
-  failed: (r) => !r.ok,
-  fallback: (r) => r.fallback,
+// --- your models table ----------------------------------------------------
+var COLS = {
+  model: { label: "Model", how: "text", get: function (t) { return t.model; } },
+  provider: { label: "Provider", how: "text", get: function (t) { return t.name; } },
+  context: { label: "Context", num: true, get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.context ? d.context : 0; } },
+  tools: { label: "Tools", get: function (t) { var d = facts(t.baseUrl, t.model); return d ? (d.tools ? 1 : 0) : -1; } },
+  images: { label: "Images", get: function (t) { var d = facts(t.baseUrl, t.model); return d ? (d.vision ? 1 : 0) : -1; } },
+  input: { label: "In $/M", num: true, how: "cheap", get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.input !== undefined ? d.input : null; } },
+  output: { label: "Out $/M", num: true, how: "cheap", get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.output !== undefined ? d.output : null; } },
+  record: { label: "Record", num: true, get: function (t) { var r = recOf(t.baseUrl, t.model); return r.pct === null ? -1 : r.pct; } },
+  tried: { label: "Tried", num: true, get: function (t) { return recOf(t.baseUrl, t.model).total; } },
 };
 
-function renderRequests() {
-  const shown = requests.filter(FILTERS[reqFilter]);
-  const failed = requests.filter((r) => !r.ok).length;
-  const fell = requests.filter((r) => r.fallback).length;
-
-  $("reqcount").textContent = requests.length
-    ? requests.length + " kept · " + failed + " failed · " + fell + " fell back"
-    : "";
-
-  // The open request can fall off the end as older ones are pruned.
-  if (reqPicked !== null && !requests.some((r) => r.at === reqPicked)) reqPicked = null;
-
-  if (!shown.length) {
-    $("reqlist").innerHTML = '<p class="cat-none">' +
-      (requests.length
-        ? "No request matches this filter."
-        : "Nothing yet. Requests appear here as Claude Code makes them.") + "</p>";
-    renderDetail();
-    return;
-  }
-
-  $("reqlist").innerHTML = shown.map((r) => {
-    const dot = r.ok ? (r.fallback ? "" : "ok") : "bad";
-    const who = r.ok ? r.served : (r.status || "failed") + " after " + r.attempts.length + " tr" + (r.attempts.length === 1 ? "y" : "ies");
-    return '<button class="req' + (r.at === reqPicked ? " on" : "") + '" data-req="' + r.at + '">' +
-      '<span class="dot ' + dot + '" title="' + attr(r.ok ? (r.fallback ? "Served, but not by the first model tried" : "Served") : "Failed") + '"></span>' +
-      '<span class="when">' + esc(ago(r.at)) + "</span>" +
-      '<span class="who">' + esc(who) + "</span>" +
-      '<span class="when">' + esc(r.kind) + "</span>" +
-    "</button>";
-  }).join("");
-
-  renderDetail();
+function rows() {
+  var out = [];
+  S.providers.forEach(function (p, i) {
+    p.models.forEach(function (m) {
+      out.push({
+        i: i, name: p.name || p.label, baseUrl: p.baseUrl, model: m,
+        off: p.disabled, parked: (p.disabledModels || []).indexOf(m) >= 0,
+      });
+    });
+  });
+  return out;
 }
 
-function renderDetail() {
-  const r = requests.find((x) => x.at === reqPicked);
-  if (!r) {
-    $("reqdetail").innerHTML = '<p class="empty">Pick a request to see every model it tried.</p>';
+function sortRows(list) {
+  if (!SORT.length) return list;
+  var withAt = list.map(function (t, n) { return { t: t, n: n }; });
+  withAt.sort(function (a, b) {
+    for (var i = 0; i < SORT.length; i++) {
+      var s = SORT[i];
+      var x = COLS[s.key].get(a.t), y = COLS[s.key].get(b.t);
+      if (x === y) continue;
+      // Unknown sorts last either way: a missing price is not a cheap one.
+      if (x === null) return 1;
+      if (y === null) return -1;
+      var r = typeof x === "string" ? byName(x, y) : x - y;
+      if (r) return s.dir === "up" ? r : -r;
+    }
+    return a.n - b.n;
+  });
+  return withAt.map(function (x) { return x.t; });
+}
+
+var firstDir = function (k) { return COLS[k].how ? "up" : "down"; };
+function clickSort(k) {
+  var at = null;
+  SORT.forEach(function (s) { if (s.key === k) at = s; });
+  if (!at) SORT = SORT.concat([{ key: k, dir: firstDir(k) }]);
+  else if (at.dir === firstDir(k)) at.dir = at.dir === "up" ? "down" : "up";
+  else SORT = SORT.filter(function (s) { return s !== at; });
+  try { localStorage.setItem("opencc-sort", JSON.stringify(SORT)); } catch (e) {}
+  drawMine();
+}
+
+function yesNo(v) {
+  if (v === -1) return h("span", { className: "no", title: "models.dev does not list this model" }, "?");
+  return v ? h("span", { className: "yes" }, "\\u2713") : h("span", { className: "no" }, "-");
+}
+
+function drawMine() {
+  var list = rows();
+  var view = sortRows(list);
+
+  MINE.forEach(function (k) {
+    var t = unpk(k);
+    if (!S.providers[t.i] || S.providers[t.i].models.indexOf(t.model) < 0) MINE.delete(k);
+  });
+
+  var picked = view.filter(function (t) { return MINE.has(pk(t.i, t.model)); });
+  var allOn = view.length > 0 && picked.length === view.length;
+
+  put($("mt-top"),
+    h("div", { className: "sorts" }, SORT.length
+      ? [h("span", {}, "Sorted by"), SORT.map(function (s, n) {
+          return h("span", { className: "chip" },
+            (n + 1) + ". " + COLS[s.key].label + " " + (s.dir === "up" ? "\\u2191" : "\\u2193"),
+            h("button", { type: "button", "aria-label": "Stop sorting by " + COLS[s.key].label,
+              onclick: function () { SORT = SORT.filter(function (x) { return x !== s; }); drawMine(); } }, "\\u2715"));
+        })]
+      : (list.length > 1 ? "Click a column to sort. Sorting changes nothing about routing." : "")),
+    picked.length ? h("button", { className: "sm", onclick: function () { testMany(picked); } }, "Test " + picked.length) : null,
+    picked.length ? h("button", { className: "sm danger", onclick: function () { removeModels(picked); } }, "Take " + picked.length + " out") : null,
+    picked.length ? h("button", { className: "sm ghost", onclick: function () { MINE.clear(); drawMine(); } }, "Clear") : null,
+    SORT.length ? h("button", { className: "sm", onclick: function () { SORT = []; drawMine(); } }, "Clear sort") : null,
+    list.length ? h("button", { className: "sm", title: "Ask models.dev again for context, price and abilities", onclick: refreshCatalog }, "Refresh from models.dev") : null,
+    list.length ? h("button", { className: "sm", onclick: function () { testMany(view); } }, "Test all") : null);
+
+  if (!list.length) {
+    put($("mt"), h("div", { className: "card" }, h("div", { className: "empty" },
+      "Nothing in the pot yet. ", h("a", { href: "#providers" }, "Pick some models under Providers"), ".")));
     return;
   }
 
-  const kb = Math.round(r.chars / 1024);
-  const facts = [
+  var head = function (k) {
+    var at = -1;
+    SORT.forEach(function (s, n) { if (s.key === k) at = n; });
+    return h("th", { className: COLS[k].num ? "num" : "" },
+      h("button", { type: "button", className: at >= 0 ? "on" : "", onclick: function () { clickSort(k); } },
+        COLS[k].label + (at >= 0
+          ? " " + (SORT[at].dir === "up" ? "\\u2191" : "\\u2193") + (SORT.length > 1 ? at + 1 : "")
+          : "")));
+  };
+
+  put($("mt"), h("div", { className: "mt-wrap" },
+    h("table", { className: "mt" },
+      h("thead", {}, h("tr", {},
+        h("th", {}, h("input", {
+          type: "checkbox", checked: allOn, indeterminate: picked.length > 0 && !allOn,
+          "aria-label": "Select all",
+          onchange: function () {
+            if (allOn) MINE.clear();
+            else view.forEach(function (t) { MINE.add(pk(t.i, t.model)); });
+            lastRow = null;
+            drawMine();
+          },
+        })),
+        head("model"), head("provider"), head("context"), head("tools"), head("images"),
+        head("input"), head("output"), head("record"), head("tried"),
+        h("th", {}, ""))),
+      h("tbody", {}, view.map(function (t, n) {
+        var d = facts(t.baseUrl, t.model);
+        var r = recOf(t.baseUrl, t.model);
+        var wait = COOL[key(t.baseUrl, t.model)];
+        var on = MINE.has(pk(t.i, t.model));
+        return h("tr", {
+          className: (on ? "picked " : "") + (t.off || t.parked ? "dim" : ""),
+          title: t.off ? t.name + " is switched off, so this model is skipped"
+            : t.parked ? "Parked: listed but never called" : "",
+        },
+          h("td", {}, h("input", {
+            type: "checkbox", checked: on, "aria-label": "Select " + t.model,
+            onclick: function (e) {
+              e.preventDefault();
+              var want = !MINE.has(pk(t.i, t.model));
+              var from = e.shiftKey && lastRow !== null ? Math.min(lastRow, n) : n;
+              var to = e.shiftKey && lastRow !== null ? Math.max(lastRow, n) : n;
+              for (var k = from; k <= to; k++) {
+                var q = pk(view[k].i, view[k].model);
+                if (want) MINE.add(q); else MINE.delete(q);
+              }
+              lastRow = n;
+              drawMine();
+            },
+          })),
+          h("td", { className: "m", title: t.model }, t.model),
+          h("td", {}, t.name,
+            t.off ? h("span", { className: "tag", style: "margin-left:6px" }, "off") : null,
+            t.parked ? h("span", { className: "tag", style: "margin-left:6px" }, "parked") : null),
+          h("td", { className: "num", title: d && d.context ? d.context.toLocaleString() + " tokens" : "models.dev does not list this model" }, kTok(d && d.context)),
+          h("td", {}, yesNo(COLS.tools.get(t))),
+          h("td", {}, yesNo(COLS.images.get(t))),
+          h("td", { className: "num" }, d && d.input !== undefined ? usd(d.input) : "-"),
+          h("td", { className: "num" }, d && d.output !== undefined ? usd(d.output) : "-"),
+          h("td", { className: "num", title: r.total ? r.ok + " of " + r.total + " requests answered" : "Nothing has been sent to this model yet" },
+            r.pct === null ? h("span", { className: "no" }, "-") : (r.pct + "%")),
+          h("td", { className: "num" }, r.total || "-"),
+          h("td", {}, h("div", { className: "acts" },
+            wait ? h("span", { className: "tag warn", title: "Rate limited or down. It goes to the back of the queue until this runs out." }, Math.ceil(wait / 1000) + "s") : null,
+            h("button", { className: "sm", title: t.parked ? "Put it back in the pot" : "Keep it listed but never call it",
+              onclick: function () { park(t); } }, t.parked ? "Unpark" : "Park"),
+            h("button", { className: "sm", title: "Send one real request and record the result",
+              onclick: function () { testOne(t.i, t.model); } }, "Test"),
+            h("button", { className: "sm danger", "aria-label": "Remove " + t.model,
+              onclick: function () { removeModels([t]); } }, "\\u2715"))));
+      })))));
+}
+
+async function park(t) {
+  var next = copyProviders();
+  var off = next[t.i].disabledModels;
+  var at = off.indexOf(t.model);
+  if (at >= 0) off.splice(at, 1); else off.push(t.model);
+  await save(next);
+}
+
+// --- testing --------------------------------------------------------------
+// Not a capability check. One real request, recorded like any other, so the
+// Record column has something in it before Claude Code sends the first one.
+// What a model can do is models.dev's answer, not this one's.
+async function testOne(i, model) {
+  openDialog([
+    h("h2", {}, h("span", { className: "spin" }), "Testing " + model),
+    h("p", {}, "Sending one real request through this provider."),
+  ]);
+  try {
+    var r = await post("/api/test", { index: i, model: model });
+    if (closeDialog) closeDialog();
+    await loadRecord();
+    drawAll();
+    showTest(model, r);
+  } catch (e) {
+    if (closeDialog) closeDialog();
+    toast("Test failed: " + e.message, true);
+  }
+}
+
+function showTest(model, r) {
+  openDialog([
+    h("h2", {}, model),
+    h("div", {},
+      h("div", { className: "kv" }, h("b", {}, "Result"), h("span", {}, r.ok ? "Answered" : "Failed")),
+      r.status ? h("div", { className: "kv" }, h("b", {}, "Status"), h("span", {}, String(r.status))) : null,
+      r.ms !== undefined && r.ms !== null ? h("div", { className: "kv" }, h("b", {}, "Took"), h("span", {}, (r.ms / 1000).toFixed(1) + "s")) : null,
+      r.error ? h("div", { className: "kv" }, h("b", {}, "Error"), h("span", {}, r.error)) : null),
+    r.sent ? [h("p", { style: "margin-top:12px" }, "Sent"), h("pre", { className: "dump" }, r.sent)] : null,
+    r.got ? [h("p", { style: "margin-top:12px" }, "Received"), h("pre", { className: "dump" }, r.got)] : null,
+    h("div", { className: "btns" },
+      h("button", { className: "primary", onclick: function () { if (closeDialog) closeDialog(); } }, "Close")),
+  ], { wide: true });
+}
+
+// One at a time, so a single key is not hit with a dozen requests at once and
+// made to answer with rate limits that say nothing about the models.
+async function testMany(items) {
+  var done = 0, ok = 0;
+  var bad = [];
+  var stop = false;
+  openDialog([
+    h("h2", {}, h("span", { className: "spin" }), "Testing " + items.length + " models"),
+    h("p", { id: "tm-now" }, "One real request each, one at a time."),
+    h("div", { className: "btns" }, h("button", { onclick: function () { stop = true; } }, "Stop")),
+  ]);
+
+  for (var n = 0; n < items.length; n++) {
+    if (stop) break;
+    var t = items[n];
+    var p = S.providers[t.i];
+    if (!p) continue;
+    if ($("tm-now")) $("tm-now").textContent = (done + 1) + " of " + items.length + ": " + (p.name || p.label) + " " + t.model;
+    try {
+      var r = await post("/api/test", { index: t.i, model: t.model });
+      if (r.ok) ok++;
+      else bad.push([t.model, (r.status || "no answer") + " " + (r.error || "")]);
+    } catch (e) {
+      bad.push([t.model, e.message]);
+    }
+    done++;
+  }
+
+  if (closeDialog) closeDialog();
+  await loadRecord();
+  drawAll();
+  if (!bad.length) { toast(ok + " of " + done + " answered"); return; }
+  openDialog([
+    h("h2", {}, ok + " of " + done + " answered"),
+    h("p", {}, "These did not. They stay in the pot; routing simply learns to avoid them."),
+    h("div", {}, bad.map(function (b) {
+      return h("div", { className: "kv" }, h("b", {}, b[0]), h("span", {}, b[1]));
+    })),
+    h("div", { className: "btns" },
+      h("button", { className: "primary", onclick: function () { if (closeDialog) closeDialog(); } }, "Close")),
+  ], { wide: true });
+}
+
+// --- provider form --------------------------------------------------------
+function providerForm(i) {
+  var p = i === undefined ? null : S.providers[i];
+  var name = h("input", { type: "text", value: p ? p.name : "", placeholder: p ? p.label : "openrouter" });
+  var url = h("input", { type: "text", value: p ? p.baseUrl : "", placeholder: "https://openrouter.ai/api/v1" });
+  var apiKey = h("input", { type: "password", value: p ? p.apiKey : "" });
+  var models = h("input", { type: "text", placeholder: "gpt-oss:120b, gpt-oss:20b" });
+  var err = h("p", { className: "err" });
+
+  var fields = [
+    h("div", { className: "fld" }, h("label", {}, "Name ", h("span", { className: "hint" }, "optional")), name),
+    h("div", { className: "fld" }, h("label", {}, "Base URL"), url),
+    h("div", { className: "fld" }, h("label", {}, "API key ", h("span", { className: "hint" }, "blank if the backend needs none")), apiKey),
+  ];
+  if (!p) {
+    fields.push(h("div", { className: "fld" },
+      h("label", {}, "Models ", h("span", { className: "hint" }, "comma separated; you can pick more from its list afterwards")),
+      models));
+  }
+
+  openDialog([
+    h("h2", {}, p ? "Edit " + (p.name || p.label) : "Add a provider"),
+    h("p", {}, p ? "Its address, key and whether opencc uses it." : "Nothing is saved until this is complete."),
+    fields,
+    err,
+    h("div", { className: "btns" },
+      p ? h("button", { className: "danger left", onclick: async function () {
+        var ok = await ask("Delete " + (p.name || p.label) + "?",
+          "Its API key goes with it. Switch it off instead to keep the key and the model list.", "Delete it");
+        if (!ok) return;
+        var next = copyProviders();
+        next.splice(i, 1);
+        LISTS = {};
+        PICKED.clear();
+        await save(next);
+        toast("Deleted");
+      } }, "Delete") : null,
+      p ? h("button", { onclick: async function () {
+        var next = copyProviders();
+        next[i].disabled = !next[i].disabled;
+        var nowOn = !next[i].disabled;
+        if (closeDialog) closeDialog();
+        await save(next);
+        toast(nowOn ? "Switched on" : "Switched off: its models are skipped");
+      } }, p.disabled ? "Switch on" : "Switch off") : null,
+      h("button", { onclick: function () { if (closeDialog) closeDialog(); } }, "Cancel"),
+      h("button", { className: "primary", onclick: async function () {
+        var u = url.value.trim().replace(/\\/+$/, "");
+        if (!u) { err.textContent = "A base URL is required."; url.focus(); return; }
+        if (!/^https?:\\/\\//.test(u)) {
+          err.textContent = "The base URL needs to start with http:// or https://";
+          url.focus();
+          return;
+        }
+
+        var next = copyProviders();
+        if (p) {
+          next[i].name = name.value.trim();
+          next[i].baseUrl = u;
+          next[i].apiKey = apiKey.value;
+        } else {
+          var ms = models.value.split(",").map(function (m) { return m.trim(); }).filter(Boolean);
+          ms = ms.filter(function (m, k) { return ms.indexOf(m) === k; });
+          if (!ms.length) {
+            err.textContent = "At least one model is required, or there is nothing to route to.";
+            models.focus();
+            return;
+          }
+          next.push({ name: name.value.trim(), baseUrl: u, apiKey: apiKey.value, models: ms, disabled: false, disabledModels: [] });
+        }
+        try {
+          if (closeDialog) closeDialog();
+          LISTS = {};
+          await save(next);
+          toast(p ? "Saved" : "Provider added");
+          if (!p) { location.hash = "#providers"; showPage(); }
+        } catch (e2) {
+          err.textContent = "Could not save: " + e2.message;
+        }
+      } }, p ? "Save" : "Add provider")),
+  ]);
+}
+
+// --- requests -------------------------------------------------------------
+var FILTERS = {
+  all: function () { return true; },
+  failed: function (r) { return !r.ok; },
+  fallback: function (r) { return r.fallback; },
+};
+
+function drawRequests() {
+  $("n-reqs").textContent = REQS.length || "";
+  var shown = REQS.filter(FILTERS[reqFilter]);
+  // The open request can fall off the end as older ones are pruned.
+  if (reqPicked !== null && !REQS.some(function (r) { return r.at === reqPicked; })) reqPicked = null;
+
+  if (!shown.length) {
+    put($("reqlist"), h("div", { className: "empty" },
+      REQS.length ? "No request matches this filter." : "Nothing yet. Requests appear here as Claude Code makes them."));
+    drawDetail();
+    return;
+  }
+
+  put($("reqlist"), shown.map(function (r) {
+    return h("button", { className: "req" + (r.at === reqPicked ? " on" : ""),
+      onclick: function () { reqPicked = r.at; drawRequests(); } },
+      h("span", { className: "dot " + (r.ok ? (r.fallback ? "" : "ok") : "bad"),
+        title: r.ok ? (r.fallback ? "Served, but not by the first model tried" : "Served") : "Failed" }),
+      h("span", { className: "when" }, ago(r.at)),
+      h("span", { className: "who" }, r.ok ? r.served
+        : (r.status || "failed") + " after " + r.attempts.length + (r.attempts.length === 1 ? " try" : " tries")),
+      h("span", { className: "when" }, r.kind));
+  }));
+  drawDetail();
+}
+
+function drawDetail() {
+  var r = null;
+  REQS.forEach(function (x) { if (x.at === reqPicked) r = x; });
+  if (!r) {
+    put($("reqdetail"), h("p", { className: "muted" }, "Pick a request to see every model it tried."));
+    return;
+  }
+
+  var kb = Math.round(r.chars / 1024);
+  var about = [
     ["When", new Date(r.at).toLocaleTimeString() + " (" + ago(r.at) + ")"],
     ["Asked for", r.model],
     ["Needed", r.kind],
@@ -960,468 +1223,136 @@ function renderDetail() {
     ["Result", r.ok ? "served by " + r.served : "failed"],
   ];
 
-  $("reqdetail").innerHTML =
-    facts.map((f) => '<div class="kv"><b>' + esc(f[0]) + "</b><span>" + esc(f[1]) + "</span></div>").join("") +
-    '<ul class="walk">' +
-      (r.attempts.length
-        ? r.attempts.map((a, i) =>
-            "<li>" + (i + 1) + ". " + esc(a.provider) + " / " + esc(a.model) +
-            " &rarr; " + esc(a.status === 0 ? "no answer" : a.status) +
+  put($("reqdetail"),
+    about.map(function (f) { return h("div", { className: "kv" }, h("b", {}, f[0]), h("span", {}, f[1])); }),
+    h("ul", { className: "walk" }, r.attempts.length
+      ? r.attempts.map(function (a, n) {
+          return h("li", {},
+            (n + 1) + ". " + a.provider + " / " + a.model + " -> " + (a.status === 0 ? "no answer" : a.status) +
             (a.ms ? " in " + (a.ms / 1000).toFixed(1) + "s" : "") +
-            (a.verdict && a.verdict !== "ok" ? " (" + esc(a.verdict) + ")" : "") +
-            (a.error ? '<div class="err">' + esc(a.error) + "</div>" : "") +
-            "</li>").join("")
-        : "<li>No model was tried.</li>") +
-    "</ul>" +
-    (r.error && !r.ok ? '<div class="walk"><div class="err">' + esc(r.error) + "</div></div>" : "");
+            (a.verdict && a.verdict !== "ok" ? " (" + a.verdict + ")" : ""),
+            a.error ? h("div", { className: "err" }, a.error) : null);
+        })
+      : h("li", {}, "No model was tried.")),
+    r.error && !r.ok ? h("div", { className: "walk" }, h("div", { className: "err" }, r.error)) : null);
 }
 
-function renderAll() {
-  renderHeader();
-  renderCatalogButton();
-  renderCoverage();
-  if (!state.providers.length) {
-    $("list").innerHTML = '<div class="nothing">No providers yet. Use <b>Add provider</b> above to set one up.</div>';
-    return;
-  }
-  $("list").innerHTML = state.providers.map(providerCard).join("");
+// --- live updates ---------------------------------------------------------
+// The proxy and this panel are one process, so a served request is pushed
+// here. The event only says that something happened; what it means is worked
+// out by refetching, which keeps one copy of that rule rather than two.
+function listen() {
+  var src;
+  try { src = new EventSource("/api/events"); } catch (e) { return; }
+  src.addEventListener("message", async function (e) {
+    var what;
+    try { what = JSON.parse(e.data).what; } catch (e2) { return; }
+    if (what === "request" || what === "requests-cleared") {
+      await Promise.all([loadRequests(), loadRecord()]);
+      drawAll();
+    }
+  });
 }
 
-// --- catalogue ------------------------------------------------------------
-// Fetched when a provider is first expanded rather than for all of them up
-// front: it is a network call per provider and most stay collapsed.
-// Why it failed is cached alongside the result. Keeping only the models
-// meant a provider that refused to list looked identical to one that served
-// an empty list, and the browser below then skipped the fetch and showed
-// "no models" with nothing to explain it.
-const catalogues = {};
-
-async function fetchCatalogue(i, { fresh = false } = {}) {
-  if (fresh) delete catalogues[i];
-  if (catalogues[i]) return catalogues[i];
+async function refreshCatalog() {
+  var b = $("catalog");
+  b.disabled = true;
+  b.textContent = "fetching...";
   try {
-    const out = await api("/api/catalogue?index=" + i);
-    catalogues[i] = { models: out.models || [], error: out.error || "" };
-  } catch (err) {
-    catalogues[i] = { models: [], error: err.message };
-  }
-  return catalogues[i];
-}
-
-async function fillCatalogue(i, opts) {
-  const list = $("cat" + i);
-  if (!list || (list.dataset.done && !opts?.fresh)) return;
-  list.dataset.done = "1";
-  const { models } = await fetchCatalogue(i, opts);
-  if ($("cat" + i)) {
-    $("cat" + i).innerHTML = models.map((m) => '<option value="' + attr(m.id) + '"></option>').join("");
+    var out = await post("/api/catalog/refresh");
+    await loadCatalog();
+    drawAll();
+    toast(out.error ? "models.dev: " + out.error : "models.dev: " + out.size.toLocaleString() + " models", Boolean(out.error));
+  } catch (e) {
+    toast("Could not reach models.dev: " + e.message, true);
+  } finally {
+    b.disabled = false;
+    drawCatalogButton();
   }
 }
 
-// --- browsing a provider's catalogue --------------------------------------
-// The datalist above is fine when you know the name. This is for when you do
-// not: the whole list, searchable, with what models.dev knows beside each
-// one, and several added at once.
-//
-// Typing a name you half-remember is how a model ends up configured under a
-// name the provider does not serve, which fails every request with a 404
-// that looks like the provider being down.
-async function browseDialog(i) {
-  const p = state.providers[i];
-  openDialog(
-    '<h2>' + esc(p.name || p.label) + "</h2>" +
-    "<p>Everything this provider lists. Ticked ones are already in your rotation.</p>" +
-    '<div class="cat-top">' +
-      '<input type="text" id="cat-q" placeholder="Search models" autocomplete="off">' +
-      '<label style="margin:0;text-transform:none;letter-spacing:0;font-size:12.5px;color:var(--ink-2);display:flex;gap:6px;align-items:center">' +
-        '<input type="checkbox" id="cat-free" style="width:auto"> Free only</label>' +
-      '<button type="button" id="cat-reload" title="Ask the provider for its list again. A local server can swap which model it serves without the name here changing.">Refresh</button>' +
-    "</div>" +
-    '<div class="cat-list" id="cat-list"><p class="cat-none"><span class="spin"></span>Asking the provider…</p></div>' +
-    '<p class="err" id="cat-err"></p>' +
-    '<div class="acts">' +
-      '<button data-dlg="close">Close</button>' +
-      '<button class="primary" id="cat-add" disabled>Add selected</button>' +
-    "</div>",
-  );
-  $("dialog").classList.add("wide");
+// --- wiring ---------------------------------------------------------------
+function drawAll() { drawSidebar(); drawMine(); drawProviders(); drawRequests(); showPage(); }
 
-  const first = await fetchCatalogue(i);
-  // Held in one array the reload below refills, so draw() always reads the
-  // current list without being handed a new reference each time.
-  const models = [...first.models];
-  const error = first.error;
-  if (!$("cat-list")) return; // the dialog was closed while we waited
-  if (error) {
-    $("cat-err").textContent = "This provider would not list its models: " + error +
-      ". You can still add one by name in the box behind this dialog.";
-  }
-
-  const picked = new Set();
-
-  const draw = () => {
-    const q = $("cat-q").value.trim().toLowerCase();
-    const freeOnly = $("cat-free").checked;
-    const shown = models.filter((m) =>
-      (!q || m.id.toLowerCase().includes(q)) && (!freeOnly || m.input === 0));
-
-    $("cat-add").disabled = picked.size === 0;
-    $("cat-add").textContent = picked.size ? "Add " + picked.size + " model" + (picked.size === 1 ? "" : "s") : "Add selected";
-
-    if (!shown.length) {
-      $("cat-list").innerHTML = '<p class="cat-none">' +
-        (models.length ? "Nothing matches." : "This provider listed no models.") + "</p>";
-      return;
-    }
-
-    $("cat-list").innerHTML = shown.map((m) => {
-      const have = p.models.includes(m.id);
-      const bits = [];
-      if (m.context) bits.push(Math.round(m.context / 1000) + "k ctx");
-      if (m.input !== undefined && m.output !== undefined) bits.push(money(m.input) + " / " + money(m.output));
-      if (m.tools === false) bits.push("no tools");
-      if (m.vision) bits.push("vision");
-      return '<div class="cat-row" data-have="' + (have ? 1 : 0) + '">' +
-        '<input type="checkbox" data-cat="' + attr(m.id) + '"' +
-          (have ? " checked disabled" : picked.has(m.id) ? " checked" : "") + ">" +
-        "<label>" + esc(m.id) + "</label>" +
-        (bits.length ? '<span class="meta">' + esc(bits.join(" · ")) + "</span>" : "") +
-      "</div>";
-    }).join("");
-  };
-
-  $("cat-list").addEventListener("change", (e) => {
-    const id = e.target.dataset.cat;
-    if (!id) return;
-    if (e.target.checked) picked.add(id);
-    else picked.delete(id);
-    $("cat-add").disabled = picked.size === 0;
-    $("cat-add").textContent = picked.size ? "Add " + picked.size + " model" + (picked.size === 1 ? "" : "s") : "Add selected";
-  });
-  $("cat-q").addEventListener("input", draw);
-  $("cat-free").addEventListener("change", draw);
-
-  $("cat-reload").addEventListener("click", async () => {
-    $("cat-reload").disabled = true;
-    $("cat-err").textContent = "";
-    $("cat-list").innerHTML = '<p class="cat-none"><span class="spin"></span>Asking the provider…</p>';
-    const next = await fetchCatalogue(i, { fresh: true });
-    if (!$("cat-list")) return;
-    models.length = 0;
-    models.push(...next.models);
-    if (next.error) $("cat-err").textContent = "This provider would not list its models: " + next.error;
-    $("cat-reload").disabled = false;
-    draw();
-  });
-
-  $("cat-add").addEventListener("click", async () => {
-    const add = [...picked].filter((m) => !p.models.includes(m));
-    if (!add.length) return;
-    $("cat-add").disabled = true;
-    p.models.push(...add);
-    try {
-      await save();
-      if (closeDialog) closeDialog();
-      toast("Added " + add.length + " model" + (add.length === 1 ? "" : "s"));
-    } catch (err) {
-      p.models = p.models.filter((m) => !add.includes(m));
-      $("cat-add").disabled = false;
-      $("cat-err").textContent = "Could not save: " + err.message;
-    }
-  });
-
-  draw();
-  $("cat-q").focus();
-}
-
-document.addEventListener("toggle", (e) => {
-  const card = e.target.closest(".prov");
-  if (!card) return;
-  const i = Number(card.dataset.i);
-  if (card.open) {
-    expanded.add(i);
-    fillCatalogue(i);
-  } else {
-    expanded.delete(i);
-  }
-}, true);
-
-// --- field edits ----------------------------------------------------------
-document.addEventListener("change", async (e) => {
-  const field = e.target.dataset.f;
-  if (field) {
-    const i = Number(e.target.dataset.i);
-    state.providers[i][field] = e.target.value;
-
-    // The collapsed summary repeats the name and the URL, so keep those two
-    // in step by hand. Redrawing the card instead is what used to throw away
-    // whatever was being typed in the next field.
-    const card = document.querySelector('.prov[data-i="' + i + '"]');
-    if (card && field === "name") {
-      card.querySelector(".head-name").textContent = e.target.value || state.providers[i].label || "";
-    }
-    if (card && field === "baseUrl") card.querySelector(".head-url").textContent = e.target.value;
-
-    await save({ redraw: false });
-    toast("Saved");
-    return;
-  }
-  if (e.target.id === "port") {
-    state.port = e.target.value || "3000";
-    await save({ redraw: false });
-    toast("Saved");
-  }
+$("theme").addEventListener("click", function () {
+  var next = currentTheme() === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem("opencc-theme", next); } catch (e) {}
+  drawTheme();
+});
+$("streaming").addEventListener("click", async function () {
+  S.streaming = !S.streaming;
+  await save();
+  toast("Streaming " + (S.streaming ? "on" : "off"));
+});
+$("port").addEventListener("change", async function () {
+  S.port = $("port").value || "3000";
+  await save();
+  toast("Saved. The proxy uses it next time you start opencc.");
+});
+$("catalog").addEventListener("click", refreshCatalog);
+$("add-prov").addEventListener("click", function () { providerForm(); });
+$("go-prov").addEventListener("click", function () { location.hash = "#providers"; showPage(); });
+$("q").addEventListener("input", function (e) { query = e.target.value; drawProviders(); });
+$("free").addEventListener("change", function (e) { freeOnly = e.target.checked; drawProviders(); });
+$("sort").addEventListener("change", function (e) { catSort = e.target.value; drawProviders(); });
+$("fold-all").addEventListener("click", function () {
+  if (SHUT.size >= S.providers.length) SHUT.clear();
+  else S.providers.forEach(function (p, i) { SHUT.add(i); });
+  drawProviders();
+});
+$("pick-all").addEventListener("change", function (e) {
+  shownKeys().forEach(function (k) { if (e.target.checked) PICKED.add(k); else PICKED.delete(k); });
+  drawProviders();
+});
+$("reqfilter").addEventListener("click", function (e) {
+  var b = e.target.closest("button");
+  if (!b) return;
+  reqFilter = b.dataset.f;
+  Array.prototype.forEach.call($("reqfilter").children, function (x) { x.classList.toggle("on", x === b); });
+  drawRequests();
+});
+$("reqclear").addEventListener("click", async function () {
+  if (!REQS.length) { toast("Nothing logged yet"); return; }
+  var ok = await ask("Clear all " + REQS.length + " logged requests?",
+    "This only empties the log. Nothing the models have learned is touched, and routing is unchanged.", "Clear it");
+  if (!ok) return;
+  await post("/api/requests/clear");
+  reqPicked = null;
+  await loadRequests();
+  toast("Cleared");
+});
+$("reset").addEventListener("click", async function () {
+  var seen = 0;
+  for (var k in REC) for (var j in REC[k]) seen += REC[k][j].ok + REC[k][j].fail;
+  if (!seen) { toast("Nothing on record yet"); return; }
+  var ok = await ask("Forget all " + seen + " results?",
+    "Every model goes back to untried, so routing is even odds until it learns again. " +
+    "The old record is kept as stats.jsonl.previous.", "Reset it");
+  if (!ok) return;
+  var out = await post("/api/stats/reset");
+  await loadRecord();
+  drawAll();
+  toast(out.moved ? "Reset. The old record is in stats.jsonl.previous" : "Reset");
 });
 
-document.addEventListener("keydown", (e) => {
-  if (e.key !== "Enter") return;
-  const i = e.target.dataset.pick;
-  if (i === undefined) return;
-  e.preventDefault();
-  document.querySelector('button[data-act="madd"][data-i="' + i + '"]').click();
-});
+try {
+  var savedSort = JSON.parse(localStorage.getItem("opencc-sort"));
+  if (Array.isArray(savedSort)) SORT = savedSort.filter(function (x) { return x && COLS[x.key]; });
+} catch (e) {}
 
-// --- add provider ---------------------------------------------------------
-// A form, not a blank row appended to the list. The old version pushed an
-// empty provider and saved on the first blur, and a provider with no URL and
-// no models is not routable, so the server dropped it and the row vanished
-// mid-edit. Nothing is written here until there is something worth writing.
-function addProviderDialog() {
-  openDialog(
-    "<h2>Add provider</h2>" +
-    "<p>Nothing is saved until this form is complete.</p>" +
-    '<label>Name <span class="hint">optional, for the logs</span></label>' +
-    '<input type="text" id="np-name" placeholder="z.ai glm flash">' +
-    "<label>Base URL</label>" +
-    '<input type="text" id="np-url" placeholder="https://openrouter.ai/api/v1">' +
-    '<label>API key <span class="hint">blank if the backend needs none</span></label>' +
-    '<input type="password" id="np-key">' +
-    '<label>Models <span class="hint">comma separated</span></label>' +
-    '<input type="text" id="np-models" placeholder="gpt-oss:120b, gpt-oss:20b">' +
-    '<p class="err" id="np-err"></p>' +
-    '<div class="acts">' +
-      '<button data-dlg="close">Cancel</button>' +
-      '<button class="primary" id="np-save">Add provider</button>' +
-    "</div>",
-  );
-
-  $("np-save").addEventListener("click", async () => {
-    const url = $("np-url").value.trim().replace(/\\/+$/, "");
-    const models = [...new Set($("np-models").value.split(",").map((m) => m.trim()).filter(Boolean))];
-
-    if (!url) { $("np-err").textContent = "A base URL is required."; $("np-url").focus(); return; }
-    if (!/^https?:\\/\\//.test(url)) { $("np-err").textContent = "The base URL needs to start with http:// or https://"; $("np-url").focus(); return; }
-    if (!models.length) { $("np-err").textContent = "At least one model is required, or there is nothing to route to."; $("np-models").focus(); return; }
-
-    $("np-save").disabled = true;
-    $("np-err").textContent = "";
-    state.providers.push({
-      name: $("np-name").value.trim(),
-      baseUrl: url,
-      apiKey: $("np-key").value,
-      models,
-      disabled: false,
-      disabledModels: [],
-    });
-    try {
-      expanded.add(state.providers.length - 1);
-      await save();
-      if (closeDialog) closeDialog();
-      toast("Added " + models.length + " model(s)");
-      document.querySelector('.prov[data-i="' + (state.providers.length - 1) + '"]')
-        ?.scrollIntoView({ block: "center", behavior: "smooth" });
-    } catch (err) {
-      state.providers.pop();
-      $("np-save").disabled = false;
-      $("np-err").textContent = "Could not save: " + err.message;
-    }
-  });
-}
-
-// --- clicks ---------------------------------------------------------------
-document.addEventListener("click", async (e) => {
-  const btn = e.target.closest("button");
-  if (!btn) return;
-
-  if (btn.dataset.dlg === "close") { if (closeDialog) closeDialog(); return; }
-
-  // Buttons live inside <summary>, whose default action is to fold the card.
-  if (btn.closest("summary")) e.preventDefault();
-
-  const i = Number(btn.dataset.i);
-  const act = btn.dataset.act;
-
-  if (btn.id === "add") { addProviderDialog(); return; }
-  if (btn.id === "theme") { flipTheme(); return; }
-
-  if (btn.id === "catalog") {
-    btn.disabled = true;
-    btn.textContent = "fetching…";
-    try {
-      const out = await api("/api/catalog/refresh", { method: "POST" });
-      await loadCatalog();
-      renderAll();
-      // A refresh can make probes unnecessary, so what is still pending
-      // changes with it.
-      toast(out.error
-        ? "models.dev: " + out.error
-        : "models.dev: " + out.size.toLocaleString() + " models");
-    } catch (err) {
-      toast("Could not reach models.dev: " + err.message);
-    } finally {
-      btn.disabled = false;
-      renderCatalogButton();
-    }
+(async function () {
+  try {
+    await loadState();
+  } catch (e) {
+    put($("mt"), h("div", { className: "card" }, h("div", { className: "empty" }, "Could not load the config: " + e.message)));
     return;
   }
-  if (btn.id === "streaming") { state.streaming = !state.streaming; await save({ redraw: false }); renderHeader(); return; }
-  if (btn.id === "refresh") {
-    await Promise.all([loadRecords(), loadCatalog(), loadRequests()]);
-    renderAll();
-    toast("Record refreshed");
-    return;
-  }
-
-  if (act === "browse") { await browseDialog(i); return; }
-
-  // --- the request log ---
-  if (btn.dataset.f) {
-    reqFilter = btn.dataset.f;
-    for (const b of $("reqfilter").children) b.classList.toggle("on", b === btn);
-    renderRequests();
-    return;
-  }
-
-  if (btn.dataset.req !== undefined) {
-    reqPicked = Number(btn.dataset.req);
-    renderRequests();
-    return;
-  }
-
-  if (btn.id === "reqclear") {
-    if (!requests.length) { toast("Nothing logged yet"); return; }
-    if (!await ask(
-      "Clear all " + requests.length + " logged requests?",
-      "This only empties the log. Nothing the models have learned is touched, and routing is unchanged.",
-      "Clear it",
-    )) return;
-    await api("/api/requests/clear", { method: "POST" });
-    reqPicked = null;
-    await loadRequests();
-    renderDetail();
-    toast("Cleared");
-    return;
-  }
-
-  if (act === "cover") {
-    await testNewModels(btn.dataset.kind);
-    return;
-  }
-
-  if (btn.id === "testnew") {
-    const pending = await api("/api/warmup/pending");
-    if (!pending.total) { toast("Every model has been tried already"); return; }
-    await testNewModels();
-    return;
-  }
-
-  if (btn.id === "reset") {
-    const seen = Object.values(records).reduce(
-      (n, kinds) => n + Object.values(kinds).reduce((m, row) => m + row.ok + row.fail, 0), 0,
-    );
-    if (!seen) { toast("Nothing on record yet"); return; }
-    if (!await ask(
-      "Forget all " + seen + " results?",
-      "Every model goes back to untried, so routing is even odds until it learns again. " +
-      "The next time you start opencc it warms up, which fills most of it back in. " +
-      "The old record is kept as stats.jsonl.previous.",
-      "Reset it",
-    )) return;
-
-    const out = await api("/api/stats/reset", { method: "POST" });
-    await loadRecords();
-    renderAll();
-    toast(out.moved ? "Reset. The old record is in stats.jsonl.previous" : "Reset");
-    return;
-  }
-
-  if (act === "toggle") { state.providers[i].disabled = !state.providers[i].disabled; await save(); return; }
-
-  if (act === "del") {
-    const p = state.providers[i];
-    if (!await ask(
-      "Delete " + (p.name || p.label) + "?",
-      "Its API key goes with it. Turn it off instead to keep the key and the model list.",
-      "Delete it",
-    )) return;
-    state.providers.splice(i, 1);
-    expanded.clear();
-    await save();
-    return;
-  }
-
-  if (act === "moff") {
-    const model = btn.dataset.m;
-    const p = state.providers[i];
-    const parked = p.disabledModels || [];
-    p.disabledModels = parked.includes(model) ? parked.filter((m) => m !== model) : [...parked, model];
-    await save();
-    return;
-  }
-
-  if (act === "madd") {
-    const input = document.querySelector('[data-pick="' + i + '"]');
-    const model = (input.value || "").trim();
-    if (!model) { toast("Type or pick a model name first"); input.focus(); return; }
-    if (state.providers[i].models.includes(model)) { toast(model + " is already listed"); return; }
-    state.providers[i].models.push(model);
-    await save();
-    toast("Added " + model);
-    return;
-  }
-
-  if (act === "mdel") {
-    const p = state.providers[i];
-    if (p.models.length === 1) {
-      toast("A provider needs at least one model. Delete or turn off the provider instead.");
-      return;
-    }
-    const [gone] = p.models.splice(Number(btn.dataset.pos), 1);
-    if (p.disabledModels) p.disabledModels = p.disabledModels.filter((m) => m !== gone);
-    await save();
-    return;
-  }
-
-  if (act === "test") {
-    const model = btn.dataset.m;
-    showWorking("Testing " + model, 'Sending one real "Hi" through this provider. The result counts toward its record.');
-    if ($("now")) $("now").textContent = model;
-    try {
-      const r = await api("/api/test", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ index: i, model }),
-      });
-      if (closeDialog) closeDialog();
-      await loadRecords();
-      renderAll();
-      showResult(model, [
-        ["Result", r.ok
-          ? (r.calledTool ? "Called the tool" : "Answered, but in prose — no tool call")
-          : "Failed"],
-      ].concat(r.ok ? [] : [["Error", r.error]]),
-        r.ok && !r.calledTool
-          ? "Claude Code reads and edits files with tool calls, so a model that answers in prose here is not much use to it."
-          : undefined);
-    } catch (err) {
-      if (closeDialog) closeDialog();
-      showResult("Test failed", [["Error", err.message]]);
-    }
-  }
-});
-
-load().catch((err) => {
-  $("list").innerHTML = '<div class="nothing">Could not load the config: ' + esc(err.message) + "</div>";
-});
+  drawAll();
+  await Promise.all([loadRecord(), loadCatalog(), loadRequests()]);
+  drawAll();
+  listen();
+})();
 </script>
 </body>
 </html>`;

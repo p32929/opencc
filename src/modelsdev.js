@@ -176,18 +176,3 @@ export function tooBigForCatalog(baseUrl, model, chars) {
 export function forgetCatalog() {
   table = null;
 }
-
-// What the catalogue says about one kind of request, or null when it cannot
-// say — which is not the same as "no".
-//
-// Note what is missing: there is no published field for whether a backend
-// accepts a PDF as an OpenAI `file` part. That is a property of the endpoint,
-// not of the model, so documents always come back null and are always worth
-// asking about.
-export function catalogSays(baseUrl, model, kind) {
-  const info = lookupModel(baseUrl, model);
-  if (!info) return null;
-  if (kind === "tools") return info.tools;
-  if (kind === "image") return info.vision;
-  return null;
-}

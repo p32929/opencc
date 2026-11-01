@@ -33,11 +33,10 @@ Options
 
   --port N               port for the proxy (default: from your config)
   --panel-port N         port for the panel (default: 3450)
-  --no-warmup            do not test new models at startup
   -h, --help             this
 
-The panel is where you add providers. The proxy is what Claude Code talks to,
-and it only starts once at least one model can call tools.
+The panel is where you add providers and pick models. The proxy is what
+Claude Code talks to, and it starts as soon as there is something to route to.
 
   config   ~/.opencc/.env
   record   ~/.opencc/stats.jsonl
@@ -56,7 +55,7 @@ if (args.includes("--reset-stats")) {
     ? `  Record reset. The old one is at ${previous}`
     : "  Nothing on record, so nothing to reset.");
   console.log("  Providers, models and keys are untouched.");
-  console.log("  The next time you run opencc it warms up and starts learning again.");
+  console.log("  Routing is even odds again until real requests fill it back in.");
   console.log("");
   process.exit(0);
 }
@@ -100,11 +99,9 @@ function flagValue(name) {
 // fill in the panel, start Claude Code.
 async function run() {
   const { getConfig, isConfigured } = await import("./config.js");
-  const { coverage } = await import("./stats.js");
-  // What models.dev publishes, so the warm-up only asks about the models
-  // nobody has answered for. Loaded once, before anything consults it; a
-  // failure here just means more gets probed.
-  const { loadCatalog, catalogSays } = await import("./modelsdev.js");
+  // Context windows, prices and what each model can do, so the panel has them
+  // on its first paint. A failure here only means the panel shows less.
+  const { loadCatalog } = await import("./modelsdev.js");
   await loadCatalog().catch(() => {});
   const { runPanel, openBrowser, DEFAULT_PANEL_PORT } = await import("./panel.js");
   const { startServer } = await import("./server.js");
@@ -115,28 +112,17 @@ async function run() {
   // Why the proxy is not up, as lines to print. Null once it is.
   let heldBack = ["proxy  waiting - add a provider in the panel and it starts on its own"];
 
-  // Whether there is any point exposing the proxy yet.
+  // Whether there is any point exposing the proxy yet. There is exactly one
+  // reason there is not: nothing to route to.
   //
-  // Tool calling is not optional: Claude Code reads and edits files with it,
-  // so a proxy whose models all fail at it can only waste your time. The bar
-  // is "we know it cannot work", not "we have not proved it can" - a model
-  // nobody has asked yet gets the benefit of the doubt, or a fresh install
-  // started with --no-warmup would never come up.
+  // It used to also refuse to start unless something had proved it could call
+  // tools, which meant probing every model on every cold start to answer a
+  // question models.dev already answers. The panel shows that per model now,
+  // and a proxy that starts is more useful than one that waits.
   function blockedBecause(live) {
-    if (!isConfigured(live)) {
-      return ["proxy  waiting - add a provider in the panel and it starts on its own"];
-    }
-
-    const tools = coverage(live.providers, "tools", undefined, catalogSays);
-    if (tools.can === 0 && tools.untried === 0) {
-      return [
-        `proxy  not started - none of your ${plural(tools.cannot, "model")} can call tools`,
-        "       Claude Code needs it to read and edit files.",
-        "       Add a model that can, in the panel, and it starts.",
-      ];
-    }
-
-    return null;
+    return isConfigured(live)
+      ? null
+      : ["proxy  waiting - add a provider in the panel and it starts on its own"];
   }
 
   async function startProxy({ announce = true } = {}) {
@@ -146,8 +132,7 @@ async function run() {
     heldBack = blockedBecause(live);
     if (heldBack) return;
 
-    // The port is taken before the warm-up runs, so a clash is known in a
-    // moment rather than after a minute of probing.
+    // Taken before anything else, so a clash is known at once.
     let port = flagValue("--port") ?? live.port;
     for (let tries = 0; ; tries++) {
       try {
@@ -161,11 +146,6 @@ async function run() {
     proxyPort = port;
     await rememberPort(port);
 
-    if (!args.includes("--no-warmup")) {
-      const { warmUp, printingReporter } = await import("./warmup.js");
-      await warmUp(live.providers, { onEvent: printingReporter() });
-    }
-
     if (!announce) return;
 
     const enabled = live.providers.filter((p) => !p.disabled);
@@ -174,13 +154,6 @@ async function run() {
     console.log("");
     console.log(`  proxy  http://localhost:${port}   ${plural(models, "model")}, ${plural(enabled.length, "provider")}`);
     if (!live.streaming) console.log("  streaming is off, so replies arrive complete");
-
-    // Images are optional: Claude Code works fine without them, you just
-    // cannot paste a screenshot. Worth saying, not worth blocking over.
-    const images = coverage(live.providers, "image", undefined, catalogSays);
-    if (images.can === 0 && images.untried === 0) {
-      console.log("  no model can take images, so pasted screenshots will fail");
-    }
 
     console.log("");
     console.log("  in another terminal: opencc claude");

@@ -1,20 +1,22 @@
-// The admin panel `opencc init` opens: which providers exist, which models
-// they offer, and how each of those models has actually been doing.
+// The admin panel: which providers exist, which models they offer, and how
+// each of those has actually been doing.
 //
-// There is nothing here for ordering or for capabilities. Both are worked out
-// from the record in stats.jsonl while the proxy runs, so the only things
-// left to set are the facts opencc cannot discover on its own: a URL, a key,
-// and which models to put in the pot.
+// Nothing here sets ordering and nothing probes for capabilities. Ordering is
+// read from the record in stats.jsonl as the proxy runs; what a model can do
+// is read from models.dev. What is left to set is the part neither can know:
+// a URL, a key, and which models to put in the pot.
 //
 // No dependencies: Node's http server, one hand-written page, and a small
 // JSON API over the same configStore the rest of opencc reads.
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { readStoredConfig, writeStoredConfig } from "./configStore.js";
 import { providersFromEnv, displayName, streamingFromEnv } from "./config.js";
-import { allStats, successRate, coolingFor, coverage, record, resetStats, NEEDED } from "./stats.js";
-import { warmUp, pendingModels, probeModel } from "./warmup.js";
-import { loadCatalog, lookupModel, catalogAge, catalogSize, catalogSays } from "./modelsdev.js";
+import { allStats, successRate, coolingFor, record, resetStats } from "./stats.js";
+import { loadCatalog, lookupModel, catalogAge, catalogSize } from "./modelsdev.js";
 import { listRequests, clearRequests, KEEP } from "./reqlog.js";
 import { bus } from "./events.js";
 import { page } from "./panelPage.js";
@@ -42,9 +44,15 @@ function readBody(req) {
   });
 }
 
-// A warm-up started from the panel. Module state is fine: the panel is a
-// single local process serving one person.
-let warming = null;
+// Read once: it cannot change while the process is running, and the page
+// shows it beside the name in the sidebar.
+let version = "";
+try {
+  const here = dirname(fileURLToPath(import.meta.url));
+  version = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")).version;
+} catch {
+  // Running from somewhere package.json is not reachable.
+}
 
 function loadState() {
   const stored = readStoredConfig();
@@ -52,26 +60,85 @@ function loadState() {
     providers: providersFromEnv(stored).map((p) => ({ ...p, label: displayName(p) })),
     port: stored.PORT || "3000",
     streaming: streamingFromEnv(stored),
+    version,
   };
 }
 
-// One real tool-calling request, the same probe the warm-up sends. Recorded
-// like any other call, so pressing Test is not just a check: it is the first
-// entry in a new model's record and the router reads it straight away.
+// One real request, and what came back.
 //
-// Tool calling rather than a bare "Hi" because that is the shape of nearly
-// every request Claude Code makes. Answering "Hi" proves almost nothing.
-async function testModel(provider, model, kind = "tools") {
-  const outcome = await probeModel(provider, model, kind);
-  record({ baseUrl: provider.baseUrl, model, kind, status: outcome.status, ms: outcome.took });
+// Not a capability check: what a model can do is models.dev's answer, read
+// from the catalogue, and opencc does not go asking. This is "does this name
+// exist at this backend, and does it answer", which is the question a wrong
+// model name or a dead key actually raises. The result is recorded like any
+// other call, so the Record column has something in it before Claude Code
+// sends the first request.
+//
+// The request and the reply are both returned, trimmed, because "it failed"
+// without the body is the answer that sends you to curl.
+const DUMP_LIMIT = 4000;
+const trim = (text) => (text.length > DUMP_LIMIT ? text.slice(0, DUMP_LIMIT) + "\n…" : text);
 
-  const ok = outcome.status >= 200 && outcome.status < 300;
-  return {
-    ok,
-    kind,
-    calledTool: Boolean(outcome.calledTool),
-    error: ok ? undefined : outcome.error || `HTTP ${outcome.status}`,
+async function testModel(provider, model) {
+  const headers = { "Content-Type": "application/json" };
+  if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
+
+  const body = {
+    model,
+    messages: [{ role: "user", content: "Reply with the single word: ok" }],
+    max_tokens: 16,
   };
+  const sent = JSON.stringify(body, null, 2);
+  const startedAt = Date.now();
+
+  try {
+    const res = await fetch(`${provider.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120000),
+    });
+    const ms = Date.now() - startedAt;
+    const text = await res.text();
+
+    // "text" rather than a needs-based kind: this request carries no tools,
+    // no image and no document, so that is the bucket it belongs in.
+    record({ baseUrl: provider.baseUrl, model, kind: "text", status: res.status, ms });
+
+    let got = text;
+    try {
+      got = JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+      // Not JSON — an HTML error page, most likely. Shown as it came.
+    }
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      ms,
+      sent: trim(sent),
+      got: trim(got),
+      error: res.ok ? undefined : reasonFrom(text) || `HTTP ${res.status}`,
+    };
+  } catch (err) {
+    const ms = Date.now() - startedAt;
+    record({ baseUrl: provider.baseUrl, model, kind: "text", status: 0, ms });
+    return { ok: false, status: 0, ms, sent: trim(sent), error: err.message };
+  }
+}
+
+// Providers say why in a dozen shapes: a JSON envelope, a bare string, or a
+// whole HTML error page. Pull out the sentence if there is one, and failing
+// that collapse it onto a line, because a 403 from Google is a document.
+function reasonFrom(body) {
+  try {
+    const parsed = JSON.parse(body);
+    for (const candidate of [parsed?.error?.message, parsed?.message, parsed?.detail, parsed?.title, parsed?.error]) {
+      if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+    }
+  } catch {
+    // Fall through to the flattened text.
+  }
+  return body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
 export const DEFAULT_PANEL_PORT = 3450;
@@ -121,82 +188,16 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
           }
         }
         json(res, 200, {
-          kinds: NEEDED,
           cooling,
-          // Worked out here rather than in the page: two copies of this rule
-          // drifted apart the first time one of them changed.
-          coverage: Object.fromEntries(
-            NEEDED.map((kind) => [kind, coverage(providers, kind, undefined, catalogSays)]),
-          ),
           rows: allStats().map((row) => ({ ...row, rate: successRate(row) })),
         });
         return;
       }
 
-      // Start over. The next "opencc" start finds an empty record and warms
-      // up again, which is the quickest way to a clean measured baseline.
+      // Start over. Every model goes back to untried and routing is even
+      // odds again until real requests fill it back in.
       if (req.method === "POST" && path === "/api/stats/reset") {
         json(res, 200, resetStats());
-        return;
-      }
-
-      // Which models have never been asked anything. The page checks this
-      // after every save so a model added by hand gets tested straight away.
-      if (req.method === "GET" && path === "/api/warmup/pending") {
-        await loadCatalog();
-        const kind = new URL(req.url, "http://localhost").searchParams.get("kind") || "tools";
-        const groups = pendingModels(loadState().providers, kind);
-        json(res, 200, {
-          total: groups.reduce((n, g) => n + g.models.length, 0),
-          models: groups.flatMap((g) => g.models.map((m) => `${displayName(g.provider)} ${m}`)),
-        });
-        return;
-      }
-
-      if (req.method === "GET" && path === "/api/warmup/progress") {
-        json(res, 200, warming ?? { running: false });
-        return;
-      }
-
-      // One small tool-calling request per untested model, the same thing
-      // `opencc` does on a cold start. The results land in the shared log, so
-      // a proxy already running picks them up without being restarted.
-      if (req.method === "POST" && path === "/api/warmup") {
-        if (warming?.running) {
-          json(res, 409, { error: "a warm-up is already running" });
-          return;
-        }
-
-        await loadCatalog();
-        const { kind = "tools" } = await readBody(req);
-        warming = { running: true, kind, done: 0, total: 0, current: "", results: [] };
-        try {
-          await warmUp(loadState().providers, {
-            kind,
-            onEvent: (event) => {
-              if (event.type === "start") warming.total = event.total;
-              if (event.type === "result") {
-                warming.done = event.done;
-                warming.current = `${displayName(event.provider)} ${event.model}`;
-                warming.results.push({
-                  model: event.model,
-                  provider: displayName(event.provider),
-                  status: event.status,
-                  calledTool: Boolean(event.calledTool),
-                  error: event.error,
-                });
-              }
-            },
-          });
-        } finally {
-          warming = { ...warming, running: false, current: "" };
-        }
-
-        // A model that just proved it can call tools may be the one the
-        // proxy was waiting for.
-        await onSave?.();
-
-        json(res, 200, { results: warming.results });
         return;
       }
 
@@ -221,7 +222,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
           return;
         }
         const outcome = await testModel(provider, model, kind);
-        // Same reason as the warm-up: one passing test can unblock the proxy.
+        // A model that just answered may be the one the proxy was waiting for.
         await onSave?.();
         json(res, 200, outcome);
         return;
