@@ -2048,3 +2048,51 @@ test("short sessions still bound the request log", async () => {
   const newest = JSON.parse(readFileSync(file, "utf8").split("\n").filter(Boolean).pop());
   assert.equal(newest.model, "m");
 });
+
+// --- the test timeout ------------------------------------------------------
+
+test("the test timeout is read, clamped, and defaults to ten seconds", async () => {
+  const { testTimeoutFromEnv, DEFAULT_TEST_TIMEOUT } = await import("./config.js");
+
+  assert.equal(DEFAULT_TEST_TIMEOUT, 10);
+  assert.equal(testTimeoutFromEnv({}), 10, "absent means the default");
+  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "25" }), 25);
+  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "2.6" }), 3, "whole seconds");
+
+  // Nonsense must not turn into no timeout at all, which is the one outcome
+  // worth protecting against: a test that never gives up.
+  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "abc" }), 10);
+  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "" }), 10);
+  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "0" }), 1, "never zero");
+  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "-5" }), 1);
+  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "99999" }), 300, "and never unbounded");
+});
+
+test("the test timeout survives the config file, and the default is not written", async () => {
+  const { mkdtempSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-ttl-"));
+  const here = new URL(".", import.meta.url).pathname;
+  const script = join(home, "run.mjs");
+  writeFileSync(script, `
+    import { writeStoredConfig, readStoredConfig } from "${join(here, "configStore.js")}";
+    import { testTimeoutFromEnv } from "${join(here, "config.js")}";
+    const providers = [{ name: "a", baseUrl: "https://a.test/v1", apiKey: "", models: ["m"] }];
+    writeStoredConfig({ providers, port: "9753", testTimeout: 30 });
+    const changed = { value: testTimeoutFromEnv(readStoredConfig()), written: readStoredConfig().TEST_TIMEOUT };
+    writeStoredConfig({ providers, port: "9753", testTimeout: 10 });
+    const asDefault = { value: testTimeoutFromEnv(readStoredConfig()), written: readStoredConfig().TEST_TIMEOUT };
+    console.log(JSON.stringify({ changed, asDefault }));
+  `);
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+
+  assert.equal(out.changed.value, 30);
+  assert.equal(out.changed.written, "30");
+  // Back at the default it leaves the file, so the config stays a record of
+  // what you changed rather than of every setting that exists.
+  assert.equal(out.asDefault.value, 10);
+  assert.equal(out.asDefault.written, undefined);
+});

@@ -301,6 +301,10 @@ export const page = () => `<!doctype html>
         <label for="port">Proxy port</label>
         <input type="number" id="port" min="1" max="65535">
       </div>
+      <div>
+        <label for="ttl">Test timeout <span class="hint">seconds</span></label>
+        <input type="number" id="ttl" min="1" max="300" step="1">
+      </div>
       <div class="row">
         <button id="streaming"></button>
         <button id="theme" title="Light or dark"></button>
@@ -409,7 +413,7 @@ function add(el, kids) {
 function put(el) { el.replaceChildren(); add(el, Array.prototype.slice.call(arguments, 1)); return el; }
 
 // --- state ----------------------------------------------------------------
-var S = { providers: [], port: "3000", streaming: true, rank: [], version: "" };
+var S = { providers: [], port: "3000", streaming: true, rank: [], testTimeout: 10, version: "" };
 var REC = {};        // "baseUrl|model" -> { kind: {ok, fail, statuses} }
 var COOL = {};
 var CAT = {};        // "baseUrl|model" -> models.dev facts, for configured models
@@ -624,6 +628,7 @@ async function save(providers) {
     port: S.port,
     streaming: S.streaming,
     rank: S.rank || [],
+    testTimeout: S.testTimeout,
   };
   var before = list.length;
   S = await post("/api/state", payload);
@@ -682,6 +687,9 @@ function drawCatalogButton() {
 function drawSidebar() {
   $("ver").textContent = S.version || "";
   if (document.activeElement !== $("port")) $("port").value = S.port;
+  if (document.activeElement !== $("ttl")) $("ttl").value = S.testTimeout;
+  $("ttl").title = "How long the Test button waits for a model to say hello. " +
+    "The proxy's own timeout for real requests is separate and much longer.";
   $("streaming").textContent = "Streaming " + (S.streaming ? "on" : "off");
   $("streaming").title = S.streaming
     ? "Replies stream through as they are written. Click to switch off."
@@ -1198,7 +1206,8 @@ async function testMany(items) {
   var now = h("p", { id: "tm-now" }, "Starting");
   openDialog([
     h("h2", {}, h("span", { className: "spin" }), "Testing " + items.length + (items.length === 1 ? " model" : " models")),
-    h("p", {}, "One real request each, at most " + LANES + " at a time per provider. Anything that has not answered in 10 seconds is counted as a failure."),
+    h("p", {}, "One real request each, at most " + LANES + " at a time per provider. " +
+      "Anything that has not answered in " + S.testTimeout + "s is counted as a failure."),
     now,
     h("div", { className: "btns" }, h("button", { onclick: function () { stop = true; } }, "Stop")),
   ]);
@@ -1536,6 +1545,15 @@ $("port").addEventListener("change", async function () {
   S.port = $("port").value || "3000";
   await save();
   toast("Saved. The proxy uses it next time you start opencc.");
+});
+$("ttl").addEventListener("change", async function () {
+  // Clamped here as well as on the server, so the box shows what was
+  // actually kept rather than what was typed.
+  var n = Math.min(300, Math.max(1, Math.round(Number($("ttl").value) || 10)));
+  S.testTimeout = n;
+  $("ttl").value = n;
+  await save();
+  toast("Tests give up after " + n + "s");
 });
 $("catalog").addEventListener("click", refreshCatalog);
 $("add-prov").addEventListener("click", function () { providerForm(); });

@@ -186,6 +186,8 @@ are numbered: first has no suffix, then `_2`, `_3`.
 | `PROVIDER_DISABLED` | `true` to skip it |
 | `PROVIDER_MODELS_DISABLED` | models to skip, comma separated |
 | `PORT` `STREAMING` | global settings |
+| `TEST_TIMEOUT` | seconds the panel's Test waits for a model, default 10 |
+| `PROVIDER_RANK` | providers you prefer, best first, by base URL |
 
 Old configs with `BIG_MODEL` and `SMALL_MODEL` still work. Both become one
 `MODELS` list.

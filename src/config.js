@@ -115,6 +115,29 @@ export function rankFromEnv(values) {
     .filter(Boolean);
 }
 
+// How long the panel's Test button waits for a model to say hello, in
+// seconds. Saying "ok" is not hard work, so ten is generous; a backend you
+// know to be slow but worth keeping can be given longer.
+//
+// This is the panel's budget only. A real request carries a large tool set
+// and legitimately runs to minutes, which is why the proxy has its own far
+// longer timeout and this must never be wired to it.
+export const DEFAULT_TEST_TIMEOUT = 10;
+const MIN_TEST_TIMEOUT = 1;
+const MAX_TEST_TIMEOUT = 300;
+
+export function testTimeoutFromEnv(values) {
+  // An empty value means the key is there but says nothing, which is the
+  // default rather than zero. Number("") is 0, and 0 would clamp to the
+  // minimum, so a blank line would silently set a one-second timeout.
+  const text = String(values.TEST_TIMEOUT ?? "").trim();
+  if (!text) return DEFAULT_TEST_TIMEOUT;
+
+  const raw = Number(text);
+  if (!Number.isFinite(raw)) return DEFAULT_TEST_TIMEOUT;
+  return Math.min(MAX_TEST_TIMEOUT, Math.max(MIN_TEST_TIMEOUT, Math.round(raw)));
+}
+
 export function streamingFromEnv(values) {
   return !["off", "false", "0", "no"].includes((values.STREAMING || "on").trim().toLowerCase());
 }
@@ -131,6 +154,7 @@ function readConfig() {
     rank: rankFromEnv(merged),
     port: Number(merged.PORT || 3000),
     streaming,
+    testTimeout: testTimeoutFromEnv(merged),
   };
 }
 

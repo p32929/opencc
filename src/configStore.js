@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_PATH } from "./paths.js";
-import { parseEnvFile } from "./config.js";
+import { parseEnvFile, DEFAULT_TEST_TIMEOUT } from "./config.js";
 
 export function readStoredConfig() {
   return parseEnvFile(GLOBAL_CONFIG_PATH);
@@ -12,7 +12,7 @@ const joinModels = (models) => (Array.isArray(models) ? models.join(", ") : mode
 // `models` takes an array or a plain string. The order of either is only how
 // the file reads; what gets called is decided from the record in stats.jsonl.
 // `streaming` defaults to on, so it only gets written when it's switched off.
-export function writeStoredConfig({ providers, port, streaming = true, rank = [] }) {
+export function writeStoredConfig({ providers, port, streaming = true, rank = [], testTimeout }) {
   mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
 
   const lines = [];
@@ -37,6 +37,9 @@ export function writeStoredConfig({ providers, port, streaming = true, rank = []
   // back as a preference for nothing, and no key at all is the honest way to
   // say you have not expressed one.
   if (rank.length) lines.push(`PROVIDER_RANK=${rank.join(", ")}`);
+  // Only written when it differs from the default, so the file stays a record
+  // of what you changed rather than of every setting that exists.
+  if (testTimeout && testTimeout !== DEFAULT_TEST_TIMEOUT) lines.push(`TEST_TIMEOUT=${testTimeout}`);
 
   writeFileSync(GLOBAL_CONFIG_PATH, lines.join("\n") + "\n", { mode: 0o600 });
 }

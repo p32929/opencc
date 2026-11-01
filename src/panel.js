@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { readStoredConfig, writeStoredConfig } from "./configStore.js";
-import { providersFromEnv, displayName, streamingFromEnv, rankFromEnv } from "./config.js";
+import { providersFromEnv, displayName, streamingFromEnv, rankFromEnv, testTimeoutFromEnv } from "./config.js";
 import { allStats, successRate, coolingFor, record, resetStats } from "./stats.js";
 import { loadCatalog, lookupModel, catalogAge, catalogSize } from "./modelsdev.js";
 import { listRequests, clearRequests, KEEP } from "./reqlog.js";
@@ -61,6 +61,7 @@ function loadState() {
     port: stored.PORT || "3000",
     streaming: streamingFromEnv(stored),
     rank: rankFromEnv(stored),
+    testTimeout: testTimeoutFromEnv(stored),
     version,
   };
 }
@@ -76,19 +77,10 @@ function loadState() {
 //
 // The request and the reply are both returned, trimmed, because "it failed"
 // without the body is the answer that sends you to curl.
-// Saying "ok" is not hard work. A backend that cannot manage it in ten
-// seconds is not one you want Claude Code waiting on, and a test that hangs
-// for two minutes tells you less than a fast failure does.
-//
-// This is the panel's budget only. A real request carries a large tool set
-// and legitimately runs to minutes, which is why the proxy's own timeout
-// (UPSTREAM_TIMEOUT_MS in server.js) is far longer and must stay that way.
-const TEST_TIMEOUT_MS = 10000;
-
 const DUMP_LIMIT = 4000;
 const trim = (text) => (text.length > DUMP_LIMIT ? text.slice(0, DUMP_LIMIT) + "\n…" : text);
 
-async function testModel(provider, model) {
+async function testModel(provider, model, timeoutMs) {
   const headers = { "Content-Type": "application/json" };
   if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
 
@@ -105,7 +97,7 @@ async function testModel(provider, model) {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const ms = Date.now() - startedAt;
     const text = await res.text();
@@ -140,7 +132,7 @@ async function testModel(provider, model) {
       status: 0,
       ms,
       sent: trim(sent),
-      error: timedOut ? `no answer within ${TEST_TIMEOUT_MS / 1000}s` : err.message,
+      error: timedOut ? `no answer within ${Math.round(timeoutMs / 1000)}s` : err.message,
     };
   }
 }
@@ -227,6 +219,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
           port: body.port,
           streaming: body.streaming !== false,
           rank: Array.isArray(body.rank) ? body.rank : [],
+          testTimeout: Number(body.testTimeout) || undefined,
         });
         json(res, 200, loadState());
         // The proxy may have been waiting for exactly this.
@@ -235,13 +228,18 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
       }
 
       if (req.method === "POST" && path === "/api/test") {
-        const { index, model, kind = "tools" } = await readBody(req);
-        const provider = loadState().providers[index];
+        // `kind` used to be accepted here and quietly ignored: testModel has
+        // taken no such argument since the capability probes were removed.
+        const { index, model } = await readBody(req);
+        const live = loadState();
+        const provider = live.providers[index];
         if (!provider) {
           json(res, 404, { ok: false, error: "no such provider" });
           return;
         }
-        const outcome = await testModel(provider, model, kind);
+        // Read fresh, so changing the timeout in the panel applies to the
+        // next test without a restart.
+        const outcome = await testModel(provider, model, live.testTimeout * 1000);
         // A model that just answered may be the one the proxy was waiting for.
         await onSave?.();
         json(res, 200, outcome);
