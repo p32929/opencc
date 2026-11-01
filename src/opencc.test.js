@@ -2000,3 +2000,51 @@ test("the ranking survives a round trip through the config file", async () => {
   // empty key would read back as a preference for nothing.
   assert.deepEqual(out.cleared, []);
 });
+
+test("short sessions still bound the request log", async () => {
+  // The prune counter resets with the process, so a run that serves fewer
+  // than KEEP requests used to never prune at all. Twenty runs of five
+  // requests each must still leave the file at the cap.
+  const { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+
+  const home = mkdtempSync(join(tmpdir(), "opencc-prune-"));
+  mkdirSync(join(home, ".opencc"), { recursive: true });
+  const file = join(home, ".opencc", "requests.jsonl");
+
+  // Start well over the cap, as a long-running install would.
+  const seed = [];
+  for (let i = 0; i < 900; i++) {
+    seed.push(JSON.stringify({ at: i, ok: true, attempts: [], chars: 0, tools: 0, kind: "text" }));
+  }
+  writeFileSync(file, seed.join("\n") + "\n");
+
+  const script = join(home, "run.mjs");
+  writeFileSync(script, `
+    import { logRequest, listRequests, KEEP } from ${JSON.stringify(new URL("./reqlog.js", import.meta.url).href)};
+    for (let i = 0; i < 5; i++) logRequest({ at: Date.now() + i, model: "m", kind: "text", chars: 1, tools: 0, served: "a/b" });
+    console.log(JSON.stringify({ shown: listRequests().length, keep: KEEP }));
+  `);
+
+  // Each run is its own process, which is the case that used to leak.
+  let out;
+  for (let run = 0; run < 3; run++) {
+    out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+  }
+
+  // Bounded, not exact: a prune trims to KEEP and the writes after it in the
+  // same run append past that. Rewriting the whole file on every append to
+  // hold it at exactly KEEP would cost far more than it is worth. What must
+  // never happen is unbounded growth, and 900 seeded lines coming back under
+  // two caps is that.
+  const lines = readFileSync(file, "utf8").split("\n").filter(Boolean).length;
+  assert.ok(lines <= out.keep * 2, `file holds ${lines}, bound is ${out.keep * 2}`);
+  assert.ok(lines < 900, "the 900 it started with were trimmed");
+  assert.equal(out.shown, out.keep, "and the panel shows at most the cap");
+
+  // and the newest write survived the trim
+  const newest = JSON.parse(readFileSync(file, "utf8").split("\n").filter(Boolean).pop());
+  assert.equal(newest.model, "m");
+});

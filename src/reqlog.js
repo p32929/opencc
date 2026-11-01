@@ -10,15 +10,19 @@ import { dirname } from "node:path";
 import { REQUESTS_PATH } from "./paths.js";
 import { bus } from "./events.js";
 
-// How many are kept. Enough to cover a long Claude Code session, few enough
-// that the panel can render the lot without paging.
+// How many are kept. There is no time limit: a request from last month is
+// worth the same as one from this morning when you are working out why
+// something failed, and "the last 500" is a number you can reason about
+// without knowing how busy the week was.
 export const KEEP = 500;
 
-// Rewriting the file on every request would turn one append into a full read
-// and write, so it is pruned only once it has drifted this far past the cap.
-const PRUNE_AT = KEEP * 2;
-
 let appended = 0;
+// Pruning used to be driven by this counter alone, which reset with the
+// process. A session that served fewer than KEEP requests therefore never
+// pruned, and across enough restarts the file grew without limit while the
+// panel read all of it on every load. One prune on the first write of each
+// process bounds it however short the sessions are.
+let prunedThisRun = false;
 
 const MAX_ERROR_CHARS = 400;
 
@@ -73,7 +77,10 @@ export function logRequest(entry) {
     // lines rather than losing one of them — the same reason stats.jsonl is
     // newline-delimited.
     appendFileSync(REQUESTS_PATH, JSON.stringify(record) + "\n");
-    if (++appended >= PRUNE_AT - KEEP) {
+    if (!prunedThisRun) {
+      prunedThisRun = true;
+      prune();
+    } else if (++appended >= KEEP) {
       appended = 0;
       prune();
     }
@@ -107,6 +114,7 @@ export function clearRequests() {
     return { cleared: 0 };
   }
   appended = 0;
+  prunedThisRun = false;
   bus.emit("requests-cleared");
   return { cleared: 1 };
 }
