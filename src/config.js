@@ -138,6 +138,27 @@ export function testTimeoutFromEnv(values) {
   return Math.min(MAX_TEST_TIMEOUT, Math.max(MIN_TEST_TIMEOUT, Math.round(raw)));
 }
 
+// How many of one provider's models are tested at once.
+//
+// HeartCode derives this from the list length alone (one lane per hundred
+// models), which means one at a time per provider for any list under a
+// hundred. Measured on nine providers and 54 models, that is 17.8s against
+// 8.1s at four lanes: with one lane the run is as long as the slowest
+// provider's queue taken one model after another.
+//
+// So four by default, and still one more lane per hundred models on top, so
+// a very long list keeps scaling. Set it to 1 for HeartCode's exact pacing.
+export const DEFAULT_TEST_LANES = 4;
+const MAX_TEST_LANES = 16;
+
+export function testLanesFromEnv(values) {
+  const text = String(values.TEST_LANES ?? "").trim();
+  if (!text) return DEFAULT_TEST_LANES;
+  const raw = Number(text);
+  if (!Number.isFinite(raw)) return DEFAULT_TEST_LANES;
+  return Math.min(MAX_TEST_LANES, Math.max(1, Math.round(raw)));
+}
+
 export function streamingFromEnv(values) {
   return !["off", "false", "0", "no"].includes((values.STREAMING || "on").trim().toLowerCase());
 }
@@ -155,6 +176,7 @@ function readConfig() {
     port: Number(merged.PORT || 3000),
     streaming,
     testTimeout: testTimeoutFromEnv(merged),
+    testLanes: testLanesFromEnv(merged),
   };
 }
 

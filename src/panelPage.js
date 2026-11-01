@@ -340,6 +340,10 @@ export const page = () => `<!doctype html>
         <label for="ttl">Test timeout <span class="hint">seconds</span></label>
         <input type="number" id="ttl" min="1" max="300" step="1">
       </div>
+      <div>
+        <label for="lanes">Test lanes <span class="hint">per provider</span></label>
+        <input type="number" id="lanes" min="1" max="16" step="1">
+      </div>
       <div class="row">
         <button id="streaming"></button>
         <button id="theme" title="Light or dark"></button>
@@ -450,7 +454,7 @@ function add(el, kids) {
 function put(el) { el.replaceChildren(); add(el, Array.prototype.slice.call(arguments, 1)); return el; }
 
 // --- state ----------------------------------------------------------------
-var S = { providers: [], port: "3000", streaming: true, rank: [], testTimeout: 10, version: "" };
+var S = { providers: [], port: "3000", streaming: true, rank: [], testTimeout: 10, testLanes: 4, version: "" };
 var REC = {};        // "baseUrl|model" -> { kind: {ok, fail, statuses} }
 var COOL = {};
 var CAT = {};        // "baseUrl|model" -> models.dev facts, for configured models
@@ -671,6 +675,7 @@ async function save(providers) {
     streaming: S.streaming,
     rank: S.rank || [],
     testTimeout: S.testTimeout,
+    testLanes: S.testLanes,
   };
   var before = list.length;
   S = await post("/api/state", payload);
@@ -730,6 +735,10 @@ function drawSidebar() {
   $("ver").textContent = S.version || "";
   if (document.activeElement !== $("port")) $("port").value = S.port;
   if (document.activeElement !== $("ttl")) $("ttl").value = S.testTimeout;
+  if (document.activeElement !== $("lanes")) $("lanes").value = S.testLanes;
+  $("lanes").title = "How many of one provider's models are tested at once. " +
+    "1 is HeartCode's pacing; 4 is about twice as fast on a nine-provider set. " +
+    "A provider that answers 429 drops to one lane on its own.";
   $("ttl").title = "How long the Test button waits for a model to say hello. " +
     "The proxy's own timeout for real requests is separate and much longer.";
   $("streaming").textContent = "Streaming " + (S.streaming ? "on" : "off");
@@ -1313,27 +1322,40 @@ async function park(t) {
 // Nothing opens over the table. A run marks its models as testing, fills the
 // Works? column in as results land, and shows its progress in a strip above
 // the table — so you can watch it, sort by it, and act on it while it runs.
-// How many of a provider's models are in flight at once: one per hundred
-// being tested. A hundred models is one at a time per provider, two hundred
-// is two, and so on, so a bigger list finishes in about the same wall time
-// without any provider being hit harder than the list warrants.
-var lanesFor = function (total) { return Math.max(1, Math.ceil(total / 100)); };
+// A run happens on the server, and this watches it.
+//
+// It used to run here, firing one request per model at the panel. A browser
+// holds six connections to one origin on HTTP/1.1, so thirty-six "lanes"
+// were six in flight and the rest queued: 54 models took 101s from the page
+// against 8s for the same work driven from outside it. Asking the server to
+// do the run removes that ceiling, and a closed tab no longer stops it.
+async function testMany(items) {
+  if (!items.length) return;
+  if (running) { toast("A test run is going already", true); return; }
 
-// A 429 is not a result about the model, it is the provider saying "not now".
-// It is retried this many times, with a pause between, before being recorded.
-var RATE_TRIES = 4;
-var FIRST_BACKOFF = 15000;
-var MAX_BACKOFF = 120000;
+  // Shown as testing at once, so the table reacts to the click rather than
+  // to the first result.
+  items.forEach(function (t) { TRIES[pk(t.i, t.model)] = { going: true }; });
+  drawMine();
 
-var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+  try {
+    await post("/api/tests/start", {
+      only: items.map(function (t) { return { index: t.i, model: t.model }; }),
+    });
+  } catch (e) {
+    items.forEach(function (t) { delete TRIES[pk(t.i, t.model)]; });
+    drawMine();
+    toast(e.message, true);
+  }
+}
 
 // Only the cell that changed, so a run of 500 does not redraw the table 500
 // times. The counts above it are worth a full redraw, but only once things
 // have settled for a moment.
-function paintCell(t) {
-  var tr = document.querySelector('tr[data-key="' + cssEscape(pk(t.i, t.model)) + '"]');
+function paintCell(i, model) {
+  var tr = document.querySelector('tr[data-key="' + cssEscape(pk(i, model)) + '"]');
   var cell = tr && tr.querySelector(".try");
-  if (cell) cell.replaceWith(worksCell(t));
+  if (cell) cell.replaceWith(worksCell({ i: i, model: model }));
   else drawMine();
 }
 
@@ -1344,112 +1366,43 @@ function cssEscape(v) {
 var settleTimer = null;
 function settleSoon() {
   clearTimeout(settleTimer);
-  settleTimer = setTimeout(function () { drawMine(); }, 250);
+  settleTimer = setTimeout(function () { loadRecord().then(drawMine); }, 400);
 }
 
-async function testMany(items) {
-  if (!items.length) return;
-  if (running) { toast("A test run is going already", true); return; }
+// The server reports by base URL; the table is keyed by provider index.
+function indexOfBaseUrl(baseUrl) {
+  for (var i = 0; i < S.providers.length; i++) {
+    if (S.providers[i].baseUrl === baseUrl) return i;
+  }
+  return -1;
+}
 
-  items.forEach(function (t) { TRIES[pk(t.i, t.model)] = { going: true }; });
+function gotResult(key, result) {
+  var at = key.lastIndexOf("|");
+  var i = indexOfBaseUrl(key.slice(0, at));
+  if (i < 0) return;
+  var model = key.slice(at + 1);
+  TRIES[pk(i, model)] = result;
+  paintCell(i, model);
+  settleSoon();
+}
 
-  var each = lanesFor(items.length);
-  running = { total: items.length, done: 0, good: 0, stop: false, each: each, provs: new Map() };
-
-  // One queue per provider: the limit worth respecting is per key, not
-  // overall. A dozen at once on one provider earns rate limits that say
-  // nothing about the models; two providers in parallel cost neither.
-  items.forEach(function (t) {
-    if (!running.provs.has(t.i)) {
-      running.provs.set(t.i, {
-        queue: [], cap: each, until: 0, pausedAt: 0,
-        backoff: FIRST_BACKOFF, refused: new Map(), live: 0,
-      });
-    }
-    running.provs.get(t.i).queue.push(t);
+// Everything the server already knows, so a reload during a run picks it up
+// mid-flight instead of showing an empty column.
+async function loadTests() {
+  var out;
+  try {
+    out = await api("/api/tests");
+  } catch (e) {
+    return;
+  }
+  TRIES = {};
+  Object.keys(out.results || {}).forEach(function (key) {
+    var at = key.lastIndexOf("|");
+    var i = indexOfBaseUrl(key.slice(0, at));
+    if (i >= 0) TRIES[pk(i, key.slice(at + 1))] = out.results[key];
   });
-
-  drawMine();
-  drawRun();
-  var started = Date.now();
-
-  // Worker n of a provider: takes its next model while there is one and n is
-  // under the cap. A provider that says it is busy drops its cap to one, so
-  // the other workers finish and leave; the last one never does, or the queue
-  // would never drain.
-  var worker = async function (i, n) {
-    var p = running.provs.get(i);
-    while (!running.stop && p.queue.length && (n < p.cap || p.live === 1)) {
-      if (p.until > Date.now()) {
-        await sleep(Math.min(200, p.until - Date.now()));
-        drawRun();
-        continue;
-      }
-
-      var t = p.queue.shift();
-      var key = pk(t.i, t.model);
-      var sent = Date.now();
-      var out;
-      try {
-        out = await post("/api/test", { index: t.i, model: t.model });
-      } catch (e) {
-        out = { ok: false, status: 0, error: e.message };
-      }
-
-      if (out.status === 429) {
-        var times = (p.refused.get(key) || 0) + 1;
-        p.refused.set(key, times);
-        p.cap = 1;
-        // One pause per burst: refusals of requests sent before the current
-        // pause began are the same burst, and must not extend it again.
-        if (!(sent < p.pausedAt)) {
-          p.pausedAt = Date.now();
-          p.until = Date.now() + Math.min(MAX_BACKOFF, out.retryAfter > 0 ? out.retryAfter * 1000 : p.backoff);
-          p.backoff = Math.min(MAX_BACKOFF, p.backoff * 2);
-        }
-        if (times < RATE_TRIES) {
-          p.queue.push(t);
-          drawRun();
-          continue;
-        }
-        out.error = "the provider kept saying it is busy (429), " + times +
-          " times with pauses between: try it again later";
-      } else if (out.ok) {
-        p.backoff = FIRST_BACKOFF;
-      }
-
-      TRIES[key] = Object.assign({ at: Date.now() }, out);
-      running.done += 1;
-      if (out.ok) running.good += 1;
-      paintCell(t);
-      drawRun();
-      settleSoon();
-    }
-    p.live -= 1;
-  };
-
-  var lanes = [];
-  running.provs.forEach(function (p, i) {
-    p.live = Math.min(each, p.queue.length);
-    for (var n = 0; n < p.live; n++) lanes.push(worker(i, n));
-  });
-  await Promise.all(lanes);
-
-  // Anything the stop cut off goes back to untested rather than sitting on
-  // "testing..." forever.
-  items.forEach(function (t) {
-    if (TRIES[pk(t.i, t.model)] && TRIES[pk(t.i, t.model)].going) delete TRIES[pk(t.i, t.model)];
-  });
-
-  var took = ((Date.now() - started) / 1000).toFixed(1);
-  var out2 = running;
-  running = null;
-  drawRun();
-  await loadRecord();
-  drawAll();
-  toast((out2.stop ? "Stopped after " + out2.done + " of " + out2.total + " \\u00b7 " : "") +
-    out2.good + " of " + out2.done + " answered in " + took + "s",
-    out2.good < out2.done);
+  running = out.running ? out : null;
 }
 
 function drawRun() {
@@ -1460,7 +1413,7 @@ function drawRun() {
     h("span", { className: "what" }, running.stop
       ? "Stopping"
       : "Testing " + running.total + (running.total === 1 ? " model" : " models") +
-        (running.each > 1 ? " \\u00b7 " + running.each + " at a time per provider" : "")),
+        (running.lanes > 1 ? " \\u00b7 " + running.lanes + " at a time per provider" : "")),
     h("span", { className: "bar" }, h("i", { style: "width:" + pct + "%" })),
     h("span", { className: "tally" },
       h("span", { className: "g" }, "\\u2713 " + running.good),
@@ -1468,20 +1421,16 @@ function drawRun() {
       h("span", { className: "b" }, "\\u2717 " + (running.done - running.good)),
       " \\u00b7 " + running.done + "/" + running.total),
     pausedNote(),
-    h("button", { className: "sm", disabled: running.stop,
-      onclick: function () { running.stop = true; drawRun(); } }, "Stop")));
+    h("button", { className: "sm", disabled: running.stopping,
+      onclick: function () { post("/api/tests/stop").catch(function () {}); } }, "Stop")));
 }
 
 // A provider that said it is busy, and how long until it is asked again.
 // Without this a run that has gone quiet looks stuck rather than patient.
 function pausedNote() {
-  if (!running) return null;
-  var waiting = [];
-  running.provs.forEach(function (p, i) {
-    var left = p.until - Date.now();
-    if (left > 0 && S.providers[i]) {
-      waiting.push((S.providers[i].name || S.providers[i].label) + " " + Math.ceil(left / 1000) + "s");
-    }
+  if (!running || !running.paused) return null;
+  var waiting = Object.keys(running.paused).map(function (name) {
+    return name + " " + running.paused[name] + "s";
   });
   if (!waiting.length) return null;
   return h("span", { className: "tag warn", title: "It answered 429. Its models are tried again after the pause, up to " + RATE_TRIES + " times." },
@@ -1787,8 +1736,29 @@ function listen() {
   var src;
   try { src = new EventSource("/api/events"); } catch (e) { return; }
   src.addEventListener("message", async function (e) {
-    var what;
-    try { what = JSON.parse(e.data).what; } catch (e2) { return; }
+    var msg;
+    try { msg = JSON.parse(e.data); } catch (e2) { return; }
+    var what = msg.what;
+    if (what === "tested") {
+      gotResult(msg.key, msg.result);
+      return;
+    }
+    if (what === "testrun") {
+      var was = Boolean(running);
+      running = msg.run && msg.run.running ? msg.run : null;
+      drawRun();
+      // A run that has just ended: settle the counts and say how it went.
+      if (was && !running) {
+        await loadRecord();
+        drawMine();
+        if (msg.run && msg.run.over) {
+          toast((msg.run.stopping ? "Stopped \\u00b7 " : "") +
+            msg.run.good + " of " + msg.run.done + " answered",
+            msg.run.good < msg.run.done);
+        }
+      }
+      return;
+    }
     if (what === "request" || what === "requests-cleared") {
       await Promise.all([loadRequests(), loadRecord()]);
       drawAll();
@@ -1840,6 +1810,13 @@ $("ttl").addEventListener("change", async function () {
   $("ttl").value = n;
   await save();
   toast("Tests give up after " + n + "s");
+});
+$("lanes").addEventListener("change", async function () {
+  var n = Math.min(16, Math.max(1, Math.round(Number($("lanes").value) || 4)));
+  S.testLanes = n;
+  $("lanes").value = n;
+  await save();
+  toast(n === 1 ? "One model at a time per provider" : n + " at a time per provider");
 });
 $("catalog").addEventListener("click", refreshCatalog);
 $("add-prov").addEventListener("click", function () { providerForm(); });
@@ -1901,7 +1878,7 @@ try {
     return;
   }
   drawAll();
-  await Promise.all([loadRecord(), loadCatalog(), loadRequests()]);
+  await Promise.all([loadRecord(), loadCatalog(), loadRequests(), loadTests()]);
   ready = true;
   drawAll();
   listen();

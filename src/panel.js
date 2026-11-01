@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { readStoredConfig, writeStoredConfig } from "./configStore.js";
-import { providersFromEnv, displayName, streamingFromEnv, rankFromEnv, testTimeoutFromEnv } from "./config.js";
+import { providersFromEnv, displayName, streamingFromEnv, rankFromEnv, testTimeoutFromEnv, testLanesFromEnv } from "./config.js";
 import { allStats, successRate, coolingFor, record, resetStats } from "./stats.js";
 import { loadCatalog, lookupModel, catalogAge, catalogSize } from "./modelsdev.js";
 import { listRequests, clearRequests, KEEP } from "./reqlog.js";
@@ -62,6 +62,7 @@ function loadState() {
     streaming: streamingFromEnv(stored),
     rank: rankFromEnv(stored),
     testTimeout: testTimeoutFromEnv(stored),
+    testLanes: testLanesFromEnv(stored),
     version,
   };
 }
@@ -158,6 +159,136 @@ function reasonFrom(body) {
   return body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
+// --- test runs -------------------------------------------------------------
+// Runs live here rather than in the page, which is how HeartCode does it and
+// the reason its runs are quick. A browser holds six connections to one
+// origin on HTTP/1.1, so a page firing thirty-six slow requests at its own
+// panel gets six at a time however many lanes it thinks it has. From here
+// there is no such ceiling. Closing the tab no longer stops a run either,
+// and the results are still here when you come back.
+const tests = {};        // "baseUrl|model" -> the last result
+let run = null;
+
+const testKey = (baseUrl, model) => `${baseUrl}|${model}`;
+
+// A 429 is the provider saying "not now", so the model is tried again rather
+// than written down as broken. How long to wait for that is a judgement, and
+// HeartCode's is too patient for a test run: four tries at 15s, 30s, 60s is
+// up to 105 seconds of waiting on one model.
+//
+// Measured on 24 models across 8 providers: 23 answered in 2.1s and the run
+// then sat for another 109s on a single rate-limited openrouter model. This
+// ladder is 5s, 10s, 20s, so the worst a 429 costs is about 35 seconds, and
+// a Retry-After from the provider still wins over all of it.
+const RATE_TRIES = 3;
+const FIRST_BACKOFF = 5000;
+const MAX_BACKOFF = 20000;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function runState() {
+  if (!run) return { running: false };
+  const paused = {};
+  for (const [name, p] of run.provs) {
+    const left = p.until - Date.now();
+    if (left > 0) paused[name] = Math.ceil(left / 1000);
+  }
+  return {
+    running: true,
+    total: run.total, done: run.done, good: run.good,
+    lanes: run.lanes, stopping: run.stopping, paused,
+  };
+}
+
+async function startRun(items) {
+  const live = loadState();
+  const timeoutMs = live.testTimeout * 1000;
+  // Your setting, and one more lane per hundred models so a long list keeps
+  // scaling.
+  const lanes = Math.max(live.testLanes, Math.ceil(items.length / 100));
+
+  run = { total: items.length, done: 0, good: 0, lanes, stopping: false, provs: new Map() };
+
+  for (const t of items) {
+    const provider = live.providers[t.index];
+    if (!provider) continue;
+    const name = displayName(provider);
+    if (!run.provs.has(name)) {
+      run.provs.set(name, {
+        provider, queue: [], cap: lanes, until: 0, pausedAt: 0,
+        backoff: FIRST_BACKOFF, refused: new Map(), live: 0,
+      });
+    }
+    run.provs.get(name).queue.push(t.model);
+  }
+  run.total = [...run.provs.values()].reduce((n, p) => n + p.queue.length, 0);
+  bus.emit("testrun", runState());
+
+  // Worker n of a provider: takes its next model while there is one and n is
+  // under the cap. A provider that says it is busy drops its cap to one, so
+  // the others finish and leave; the last never does, or the queue would
+  // never drain.
+  const worker = async (p, n) => {
+    while (!run.stopping && p.queue.length && (n < p.cap || p.live === 1)) {
+      if (p.until > Date.now()) {
+        await sleep(Math.min(200, p.until - Date.now()));
+        bus.emit("testrun", runState());
+        continue;
+      }
+
+      const model = p.queue.shift();
+      const key = testKey(p.provider.baseUrl, model);
+      const sentAt = Date.now();
+      const outcome = await testModel(p.provider, model, timeoutMs);
+
+      if (outcome.status === 429) {
+        const times = (p.refused.get(key) ?? 0) + 1;
+        p.refused.set(key, times);
+        p.cap = 1;
+        // One pause per burst: refusals of requests sent before the current
+        // pause began are the same burst and must not extend it again.
+        if (!(sentAt < p.pausedAt)) {
+          p.pausedAt = Date.now();
+          p.until = Date.now() + Math.min(MAX_BACKOFF, outcome.retryAfter > 0 ? outcome.retryAfter * 1000 : p.backoff);
+          p.backoff = Math.min(MAX_BACKOFF, p.backoff * 2);
+        }
+        if (times < RATE_TRIES) {
+          p.queue.push(model);
+          bus.emit("testrun", runState());
+          continue;
+        }
+        outcome.error = `the provider kept saying it is busy (429), ${times} times with pauses between: try it again later`;
+      } else if (outcome.ok) {
+        p.backoff = FIRST_BACKOFF;
+      }
+
+      tests[key] = { ...outcome, at: Date.now() };
+      run.done += 1;
+      if (outcome.ok) run.good += 1;
+      bus.emit("tested", { key, result: tests[key] });
+      bus.emit("testrun", runState());
+    }
+    p.live -= 1;
+  };
+
+  const all = [];
+  for (const p of run.provs.values()) {
+    p.live = Math.min(lanes, p.queue.length);
+    for (let n = 0; n < p.live; n++) all.push(worker(p, n));
+  }
+
+  try {
+    await Promise.all(all);
+  } finally {
+    const over = { ...runState(), running: false, over: true };
+    run = null;
+    await onSaveRef?.();
+    bus.emit("testrun", over);
+  }
+}
+
+// Set by runPanel, so a finished run can tell the proxy to look again.
+let onSaveRef = null;
+
 export const DEFAULT_PANEL_PORT = 3450;
 
 function listen(server, port) {
@@ -173,6 +304,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
   // it fails: everything here works without a catalogue, just with less to
   // show.
   loadCatalog().catch(() => {});
+  onSaveRef = onSave;
 
   const server = createServer(async (req, res) => {
     const path = req.url.split("?")[0];
@@ -233,10 +365,46 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
           streaming: body.streaming !== false,
           rank: Array.isArray(body.rank) ? body.rank : [],
           testTimeout: Number(body.testTimeout) || undefined,
+          testLanes: Number(body.testLanes) || undefined,
         });
         json(res, 200, loadState());
         // The proxy may have been waiting for exactly this.
         await onSave?.();
+        return;
+      }
+
+      // Start, stop, and what is known so far. The page asks for a run and
+      // then watches; it never drives one itself.
+      if (req.method === "POST" && path === "/api/tests/start") {
+        if (run) {
+          json(res, 409, { error: "a test run is going already" });
+          return;
+        }
+        const body = await readBody(req);
+        const live = loadState();
+        const items = Array.isArray(body.only) && body.only.length
+          ? body.only
+          : live.providers.flatMap((p, index) =>
+              p.disabled ? [] : p.models.map((model) => ({ index, model })));
+
+        if (!items.length) {
+          json(res, 200, { ...runState(), results: tests });
+          return;
+        }
+        // Answer at once; the run reports itself over /api/events.
+        startRun(items).catch(() => {});
+        json(res, 200, { ...runState(), results: tests });
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/tests/stop") {
+        if (run) run.stopping = true;
+        json(res, 200, runState());
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/tests") {
+        json(res, 200, { ...runState(), results: tests });
         return;
       }
 
@@ -253,6 +421,8 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         // Read fresh, so changing the timeout in the panel applies to the
         // next test without a restart.
         const outcome = await testModel(provider, model, live.testTimeout * 1000);
+        tests[testKey(provider.baseUrl, model)] = { ...outcome, at: Date.now() };
+        bus.emit("tested", { key: testKey(provider.baseUrl, model), result: tests[testKey(provider.baseUrl, model)] });
         // A model that just answered may be the one the proxy was waiting for.
         await onSave?.();
         json(res, 200, outcome);
@@ -315,8 +485,18 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         };
         const onRequest = () => send("request");
         const onCleared = () => send("requests-cleared");
+        // These two carry a payload: the page needs the result itself, not a
+        // nudge to go and refetch every result it already has.
+        const onTested = (e) => {
+          if (!res.writableEnded) res.write(`data: ${JSON.stringify({ what: "tested", ...e })}\n\n`);
+        };
+        const onRun = (state) => {
+          if (!res.writableEnded) res.write(`data: ${JSON.stringify({ what: "testrun", run: state })}\n\n`);
+        };
         bus.on("request", onRequest);
         bus.on("requests-cleared", onCleared);
+        bus.on("tested", onTested);
+        bus.on("testrun", onRun);
 
         // Proxies and browsers drop an idle event stream; a comment line
         // every twenty seconds is enough to keep it open and costs nothing.
@@ -328,6 +508,8 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
           clearInterval(beat);
           bus.off("request", onRequest);
           bus.off("requests-cleared", onCleared);
+          bus.off("tested", onTested);
+          bus.off("testrun", onRun);
         });
         return;
       }
