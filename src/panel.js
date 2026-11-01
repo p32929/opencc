@@ -173,7 +173,14 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
 
     try {
       if (req.method === "GET" && (path === "/" || path === "/index.html")) {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        // The page is built fresh from source on every request and has no
+        // URL to version, so a cached copy is only ever a stale one. Without
+        // this a browser keeps serving yesterday's panel after an upgrade,
+        // and the only cure is a hard reload nobody thinks to do.
+        res.writeHead(200, {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store, must-revalidate",
+        });
         res.end(page());
         return;
       }

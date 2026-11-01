@@ -208,6 +208,41 @@ export const page = () => `<!doctype html>
   table.mt tr.dim td { opacity: .45; }
   table.mt td.m { font-family: var(--mono); font-size: 12.5px; color: var(--ink); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
   table.mt td.num, table.mt th.num { text-align: right; font-family: var(--mono); font-size: 12px; }
+  /* --- the last test, per model --------------------------------------- */
+  .try { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .try .msg { font: 11.5px var(--mono); color: var(--ink-3); }
+  .try.ok .msg { color: var(--ok); }
+  .try.bad .msg { color: var(--bad); cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+  .try.ok .msg { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+  .try.going .msg { color: var(--accent); }
+
+  /* The run, in the page rather than over it: you can still read the table,
+     and the rows fill in as results land. */
+  #run:empty, #outcomes:empty { display: none; }
+  .run {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--accent);
+    border-radius: var(--r); padding: 10px 13px; margin-bottom: 10px; font-size: 13px;
+  }
+  .run .what { color: var(--ink); font-weight: 600; }
+  .run .bar { flex: 1; min-width: 120px; height: 4px; background: var(--rule); border-radius: 99px; overflow: hidden; }
+  .run .bar i { display: block; height: 100%; background: var(--accent); transition: width .2s; }
+  .run .tally { font: 12px var(--mono); }
+  .run .tally .g { color: var(--ok); }
+  .run .tally .b { color: var(--bad); }
+
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .pill {
+    display: inline-flex; align-items: center; border: 1px solid var(--rule-2);
+    border-radius: 99px; overflow: hidden; background: var(--panel);
+  }
+  .pill button { border: 0; border-radius: 0; background: none; padding: 5px 10px; font-size: 12px; }
+  .pill .n { font: 11px var(--mono); color: var(--ink-3); margin-left: 6px; }
+  .pill.ok button { color: var(--ok); }
+  .pill.bad button { color: var(--bad); }
+  .pill.on { border-color: var(--accent); background: var(--accent-soft); }
+  .pill .again { border-left: 1px solid var(--rule-2); padding: 5px 8px; color: var(--ink-3); }
+
   .yes { color: var(--ok); font-weight: 700; }
   .no { color: var(--ink-3); }
   .acts { display: flex; gap: 4px; align-items: center; }
@@ -352,6 +387,8 @@ export const page = () => `<!doctype html>
         <div class="acts"><button class="primary" id="go-prov">Add models</button></div>
       </div>
       <div class="mt-top" id="mt-top"></div>
+      <div id="run"></div>
+      <div id="outcomes"></div>
       <div id="mt"></div>
     </section>
 
@@ -426,6 +463,11 @@ var REQS = [];
 var ready = false;
 var reqFilter = "all";
 var reqPicked = null;
+
+// The last test per model, keyed like everything else on this page.
+// { going } while one is in flight, then { ok, status, ms, error, sent, got, at }.
+var TRIES = {};
+var running = null;       // the run in progress: { total, done, good, stop }
 
 var PICKED = new Set();   // "i|model" ticked in the catalogue
 var MINE = new Set();     // "i|model" ticked in the table
@@ -854,7 +896,11 @@ function drawProviders() {
             ? h("span", { className: "tag warn", title: "This provider does not list this name. It may have been typed by hand, or the backend may have changed what it serves." }, "not listed")
             : null,
           abilityTags(d),
-          have ? h("button", { className: "sm", onclick: function () { testOne(i, id); } }, "Test") : null);
+          have ? h("button", {
+            className: "sm", disabled: Boolean(running),
+            title: "Send one real request. The result shows under Works? on Your models.",
+            onclick: function () { testMany([{ i: i, model: id }]); },
+          }, "Test") : null);
       })) : null,
 
       list.loading && !rows.length
@@ -947,6 +993,65 @@ async function removeModels(items) {
   toast(n === 1 ? items[0].model + " taken out" : n + " models taken out");
 }
 
+// --- the last test, per model ---------------------------------------------
+// What a test came to, in one word: works, its status code, empty, no answer
+// or failed. Null while it runs, or before it has been tested.
+function outcome(r) {
+  if (!r || r.going) return null;
+  if (r.ok) return "works";
+  if (r.status) return String(r.status);
+  if (/within/.test(r.error || "")) return "no answer";
+  if (/not JSON|empty/i.test(r.error || "")) return "empty";
+  return "failed";
+}
+
+var MEANS = {
+  works: "it answered",
+  400: "400: the provider would not take the request as sent",
+  401: "401: the key was rejected",
+  402: "402: no credit or quota left",
+  403: "403: the key is not allowed this model",
+  404: "404: no model of that name here",
+  413: "413: the request was too large",
+  429: "429: rate limited or out of quota for now",
+  500: "500: the provider broke",
+  502: "502: the provider could not reach the model",
+  503: "503: the model or provider is unavailable now",
+  504: "504: the provider timed out",
+  empty: "it answered, but with nothing in it",
+  "no answer": "nothing came back inside the test timeout, in the sidebar",
+  failed: "it failed without a status: a lost connection, or a reply nothing could read",
+};
+
+function worksCell(t) {
+  var r = TRIES[pk(t.i, t.model)];
+  var when = r && r.at ? " \\u00b7 tested " + new Date(r.at).toLocaleTimeString() : "";
+  var secs = r && r.ms != null ? " \\u00b7 " + (r.ms / 1000).toFixed(1) + "s" : "";
+
+  var cls = "", text = "not tested", about = "Send it one real request to see whether it answers at all";
+  if (r && r.going) {
+    cls = "going"; text = "testing\\u2026"; about = "Sending it one real request";
+  } else if (r && r.ok) {
+    cls = "ok"; text = "\\u2713 " + (r.ms / 1000).toFixed(1) + "s";
+    about = "works" + secs + when + ". Click to see what was sent and what came back.";
+  } else if (r) {
+    cls = "bad"; text = "\\u2717 " + outcome(r);
+    about = (MEANS[outcome(r)] || "it did not answer") + ". " + (r.error || "") + secs + when +
+      ". Click to see what was sent and what came back.";
+  }
+
+  return h("div", { className: "try " + cls },
+    h("span", {
+      className: "msg", title: about,
+      onclick: r && !r.going ? function () { showTest(t.model, r); } : null,
+    }, text),
+    h("button", {
+      className: "sm", disabled: Boolean(r && r.going),
+      title: "Send one real request and record the result",
+      onclick: function () { testMany([t]); },
+    }, "Test"));
+}
+
 // --- your models table ----------------------------------------------------
 var COLS = {
   model: { label: "Model", how: "text", get: function (t) { return t.model; } },
@@ -963,6 +1068,15 @@ var COLS = {
   output: { label: "Out $/M", num: true, how: "cheap", get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.output !== undefined ? d.output : null; } },
   record: { label: "Record", num: true, get: function (t) { var r = recOf(t.baseUrl, t.model); return r.pct === null ? -1 : r.pct; } },
   tried: { label: "Tried", num: true, get: function (t) { return recOf(t.baseUrl, t.model).total; } },
+  // Working first, then not tested, then broken. The useful order when you
+  // are looking for something to take out.
+  works: {
+    label: "Works?",
+    get: function (t) {
+      var r = TRIES[pk(t.i, t.model)];
+      return !r || r.going ? 1 : r.ok ? 2 : 0;
+    },
+  },
 };
 
 function rows() {
@@ -1037,7 +1151,8 @@ function drawMine() {
               onclick: function () { SORT = SORT.filter(function (x) { return x !== s; }); drawMine(); } }, "\\u2715"));
         })]
       : (list.length > 1 ? "Click a column to sort. Sorting changes nothing about routing." : "")),
-    picked.length ? h("button", { className: "sm", onclick: function () { testMany(picked); } }, "Test " + picked.length) : null,
+    picked.length ? h("button", { className: "sm", disabled: Boolean(running),
+      onclick: function () { testMany(picked); } }, "Test " + picked.length) : null,
     picked.length ? h("button", { className: "sm danger", onclick: function () { removeModels(picked); } }, "Take " + picked.length + " out") : null,
     picked.length ? h("button", { className: "sm ghost", onclick: function () { MINE.clear(); drawMine(); } }, "Clear") : null,
     SORT.length ? h("button", { className: "sm", onclick: function () { SORT = []; drawMine(); } }, "Clear sort") : null,
@@ -1049,9 +1164,11 @@ function drawMine() {
       onclick: rankingDialog,
     }, ranked() ? "Ranking \\u2713" : "Provider ranking") : null,
     list.length ? h("button", { className: "sm", title: "Ask models.dev again for context, price and abilities", onclick: refreshCatalog }, "Refresh from models.dev") : null,
-    list.length ? h("button", { className: "sm", onclick: function () { testMany(view); } }, "Test all") : null);
+    list.length ? h("button", { className: "sm", disabled: Boolean(running),
+      onclick: function () { testMany(view); } }, "Test all") : null);
 
   if (!list.length) {
+    put($("outcomes"));
     put($("mt"), h("div", { className: "card" }, !ready
       ? h("div", { className: "loading" }, h("span", { className: "spin" }), "Loading your models")
       : h("div", { className: "empty" },
@@ -1069,6 +1186,8 @@ function drawMine() {
           : "")));
   };
 
+  drawOutcomes(view);
+
   put($("mt"), h("div", { className: "mt-wrap" },
     h("table", { className: "mt" },
       h("thead", {}, h("tr", {},
@@ -1083,7 +1202,7 @@ function drawMine() {
           },
         })),
         head("model"), head("provider"), head("context"), head("tools"), head("images"),
-        head("input"), head("output"), head("record"), head("tried"),
+        head("input"), head("output"), head("record"), head("tried"), head("works"),
         h("th", {}, ""))),
       h("tbody", {}, view.map(function (t, n) {
         var d = facts(t.baseUrl, t.model);
@@ -1091,6 +1210,9 @@ function drawMine() {
         var wait = COOL[key(t.baseUrl, t.model)];
         var on = MINE.has(pk(t.i, t.model));
         return h("tr", {
+          // So a finished test can replace one cell instead of redrawing the
+          // whole table, which matters at 500 models.
+          "data-key": pk(t.i, t.model),
           className: (on ? "picked " : "") + (t.off || t.parked ? "dim" : ""),
           title: t.off ? t.name + " is switched off, so this model is skipped"
             : t.parked ? "Parked: listed but never called" : "",
@@ -1122,12 +1244,11 @@ function drawMine() {
           h("td", { className: "num", title: r.total ? r.ok + " of " + r.total + " requests answered" : "Nothing has been sent to this model yet" },
             r.pct === null ? h("span", { className: "no" }, "-") : (r.pct + "%")),
           h("td", { className: "num" }, r.total || "-"),
+          h("td", {}, worksCell(t)),
           h("td", {}, h("div", { className: "acts" },
             wait ? h("span", { className: "tag warn", title: "Rate limited or down. It goes to the back of the queue until this runs out." }, Math.ceil(wait / 1000) + "s") : null,
             h("button", { className: "sm", title: t.parked ? "Put it back in the pot" : "Keep it listed but never call it",
               onclick: function () { park(t); } }, t.parked ? "Unpark" : "Park"),
-            h("button", { className: "sm", title: "Send one real request and record the result",
-              onclick: function () { testOne(t.i, t.model); } }, "Test"),
             h("button", { className: "sm danger", "aria-label": "Remove " + t.model,
               onclick: function () { removeModels([t]); } }, "\\u2715"))));
       })))));
@@ -1145,21 +1266,150 @@ async function park(t) {
 // Not a capability check. One real request, recorded like any other, so the
 // Record column has something in it before Claude Code sends the first one.
 // What a model can do is models.dev's answer, not this one's.
-async function testOne(i, model) {
-  openDialog([
-    h("h2", {}, h("span", { className: "spin" }), "Testing " + model),
-    h("p", {}, "Sending one real request through this provider."),
-  ]);
-  try {
-    var r = await post("/api/test", { index: i, model: model });
-    if (closeDialog) closeDialog();
-    await loadRecord();
-    drawAll();
-    showTest(model, r);
-  } catch (e) {
-    if (closeDialog) closeDialog();
-    toast("Test failed: " + e.message, true);
-  }
+//
+// Nothing opens over the table. A run marks its models as testing, fills the
+// Works? column in as results land, and shows its progress in a strip above
+// the table — so you can watch it, sort by it, and act on it while it runs.
+var LANES = 4;
+
+// Only the cell that changed, so a run of 500 does not redraw the table 500
+// times. The counts above it are worth a full redraw, but only once things
+// have settled for a moment.
+function paintCell(t) {
+  var tr = document.querySelector('tr[data-key="' + cssEscape(pk(t.i, t.model)) + '"]');
+  var cell = tr && tr.querySelector(".try");
+  if (cell) cell.replaceWith(worksCell(t));
+  else drawMine();
+}
+
+function cssEscape(v) {
+  return window.CSS && CSS.escape ? CSS.escape(v) : String(v).replace(/["\\\\]/g, "\\\\$&");
+}
+
+var settleTimer = null;
+function settleSoon() {
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(function () { drawMine(); }, 250);
+}
+
+async function testMany(items) {
+  if (!items.length) return;
+  if (running) { toast("A test run is going already", true); return; }
+
+  items.forEach(function (t) { TRIES[pk(t.i, t.model)] = { going: true }; });
+  running = { total: items.length, done: 0, good: 0, stop: false };
+  drawMine();
+  drawRun();
+
+  // One queue per provider: the limit worth respecting is per key, not
+  // overall. A dozen at once on one provider earns rate limits that say
+  // nothing about the models; two providers in parallel cost neither.
+  var queues = new Map();
+  items.forEach(function (t) {
+    if (!queues.has(t.i)) queues.set(t.i, []);
+    queues.get(t.i).push(t);
+  });
+
+  var started = Date.now();
+  var worker = async function (queue) {
+    while (queue.length && !running.stop) {
+      var t = queue.shift();
+      if (!S.providers[t.i]) continue;
+      var out;
+      try {
+        out = await post("/api/test", { index: t.i, model: t.model });
+      } catch (e) {
+        out = { ok: false, status: 0, error: e.message };
+      }
+      TRIES[pk(t.i, t.model)] = Object.assign({ at: Date.now() }, out);
+      running.done += 1;
+      if (out.ok) running.good += 1;
+      paintCell(t);
+      drawRun();
+      settleSoon();
+    }
+  };
+
+  var lanes = [];
+  queues.forEach(function (queue) {
+    for (var n = 0; n < Math.min(LANES, queue.length); n++) lanes.push(worker(queue));
+  });
+  await Promise.all(lanes);
+
+  // Anything the stop cut off goes back to untested rather than sitting on
+  // "testing..." forever.
+  items.forEach(function (t) {
+    if (TRIES[pk(t.i, t.model)] && TRIES[pk(t.i, t.model)].going) delete TRIES[pk(t.i, t.model)];
+  });
+
+  var took = ((Date.now() - started) / 1000).toFixed(1);
+  var out = running;
+  running = null;
+  drawRun();
+  await loadRecord();
+  drawAll();
+  toast((out.stop ? "Stopped after " + out.done + " of " + out.total + " \\u00b7 " : "") +
+    out.good + " of " + out.done + " answered in " + took + "s",
+    out.good < out.done);
+}
+
+function drawRun() {
+  if (!running) { put($("run")); return; }
+  var pct = running.total ? Math.round((running.done / running.total) * 100) : 0;
+  put($("run"), h("div", { className: "run" },
+    h("span", { className: "spin" }),
+    h("span", { className: "what" }, running.stop
+      ? "Stopping"
+      : "Testing " + running.total + (running.total === 1 ? " model" : " models") + " \\u00b7 " + LANES + " at a time per provider"),
+    h("span", { className: "bar" }, h("i", { style: "width:" + pct + "%" })),
+    h("span", { className: "tally" },
+      h("span", { className: "g" }, "\\u2713 " + running.good),
+      " \\u00b7 ",
+      h("span", { className: "b" }, "\\u2717 " + (running.done - running.good)),
+      " \\u00b7 " + running.done + "/" + running.total),
+    h("button", { className: "sm", disabled: running.stop,
+      onclick: function () { running.stop = true; drawRun(); } }, "Stop")));
+}
+
+// What the last run came to, grouped. Clicking a group selects those models,
+// so "take out everything that 404s" is two clicks; the arrow tests them
+// again, which is the other thing you want after a rate limit.
+function drawOutcomes(view) {
+  var groups = new Map();
+  view.forEach(function (t) {
+    var o = outcome(TRIES[pk(t.i, t.model)]);
+    if (!o) return;
+    if (!groups.has(o)) groups.set(o, []);
+    groups.get(o).push(t);
+  });
+
+  if (!groups.size) { put($("outcomes")); return; }
+
+  var sorted = [...groups].sort(function (a, b) {
+    return (b[0] === "works") - (a[0] === "works") || b[1].length - a[1].length;
+  });
+
+  put($("outcomes"), h("div", { className: "pills" }, sorted.map(function (entry) {
+    var what = entry[0];
+    var models = entry[1];
+    var on = models.every(function (t) { return MINE.has(pk(t.i, t.model)); });
+    return h("span", { className: "pill " + (what === "works" ? "ok" : "bad") + (on ? " on" : "") },
+      h("button", {
+        type: "button",
+        title: (MEANS[what] || what) + "\\n" + (on ? "Unselect" : "Select") + " these " + models.length,
+        onclick: function () {
+          models.forEach(function (t) {
+            if (on) MINE.delete(pk(t.i, t.model)); else MINE.add(pk(t.i, t.model));
+          });
+          drawMine();
+        },
+      }, (what === "works" ? "\\u2713 works" : "\\u2717 " + what), h("span", { className: "n" }, String(models.length))),
+      what === "works" ? null : h("button", {
+        type: "button", className: "again", title: "Test these " + models.length + " again",
+        disabled: Boolean(running),
+        onclick: function () { testMany(models); },
+      }, "\\u21bb"));
+  })));
 }
 
 function showTest(model, r) {
@@ -1172,87 +1422,6 @@ function showTest(model, r) {
       r.error ? h("div", { className: "kv" }, h("b", {}, "Error"), h("span", {}, r.error)) : null),
     r.sent ? [h("p", { style: "margin-top:12px" }, "Sent"), h("pre", { className: "dump" }, r.sent)] : null,
     r.got ? [h("p", { style: "margin-top:12px" }, "Received"), h("pre", { className: "dump" }, r.got)] : null,
-    h("div", { className: "btns" },
-      h("button", { className: "primary", onclick: function () { if (closeDialog) closeDialog(); } }, "Close")),
-  ], { wide: true });
-}
-
-// Every provider at once, a few models at a time from each.
-//
-// It used to be one request after another across the whole list, so testing
-// 74 models meant 74 round trips end to end. The limit worth respecting is
-// per key, not overall: hammering one provider with a dozen at once gets you
-// rate limits that say nothing about the models, while two providers in
-// parallel cost neither of them anything.
-var LANES = 4;
-
-async function testMany(items) {
-  if (!items.length) return;
-
-  // One queue per provider, so a provider with 40 models cannot starve one
-  // with 2, and each queue is drained by its own small set of workers.
-  var queues = new Map();
-  items.forEach(function (t) {
-    if (!queues.has(t.i)) queues.set(t.i, []);
-    queues.get(t.i).push(t);
-  });
-
-  var done = 0;
-  var ok = 0;
-  var bad = [];
-  var stop = false;
-  var started = Date.now();
-
-  var now = h("p", { id: "tm-now" }, "Starting");
-  openDialog([
-    h("h2", {}, h("span", { className: "spin" }), "Testing " + items.length + (items.length === 1 ? " model" : " models")),
-    h("p", {}, "One real request each, at most " + LANES + " at a time per provider. " +
-      "Anything that has not answered in " + S.testTimeout + "s is counted as a failure."),
-    now,
-    h("div", { className: "btns" }, h("button", { onclick: function () { stop = true; } }, "Stop")),
-  ]);
-
-  var tick = function (label) {
-    if (!$("tm-now")) return;
-    $("tm-now").textContent = done + " of " + items.length + " \\u00b7 " + ok + " answered" +
-      (label ? " \\u00b7 " + label : "");
-  };
-
-  var worker = async function (queue) {
-    while (queue.length && !stop) {
-      var t = queue.shift();
-      var p = S.providers[t.i];
-      if (!p) continue;
-      try {
-        var r = await post("/api/test", { index: t.i, model: t.model });
-        if (r.ok) ok += 1;
-        else bad.push([(p.name || p.label) + " / " + t.model, (r.status || "no answer") + " " + (r.error || "")]);
-      } catch (e) {
-        bad.push([(p.name || p.label) + " / " + t.model, e.message]);
-      }
-      done += 1;
-      tick(t.model);
-    }
-  };
-
-  var running = [];
-  queues.forEach(function (queue) {
-    for (var n = 0; n < Math.min(LANES, queue.length); n++) running.push(worker(queue));
-  });
-  await Promise.all(running);
-
-  var took = ((Date.now() - started) / 1000).toFixed(1);
-  if (closeDialog) closeDialog();
-  await loadRecord();
-  drawAll();
-
-  if (!bad.length) { toast(ok + " of " + done + " answered in " + took + "s"); return; }
-  openDialog([
-    h("h2", {}, ok + " of " + done + " answered in " + took + "s"),
-    h("p", {}, "These did not. They stay in the pot; routing simply learns to avoid them."),
-    h("div", {}, bad.map(function (b) {
-      return h("div", { className: "kv" }, h("b", {}, b[0]), h("span", {}, b[1]));
-    })),
     h("div", { className: "btns" },
       h("button", { className: "primary", onclick: function () { if (closeDialog) closeDialog(); } }, "Close")),
   ], { wide: true });
@@ -1528,7 +1697,7 @@ async function refreshCatalog() {
 }
 
 // --- wiring ---------------------------------------------------------------
-function drawAll() { drawSidebar(); drawMine(); drawProviders(); drawRequests(); showPage(); }
+function drawAll() { drawSidebar(); drawRun(); drawMine(); drawProviders(); drawRequests(); showPage(); }
 
 $("theme").addEventListener("click", function () {
   var next = currentTheme() === "dark" ? "light" : "dark";
