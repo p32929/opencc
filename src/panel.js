@@ -9,7 +9,7 @@
 // No dependencies: Node's http server, one hand-written page, and a small
 // JSON API over the same configStore the rest of opencc reads.
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -19,6 +19,7 @@ import { allStats, successRate, coolingFor, record, resetStats } from "./stats.j
 import { loadCatalog, lookupModel, catalogAge, catalogSize } from "./modelsdev.js";
 import { listRequests, clearRequests, KEEP } from "./reqlog.js";
 import { bus } from "./events.js";
+import { CATALOGUES_PATH, TESTS_PATH, GLOBAL_CONFIG_DIR } from "./paths.js";
 import { page } from "./panelPage.js";
 
 const json = (res, status, body) => {
@@ -196,7 +197,43 @@ function reasonFrom(body) {
 // panel gets six at a time however many lanes it thinks it has. From here
 // there is no such ceiling. Closing the tab no longer stops a run either,
 // and the results are still here when you come back.
-const tests = {};        // "baseUrl|model" -> the last result
+// --- what is kept on disk --------------------------------------------------
+// Test results and provider model lists both used to live only in memory, so
+// a restart threw away a run that had taken minutes and every provider had
+// to be asked for its catalogue again on every visit.
+function readJson(path, fallback) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+// Written a moment after the last change rather than on every one: a run
+// lands hundreds of results a second and each would otherwise be a file
+// write.
+function saveLater(path, get) {
+  let timer = null;
+  return () => {
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      try {
+        mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
+        writeFileSync(path, JSON.stringify(get()), { mode: 0o600 });
+      } catch {
+        // A full disk should not take a run down with it.
+      }
+    }, 1000);
+  };
+}
+
+const tests = readJson(TESTS_PATH, {});
+const saveTests = saveLater(TESTS_PATH, () => tests);
+
+// baseUrl -> { models, error, at }
+const catalogues = readJson(CATALOGUES_PATH, {});
+const saveCatalogues = saveLater(CATALOGUES_PATH, () => catalogues);
 let run = null;
 
 const testKey = (baseUrl, model) => `${baseUrl}|${model}`;
@@ -346,6 +383,7 @@ async function startRun(items) {
       }
 
       tests[key] = { ...outcome, at: Date.now() };
+      saveTests();
       run.done += 1;
       if (outcome.ok) run.good += 1;
       bus.emit("tested", { key, result: tests[key] });
@@ -527,6 +565,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         // next test without a restart.
         const outcome = await testModel(provider, model, live.testTimeout * 1000, true);
         tests[testKey(provider.baseUrl, model)] = { ...outcome, at: Date.now() };
+        saveTests();
         bus.emit("tested", { key: testKey(provider.baseUrl, model), result: tests[testKey(provider.baseUrl, model)] });
         // A model that just answered may be the one the proxy was waiting for.
         await onSave?.();
@@ -621,13 +660,36 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
 
       // The provider's own catalogue, so you can pick a model instead of
       // typing one and finding out later it doesn't exist.
+      // A provider's own model list, from the last time it was asked.
+      //
+      // It used to be fetched on every visit, so adding a provider, picking
+      // models, leaving and coming back meant waiting for all of them again.
+      // Kept on disk now and only refetched when you press Refresh, or when
+      // nothing has ever been fetched for that backend.
       if (req.method === "GET" && path === "/api/catalogue") {
-        const index = Number(new URL(req.url, "http://localhost").searchParams.get("index"));
+        const url = new URL(req.url, "http://localhost");
+        const index = Number(url.searchParams.get("index"));
+        const fresh = url.searchParams.get("fresh") === "1";
         const provider = loadState().providers[index];
         if (!provider) {
           json(res, 404, { models: [] });
           return;
         }
+
+        const cached = catalogues[provider.baseUrl];
+        if (cached && !fresh) {
+          // models.dev may know more than it did when this was stored, so
+          // the facts are attached now rather than frozen in with the names.
+          await loadCatalog();
+          json(res, 200, {
+            models: cached.models.map((id) => ({ id, ...(lookupModel(provider.baseUrl, id) ?? {}) })),
+            error: cached.error || undefined,
+            at: cached.at,
+            cached: true,
+          });
+          return;
+        }
+
         const headers = {};
         if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
         try {
@@ -640,20 +702,30 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
           // models" and "this provider would not tell us" are different
           // problems with different fixes.
           if (!upstream.ok) {
-            json(res, 200, { models: [], error: `${upstream.status} ${(await upstream.text()).slice(0, 200)}` });
+            const error = `${upstream.status} ${(await upstream.text()).slice(0, 200)}`;
+            // Remembered too: a provider that will not list should not be
+            // asked again on every visit either.
+            catalogues[provider.baseUrl] = { models: cached?.models ?? [], error, at: Date.now() };
+            saveCatalogues();
+            json(res, 200, { models: [], error });
             return;
           }
           const body = await upstream.json();
           const data = Array.isArray(body) ? body : (body.data ?? []);
+          const ids = data.map((m) => m.id).filter(Boolean).sort();
+
+          catalogues[provider.baseUrl] = { models: ids, error: "", at: Date.now() };
+          saveCatalogues();
+
           await loadCatalog();
-          const models = data
-            .map((m) => m.id)
-            .filter(Boolean)
-            .sort()
-            .map((id) => ({ id, ...(lookupModel(provider.baseUrl, id) ?? {}) }));
-          json(res, 200, { models });
+          json(res, 200, {
+            models: ids.map((id) => ({ id, ...(lookupModel(provider.baseUrl, id) ?? {}) })),
+            at: catalogues[provider.baseUrl].at,
+          });
         } catch (err) {
-          json(res, 200, { models: [], error: err.message });
+          catalogues[provider.baseUrl] = { models: cached?.models ?? [], error: err.message, at: Date.now() };
+          saveCatalogues();
+          json(res, 200, { models: cached?.models?.map((id) => ({ id })) ?? [], error: err.message });
         }
         return;
       }

@@ -21,3 +21,11 @@ export const MODELS_DEV_PATH = join(GLOBAL_CONFIG_DIR, "models-dev.json");
 // models were tried, what each answered, which one ended up replying. No
 // bodies, no keys, so it stays small enough to keep around.
 export const REQUESTS_PATH = join(GLOBAL_CONFIG_DIR, "requests.jsonl");
+
+// What each provider's /v1/models returned, so the model lists survive a
+// reload and a restart. Refetched on demand, not on every visit.
+export const CATALOGUES_PATH = join(GLOBAL_CONFIG_DIR, "catalogues.json");
+
+// The last test result per model. Kept so a run's work is still there after
+// a restart, the way the record and the catalogue are.
+export const TESTS_PATH = join(GLOBAL_CONFIG_DIR, "model-tests.json");

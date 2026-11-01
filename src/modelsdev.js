@@ -54,6 +54,36 @@ function compact(raw) {
 
 let table = null;
 
+// Built once per catalogue, because lookupModel is called for every model on
+// the page and a scan of nine thousand entries per call turned a cached
+// catalogue listing into nearly four seconds of work.
+//
+// Two indexes: one per host, since the same name can mean different things
+// at two providers, and one of every name anywhere, which is what makes this
+// work behind a key-rotating proxy whose host models.dev has never seen.
+let index = null;
+
+function buildIndex() {
+  const byHost = new Map();
+  const anywhere = new Map();
+
+  for (const provider of Object.values(table?.providers ?? {})) {
+    const host = provider.api ? hostOf(provider.api) : "";
+    const forHost = host ? byHost.get(host) ?? new Map() : null;
+    if (forHost && host) byHost.set(host, forHost);
+
+    for (const [id, info] of Object.entries(provider.models)) {
+      for (const name of [norm(id), norm(id.split("/").pop())]) {
+        if (!name) continue;
+        if (forHost && !forHost.has(name)) forHost.set(name, info);
+        if (!anywhere.has(name)) anywhere.set(name, info);
+      }
+    }
+  }
+
+  index = { byHost, anywhere };
+}
+
 function readCache() {
   try {
     const parsed = JSON.parse(readFileSync(MODELS_DEV_PATH, "utf8"));
@@ -75,7 +105,10 @@ export async function loadCatalog({
   // and without the 6 MB real one.
   fetchImpl = fetch,
 } = {}) {
-  table ??= readCache();
+  if (!table) {
+    table = readCache();
+    index = null;
+  }
   const fresh = table && Date.now() - table.at < DAY_MS;
   if (!force && (fresh || process.env.OPENCC_NO_MODELS_DEV)) return table;
 
@@ -83,6 +116,7 @@ export async function loadCatalog({
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeout) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     table = { v: VERSION, at: Date.now(), providers: compact(await res.json()) };
+    index = null;
     mkdirSync(dirname(MODELS_DEV_PATH) || GLOBAL_CONFIG_DIR, { recursive: true });
     writeFileSync(MODELS_DEV_PATH, JSON.stringify(table));
   } catch (err) {
@@ -123,30 +157,19 @@ const norm = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
 // for key-rotating proxies and self-hosted gateways.
 export function lookupModel(baseUrl, model) {
   if (!table || !model) return null;
+  if (!index) buildIndex();
 
   const wanted = [norm(model), norm(String(model).split("/").pop())];
-  const host = hostOf(baseUrl);
+  const forHost = index.byHost.get(hostOf(baseUrl));
 
-  const findIn = (provider) => {
-    for (const [id, info] of Object.entries(provider.models)) {
-      const candidate = norm(id);
-      if (wanted.includes(candidate) || wanted.includes(norm(id.split("/").pop()))) return info;
-    }
-    return null;
-  };
-
-  const all = Object.values(table.providers);
-  if (host) {
-    for (const provider of all) {
-      if (provider.api && hostOf(provider.api) === host) {
-        const hit = findIn(provider);
-        if (hit) return hit;
-      }
+  if (forHost) {
+    for (const name of wanted) {
+      const hit = forHost.get(name);
+      if (hit) return hit;
     }
   }
-
-  for (const provider of all) {
-    const hit = findIn(provider);
+  for (const name of wanted) {
+    const hit = index.anywhere.get(name);
     if (hit) return hit;
   }
   return null;
@@ -175,4 +198,5 @@ export function tooBigForCatalog(baseUrl, model, chars) {
 // catalogue behind pretending to be fresh.
 export function forgetCatalog() {
   table = null;
+  index = null;
 }

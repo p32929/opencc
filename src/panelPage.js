@@ -653,8 +653,8 @@ async function loadList(i, fresh) {
   LISTS[i] = { models: (LISTS[i] && LISTS[i].models) || [], loading: true, error: "" };
   drawProviders();
   try {
-    var out = await api("/api/catalogue?index=" + i);
-    LISTS[i] = { models: out.models || [], loading: false, error: out.error || "" };
+    var out = await api("/api/catalogue?index=" + i + (fresh ? "&fresh=1" : ""));
+    LISTS[i] = { models: out.models || [], loading: false, error: out.error || "", at: out.at };
   } catch (e) {
     LISTS[i] = { models: [], loading: false, error: e.message };
   }
@@ -859,7 +859,8 @@ function drawProviders() {
           p.disabled ? h("span", { className: "tag" }, "off") : null,
           list.loading ? h("span", { className: "tag" }, "loading")
             : list.error ? h("span", { className: "tag bad", title: "This backend would not list its models: " + list.error }, "no list")
-            : h("span", { className: "tag" }, names.listed.length + " listed"),
+            : h("span", { className: "tag", title: list.at ? "Asked " + ago(list.at) + ". It is kept, so leaving and coming back does not ask again — press Refresh for a new list." : "" },
+                names.listed.length + " listed"),
           h("span", { className: "tag acc" }, p.models.length + " in pot"),
           h("span", { className: "url", title: p.baseUrl }, p.baseUrl)),
         h("form", { className: "by-name", onsubmit: function (e) {
@@ -1032,6 +1033,18 @@ var MEANS = {
   failed: "it failed without a status: a lost connection, or a reply nothing could read",
 };
 
+// Where this row's abilities come from. models.dev knows the model, or it
+// does not and there is nothing to go on but a real request.
+function fromCell(t) {
+  if (facts(t.baseUrl, t.model)) {
+    return h("span", { className: "meta", title: "Context, price and abilities are models.dev's, for this model name" }, "models.dev");
+  }
+  return h("div", { className: "try" },
+    h("span", { className: "msg", title: "models.dev does not list this name, so nothing is known about what it can do. Testing it still shows whether it answers." }, "not found"),
+    h("button", { className: "sm", disabled: Boolean(running),
+      title: "Fetch models.dev again and look for it", onclick: refreshCatalog }, "Retry"));
+}
+
 function worksCell(t) {
   var r = TRIES[pk(t.i, t.model)];
   var when = r && r.at ? " \\u00b7 tested " + new Date(r.at).toLocaleTimeString() : "";
@@ -1083,8 +1096,19 @@ var COLS = {
   context: { label: "Context", num: true, first: "down", words: ["smallest first", "biggest first"],
     get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.context ? d.context : null; } },
 
+  // How many of the three it can do. The quick read of a row.
+  abilities: { label: "Abilities", num: true, first: "down", words: ["fewest first", "most first"],
+    get: function (t) {
+      var d = facts(t.baseUrl, t.model);
+      if (!d) return null;
+      return (d.tools ? 1 : 0) + (d.reasoning ? 1 : 0) + (d.vision ? 1 : 0);
+    } },
+
   tools: { label: "Tools", first: "down", words: ["without first", "with first"],
     get: function (t) { var d = facts(t.baseUrl, t.model); return d ? (d.tools ? 1 : 0) : null; } },
+
+  thinking: { label: "Thinking", first: "down", words: ["without first", "with first"],
+    get: function (t) { var d = facts(t.baseUrl, t.model); return d ? (d.reasoning ? 1 : 0) : null; } },
 
   images: { label: "Images", first: "down", words: ["without first", "with first"],
     get: function (t) { var d = facts(t.baseUrl, t.model); return d ? (d.vision ? 1 : 0) : null; } },
@@ -1103,6 +1127,12 @@ var COLS = {
 
   // How long its test took. Failed or not tested have no time and go at the
   // end either way, not tested before not working.
+  // Where the four columns before it come from, which is the answer to "why
+  // does this row say it cannot do tools" — models.dev was asked and said
+  // so, or models.dev has never heard of this name.
+  from: { label: "From", first: "up", words: ["known first", "unknown first"],
+    get: function (t) { return facts(t.baseUrl, t.model) ? 0 : 1; } },
+
   works: {
     label: "Works?", first: "up", words: ["fastest first", "slowest first"],
     get: function (t) {
@@ -1253,8 +1283,11 @@ function drawMine() {
             drawMine();
           },
         })),
-        head("model"), head("provider"), head("context"), head("tools"), head("images"),
-        head("input"), head("output"), head("record"), head("tried"), head("works"),
+        h("th", { className: "num", title: "Its place in the order shown" }, "#"),
+        head("model"), head("provider"), head("context"), head("abilities"),
+        head("tools"), head("thinking"), head("images"),
+        head("input"), head("output"), head("from"),
+        head("record"), head("tried"), head("works"),
         h("th", {}, ""))),
       h("tbody", {}, view.map(function (t, n) {
         var d = facts(t.baseUrl, t.model);
@@ -1284,15 +1317,19 @@ function drawMine() {
               drawMine();
             },
           })),
+          h("td", { className: "num muted" }, String(n + 1)),
           h("td", { className: "m", title: t.model }, t.model),
           h("td", {}, t.name,
             t.off ? h("span", { className: "tag", style: "margin-left:6px" }, "off") : null,
             t.parked ? h("span", { className: "tag", style: "margin-left:6px" }, "parked") : null),
           h("td", { className: "num", title: d && d.context ? d.context.toLocaleString() + " tokens" : "models.dev does not list this model" }, kTok(d && d.context)),
+          h("td", { className: "num" }, d ? COLS.abilities.get(t) + " of 3" : h("span", { className: "no" }, "?")),
           h("td", {}, yesNo(COLS.tools.get(t))),
+          h("td", {}, yesNo(COLS.thinking.get(t))),
           h("td", {}, yesNo(COLS.images.get(t))),
           h("td", { className: "num" }, d && d.input !== undefined ? usd(d.input) : "-"),
           h("td", { className: "num" }, d && d.output !== undefined ? usd(d.output) : "-"),
+          h("td", {}, fromCell(t)),
           h("td", { className: "num", title: r.total ? r.ok + " of " + r.total + " requests answered" : "Nothing has been sent to this model yet" },
             r.pct === null ? h("span", { className: "no" }, "-") : (r.pct + "%")),
           h("td", { className: "num" }, r.total || "-"),
