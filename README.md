@@ -32,15 +32,17 @@ opencc claude  # cd to your project first
 `opencc` starts two things:
 
 ```
+  opencc 4.0.0
   panel  http://localhost:3450
   proxy  http://localhost:9753   26 models, 5 providers
 ```
 
-The **panel** is where you add providers. The **proxy** is what Claude Code
-talks to. The proxy only starts when you have at least one provider with a
-model. On a new install it waits, and starts by itself the moment you add one:
+The **panel** is where you add providers and pick models. The **proxy** is
+what Claude Code talks to. It starts as soon as there is a provider, and
+starts by itself the moment you add one:
 
 ```
+  opencc 4.0.0
   panel  http://localhost:3450
   proxy  waiting - add a provider in the panel and it starts on its own
 ```
@@ -60,7 +62,9 @@ matter.
 Each request is filed by what it needed: **tools**, **image** or **document**
 (and **text** for the rare request carrying none of them). opencc saves the
 result of every call in `~/.opencc/stats.jsonl` - provider, model, kind,
-status code.
+status code. Every request it serves is also logged to
+`~/.opencc/requests.jsonl`, the last 500, which is what the Requests page
+shows.
 
 It then picks a model with
 [Thompson sampling](https://en.wikipedia.org/wiki/Thompson_sampling):
@@ -115,88 +119,49 @@ Sizes are counted in characters, not tokens. Nothing here converts between the
 two, so the unit only has to be the same on both sides of a comparison, and
 characters are the one that can be measured without guessing.
 
-## First run
+## What a model can do
 
-A new install has no data, so opencc tests every model once before the proxy
-starts. This takes about a minute.
+Context window, price, tool calling and images come from
+[models.dev](https://models.dev). opencc caches the list for a day in
+`~/.opencc/models-dev.json` and shows it per model in the panel.
 
-```
-  warming up 26 models across 5 providers
-  z.ai glm flash GLM-4.6V-Flash      429  The service may be temporarily overloaded
-  nvidia google/gemma-4-31b-it       403  Authorization failed
-  24 of 26 answered, 24 called the tool
+opencc does not probe for any of this. There is no warm-up and no capability
+test. A model it does not recognise just shows `?` and still gets its turn.
 
-opencc on :9753 · 26 models · 5 providers
+The published context window is used for routing too, but only where opencc
+has learned nothing itself:
 
-in another terminal: opencc claude
-```
-
-Models that already have data are skipped. Use `--no-warmup` to turn this off.
-
-When you add a model or a provider in the panel, it is tested right away. You
-do not need to restart the proxy: a running proxy reads the results from the
-same file and starts using them. **Test new** in the panel does the same for
-anything still untested.
-
-![The warm-up on a fresh record](PASTE_IMAGE_URL_HERE)
-
-## What Claude Code needs
-
-Claude Code needs three things: tool calling, images you paste, and PDFs you
-attach. If nothing in your pot can serve one of them, every request of that
-kind fails, however many models you have.
-
-The panel shows this at the top:
-
-```
-  Tool calling  23 models      Images  9 models      PDFs  7 models
-```
-
-Green means covered. Amber means not tested yet, with a button to test it.
-Red means nothing can do it, and you need to add a model that can.
-
-Tool calling is tested on first run, because nearly every Claude Code request
-uses it. Images and PDFs are tested when you press their button.
-
-The PDF test checks the model actually *read* the file, not just that it
-accepted it. A model that takes a PDF and ignores it then answers confidently
-about a document it never saw, which is worse than any error.
-
-**Tool calling is required.** If every one of your models has been tried and
-none can call tools, the proxy does not start at all:
-
-```
-  panel  http://localhost:3450
-  proxy  not started - none of your 4 models can call tools
-         Claude Code needs it to read and edit files.
-         Add a model that can, in the panel, and it starts.
-```
-
-A model nobody has tried yet gets the benefit of the doubt, so a fresh install
-still comes up. The proxy starts the moment one model passes, whether from a
-warm-up, a **Test** button, or a real request.
-
-**Images are optional.** Claude Code works fine without them, you just cannot
-paste a screenshot. opencc says so once at startup and carries on.
+- Already refused a request this size: skip it, whatever models.dev says.
+- Already answered one this size: the catalogue is wrong, ignore it.
+- Nothing known yet: trust the published window.
 
 ## The panel
 
 Open the panel URL that `opencc` prints. On a new install it opens by itself.
 
-Each provider needs a base URL, an API key (can be empty), and a list of
-models. Each model row shows its record: `text 100%  tools 24%  image -`.
+**Providers** is every model your backends serve. Search across all of them,
+filter to free, sort by name, price or context. Click a model to put it in the
+pot, or tick several and add them together. Add one by name if the provider
+does not list it.
+
+**Your models** is what is in the pot, as one table: model, provider, context,
+tools, images, price in and out, record, tried. Click a column to sort;
+click more columns to break ties. Shift-click to select a range.
+
+**Requests** is what the proxy served: which models were tried, what each
+answered, which one replied. Filter to failures or fallbacks.
 
 | Button | What it does |
 |---|---|
 | Park | keep the model in the list, never call it |
-| Remove | delete the model |
-| Test | send one real request |
-| Turn off | skip the provider, keep its key |
-| Delete | remove the provider and its key |
+| Test | send one real request, and show what was sent and received |
+| Edit | a provider's URL, key, on/off, delete |
+| Refresh | ask a provider for its model list again |
+| models.dev | fetch the catalogue again |
 | Streaming | off = wait for the full reply |
-| Test new | test every model with no record yet |
-| Text / Images Test | test what is still unknown for that kind |
 | Reset record | forget all results |
+
+![Picking models](PASTE_IMAGE_URL_HERE)
 
 ## Reset
 
@@ -233,6 +198,49 @@ OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
 ```
 
 ## Changelog
+
+### 4.0.0 - 2026-11-02
+
+**Breaking**
+
+- Capability probing is gone, and with it `src/warmup.js`, the three
+  `/api/warmup` routes, the coverage strip and `--no-warmup`. What a model can
+  do comes from models.dev. On a 27-model setup this took tool-calling probes
+  from 27 to 2 and image probes from 27 to 2.
+- The proxy no longer refuses to start unless something has proved it can call
+  tools. That gate was the reason the probing existed. It starts as soon as
+  there is something to route to.
+
+**Added**
+
+- models.dev: context window, price, tool calling and images, for 8,900+
+  models, cached a day. Shown per model, and used as a size ceiling where
+  opencc has learned none of its own.
+- The dashboard is two pages. **Providers** lists everything your backends
+  serve, searchable across all of them, filterable to free, sortable by name,
+  price or context, with multi-select. **Your models** is one sortable table.
+- A request log: the last 500 requests with every model tried and what each
+  answered, filterable to failures or fallbacks, at `~/.opencc/requests.jsonl`.
+- Live updates over SSE, a light/dark toggle, and a loading indicator on every
+  network call.
+- A provider with no models is kept, so you can add the backends first and
+  pick models second. Requests then answer "Pick a model first".
+- The version is printed on startup and in `--help`.
+- **Test** shows exactly what was sent and what came back.
+
+**Fixed**
+
+- A system message arriving inside `messages`, which is how a SessionStart
+  hook reaches Claude Code, was passed through where it sat. vLLM rejects any
+  request whose system message is not first, so every call failed with
+  "System message must be at the beginning". They are folded into the leading
+  one now.
+- The collapse arrow in the provider list was a button with no click handler,
+  inside a header that ignores clicks on buttons, with a 9x15 hit area. Every
+  click on it was thrown away.
+- `/api/catalog/refresh` shipped with nothing calling it. It has a button now.
+- A provider that refuses to list its models said nothing; it now says so
+  instead of looking empty.
 
 ### 3.0.0 - 2026-10-10
 
