@@ -113,10 +113,16 @@ async function testModel(provider, model, timeoutMs) {
       // Not JSON — an HTML error page, most likely. Shown as it came.
     }
 
+    // A 429 usually says when to come back. Honouring it beats guessing,
+    // and a run that waits the stated time turns a rate limit into a result
+    // instead of recording the model as broken.
+    const after = Number(res.headers.get("retry-after"));
+
     return {
       ok: res.ok,
       status: res.status,
       ms,
+      retryAfter: Number.isFinite(after) && after > 0 ? after : undefined,
       sent: trim(sent),
       got: trim(got),
       error: res.ok ? undefined : reasonFrom(text) || `HTTP ${res.status}`,

@@ -1053,28 +1053,56 @@ function worksCell(t) {
 }
 
 // --- your models table ----------------------------------------------------
+// Each column says which way it sorts first and what that means in words,
+// so the chip above the table reads "Context: biggest first" rather than an
+// arrow you have to decode.
+//
+// get() returns null for "there is no value here" — no price, never tested —
+// and null always sorts last, whichever direction you asked for: an unknown
+// price is not a cheap one. Where two nulls are not the same thing, missing()
+// separates them.
 var COLS = {
-  model: { label: "Model", how: "text", get: function (t) { return t.model; } },
-  // By your ranking when you have one, by name when you do not. The header
-  // says which, so a sort by "Provider" is never a mystery.
+  model: { label: "Model", first: "up", words: ["A to Z", "Z to A"],
+    get: function (t) { return t.model; } },
+
   provider: {
-    label: "Provider", how: "text",
+    label: "Provider", first: "up",
+    words: ["best first", "worst first"],
     get: function (t) { return ranked() ? placeOfProvider(t.baseUrl) : t.name; },
   },
-  context: { label: "Context", num: true, get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.context ? d.context : 0; } },
-  tools: { label: "Tools", get: function (t) { var d = facts(t.baseUrl, t.model); return d ? (d.tools ? 1 : 0) : -1; } },
-  images: { label: "Images", get: function (t) { var d = facts(t.baseUrl, t.model); return d ? (d.vision ? 1 : 0) : -1; } },
-  input: { label: "In $/M", num: true, how: "cheap", get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.input !== undefined ? d.input : null; } },
-  output: { label: "Out $/M", num: true, how: "cheap", get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.output !== undefined ? d.output : null; } },
-  record: { label: "Record", num: true, get: function (t) { var r = recOf(t.baseUrl, t.model); return r.pct === null ? -1 : r.pct; } },
-  tried: { label: "Tried", num: true, get: function (t) { return recOf(t.baseUrl, t.model).total; } },
-  // Working first, then not tested, then broken. The useful order when you
-  // are looking for something to take out.
+
+  context: { label: "Context", num: true, first: "down", words: ["smallest first", "biggest first"],
+    get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.context ? d.context : null; } },
+
+  tools: { label: "Tools", first: "down", words: ["without first", "with first"],
+    get: function (t) { var d = facts(t.baseUrl, t.model); return d ? (d.tools ? 1 : 0) : null; } },
+
+  images: { label: "Images", first: "down", words: ["without first", "with first"],
+    get: function (t) { var d = facts(t.baseUrl, t.model); return d ? (d.vision ? 1 : 0) : null; } },
+
+  input: { label: "In $/M", num: true, first: "up", words: ["cheapest first", "priciest first"],
+    get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.input !== undefined ? d.input : null; } },
+
+  output: { label: "Out $/M", num: true, first: "up", words: ["cheapest first", "priciest first"],
+    get: function (t) { var d = facts(t.baseUrl, t.model); return d && d.output !== undefined ? d.output : null; } },
+
+  record: { label: "Record", num: true, first: "down", words: ["worst first", "best first"],
+    get: function (t) { var r = recOf(t.baseUrl, t.model); return r.pct === null ? null : r.pct; } },
+
+  tried: { label: "Tried", num: true, first: "down", words: ["fewest first", "most first"],
+    get: function (t) { return recOf(t.baseUrl, t.model).total || null; } },
+
+  // How long its test took. Failed or not tested have no time and go at the
+  // end either way, not tested before not working.
   works: {
-    label: "Works?",
+    label: "Works?", first: "up", words: ["fastest first", "slowest first"],
     get: function (t) {
       var r = TRIES[pk(t.i, t.model)];
-      return !r || r.going ? 1 : r.ok ? 2 : 0;
+      return r && r.ok && !r.going ? (r.ms || 0) : null;
+    },
+    missing: function (t) {
+      var r = TRIES[pk(t.i, t.model)];
+      return !r || r.going ? 0 : 1;
     },
   },
 };
@@ -1094,27 +1122,42 @@ function rows() {
 
 function sortRows(list) {
   if (!SORT.length) return list;
+
+  var cmp = function (a, b, s) {
+    var col = COLS[s.key];
+    var x = col.get(a), y = col.get(b);
+    // Two nulls are not always the same thing: never tested and tested-and-
+    // failed both have no time, and one belongs above the other.
+    if (x == null && y == null) {
+      return (col.missing ? col.missing(a) : 0) - (col.missing ? col.missing(b) : 0);
+    }
+    if (x === y) return 0;
+    // Nothing sorts last whichever way you asked: an unknown price is not a
+    // cheap one, and an untested model is not a fast one.
+    if (x == null) return 1;
+    if (y == null) return -1;
+    var r = typeof x === "string" ? byName(x, y) : Number(x) - Number(y);
+    return s.dir === "up" ? r : -r;
+  };
+
   var withAt = list.map(function (t, n) { return { t: t, n: n }; });
   withAt.sort(function (a, b) {
     for (var i = 0; i < SORT.length; i++) {
-      var s = SORT[i];
-      var x = COLS[s.key].get(a.t), y = COLS[s.key].get(b.t);
-      if (x === y) continue;
-      // Unknown sorts last either way: a missing price is not a cheap one.
-      if (x === null) return 1;
-      if (y === null) return -1;
-      var r = typeof x === "string" ? byName(x, y) : x - y;
-      if (r) return s.dir === "up" ? r : -r;
+      var r = cmp(a.t, b.t, SORT[i]);
+      if (r) return r;
     }
-    return a.n - b.n;
+    return a.n - b.n;   // whatever order it was already in
   });
   return withAt.map(function (x) { return x.t; });
 }
 
-var firstDir = function (k) {
-  if (k === "provider") return "up"; // best first, or A to Z
-  return COLS[k].how ? "up" : "down";
-};
+// What a sort is doing, in words.
+function dirText(key, dir) {
+  return COLS[key].words[dir === "up" ? 0 : 1] +
+    (key === "works" ? " (then not tested, then not working)" : "");
+}
+
+var firstDir = function (k) { return COLS[k].first; };
 function clickSort(k) {
   var at = null;
   SORT.forEach(function (s) { if (s.key === k) at = s; });
@@ -1145,8 +1188,8 @@ function drawMine() {
   put($("mt-top"),
     h("div", { className: "sorts" }, SORT.length
       ? [h("span", {}, "Sorted by"), SORT.map(function (s, n) {
-          return h("span", { className: "chip" },
-            (n + 1) + ". " + COLS[s.key].label + " " + (s.dir === "up" ? "\\u2191" : "\\u2193"),
+          return h("span", { className: "chip", title: dirText(s.key, s.dir) },
+            (n + 1) + ". " + COLS[s.key].label + ": " + dirText(s.key, s.dir),
             h("button", { type: "button", "aria-label": "Stop sorting by " + COLS[s.key].label,
               onclick: function () { SORT = SORT.filter(function (x) { return x !== s; }); drawMine(); } }, "\\u2715"));
         })]
@@ -1270,7 +1313,19 @@ async function park(t) {
 // Nothing opens over the table. A run marks its models as testing, fills the
 // Works? column in as results land, and shows its progress in a strip above
 // the table — so you can watch it, sort by it, and act on it while it runs.
-var LANES = 4;
+// How many of a provider's models are in flight at once: one per hundred
+// being tested. A hundred models is one at a time per provider, two hundred
+// is two, and so on, so a bigger list finishes in about the same wall time
+// without any provider being hit harder than the list warrants.
+var lanesFor = function (total) { return Math.max(1, Math.ceil(total / 100)); };
+
+// A 429 is not a result about the model, it is the provider saying "not now".
+// It is retried this many times, with a pause between, before being recorded.
+var RATE_TRIES = 4;
+var FIRST_BACKOFF = 15000;
+var MAX_BACKOFF = 120000;
+
+var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
 
 // Only the cell that changed, so a run of 500 does not redraw the table 500
 // times. The counts above it are worth a full redraw, but only once things
@@ -1297,42 +1352,86 @@ async function testMany(items) {
   if (running) { toast("A test run is going already", true); return; }
 
   items.forEach(function (t) { TRIES[pk(t.i, t.model)] = { going: true }; });
-  running = { total: items.length, done: 0, good: 0, stop: false };
-  drawMine();
-  drawRun();
+
+  var each = lanesFor(items.length);
+  running = { total: items.length, done: 0, good: 0, stop: false, each: each, provs: new Map() };
 
   // One queue per provider: the limit worth respecting is per key, not
   // overall. A dozen at once on one provider earns rate limits that say
   // nothing about the models; two providers in parallel cost neither.
-  var queues = new Map();
   items.forEach(function (t) {
-    if (!queues.has(t.i)) queues.set(t.i, []);
-    queues.get(t.i).push(t);
+    if (!running.provs.has(t.i)) {
+      running.provs.set(t.i, {
+        queue: [], cap: each, until: 0, pausedAt: 0,
+        backoff: FIRST_BACKOFF, refused: new Map(), live: 0,
+      });
+    }
+    running.provs.get(t.i).queue.push(t);
   });
 
+  drawMine();
+  drawRun();
   var started = Date.now();
-  var worker = async function (queue) {
-    while (queue.length && !running.stop) {
-      var t = queue.shift();
-      if (!S.providers[t.i]) continue;
+
+  // Worker n of a provider: takes its next model while there is one and n is
+  // under the cap. A provider that says it is busy drops its cap to one, so
+  // the other workers finish and leave; the last one never does, or the queue
+  // would never drain.
+  var worker = async function (i, n) {
+    var p = running.provs.get(i);
+    while (!running.stop && p.queue.length && (n < p.cap || p.live === 1)) {
+      if (p.until > Date.now()) {
+        await sleep(Math.min(200, p.until - Date.now()));
+        drawRun();
+        continue;
+      }
+
+      var t = p.queue.shift();
+      var key = pk(t.i, t.model);
+      var sent = Date.now();
       var out;
       try {
         out = await post("/api/test", { index: t.i, model: t.model });
       } catch (e) {
         out = { ok: false, status: 0, error: e.message };
       }
-      TRIES[pk(t.i, t.model)] = Object.assign({ at: Date.now() }, out);
+
+      if (out.status === 429) {
+        var times = (p.refused.get(key) || 0) + 1;
+        p.refused.set(key, times);
+        p.cap = 1;
+        // One pause per burst: refusals of requests sent before the current
+        // pause began are the same burst, and must not extend it again.
+        if (!(sent < p.pausedAt)) {
+          p.pausedAt = Date.now();
+          p.until = Date.now() + Math.min(MAX_BACKOFF, out.retryAfter > 0 ? out.retryAfter * 1000 : p.backoff);
+          p.backoff = Math.min(MAX_BACKOFF, p.backoff * 2);
+        }
+        if (times < RATE_TRIES) {
+          p.queue.push(t);
+          drawRun();
+          continue;
+        }
+        out.error = "the provider kept saying it is busy (429), " + times +
+          " times with pauses between: try it again later";
+      } else if (out.ok) {
+        p.backoff = FIRST_BACKOFF;
+      }
+
+      TRIES[key] = Object.assign({ at: Date.now() }, out);
       running.done += 1;
       if (out.ok) running.good += 1;
       paintCell(t);
       drawRun();
       settleSoon();
     }
+    p.live -= 1;
   };
 
   var lanes = [];
-  queues.forEach(function (queue) {
-    for (var n = 0; n < Math.min(LANES, queue.length); n++) lanes.push(worker(queue));
+  running.provs.forEach(function (p, i) {
+    p.live = Math.min(each, p.queue.length);
+    for (var n = 0; n < p.live; n++) lanes.push(worker(i, n));
   });
   await Promise.all(lanes);
 
@@ -1343,14 +1442,14 @@ async function testMany(items) {
   });
 
   var took = ((Date.now() - started) / 1000).toFixed(1);
-  var out = running;
+  var out2 = running;
   running = null;
   drawRun();
   await loadRecord();
   drawAll();
-  toast((out.stop ? "Stopped after " + out.done + " of " + out.total + " \\u00b7 " : "") +
-    out.good + " of " + out.done + " answered in " + took + "s",
-    out.good < out.done);
+  toast((out2.stop ? "Stopped after " + out2.done + " of " + out2.total + " \\u00b7 " : "") +
+    out2.good + " of " + out2.done + " answered in " + took + "s",
+    out2.good < out2.done);
 }
 
 function drawRun() {
@@ -1360,15 +1459,33 @@ function drawRun() {
     h("span", { className: "spin" }),
     h("span", { className: "what" }, running.stop
       ? "Stopping"
-      : "Testing " + running.total + (running.total === 1 ? " model" : " models") + " \\u00b7 " + LANES + " at a time per provider"),
+      : "Testing " + running.total + (running.total === 1 ? " model" : " models") +
+        (running.each > 1 ? " \\u00b7 " + running.each + " at a time per provider" : "")),
     h("span", { className: "bar" }, h("i", { style: "width:" + pct + "%" })),
     h("span", { className: "tally" },
       h("span", { className: "g" }, "\\u2713 " + running.good),
       " \\u00b7 ",
       h("span", { className: "b" }, "\\u2717 " + (running.done - running.good)),
       " \\u00b7 " + running.done + "/" + running.total),
+    pausedNote(),
     h("button", { className: "sm", disabled: running.stop,
       onclick: function () { running.stop = true; drawRun(); } }, "Stop")));
+}
+
+// A provider that said it is busy, and how long until it is asked again.
+// Without this a run that has gone quiet looks stuck rather than patient.
+function pausedNote() {
+  if (!running) return null;
+  var waiting = [];
+  running.provs.forEach(function (p, i) {
+    var left = p.until - Date.now();
+    if (left > 0 && S.providers[i]) {
+      waiting.push((S.providers[i].name || S.providers[i].label) + " " + Math.ceil(left / 1000) + "s");
+    }
+  });
+  if (!waiting.length) return null;
+  return h("span", { className: "tag warn", title: "It answered 429. Its models are tried again after the pause, up to " + RATE_TRIES + " times." },
+    "busy: " + waiting.join(", "));
 }
 
 // What the last run came to, grouped. Clicking a group selects those models,

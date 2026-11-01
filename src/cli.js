@@ -99,10 +99,11 @@ function flagValue(name) {
 // fill in the panel, start Claude Code.
 async function run() {
   const { getConfig, isConfigured } = await import("./config.js");
-  // Context windows, prices and what each model can do, so the panel has them
-  // on its first paint. A failure here only means the panel shows less.
-  const { loadCatalog } = await import("./modelsdev.js");
-  await loadCatalog().catch(() => {});
+  // The models.dev catalogue is warmed by runPanel, in the background. It
+  // used to be awaited here, which put a network fetch in front of the panel
+  // binding its port: on a cold cache the panel did not appear until it
+  // finished, and with models.dev slow or unreachable that was seconds of
+  // nothing. Nothing in this file reads it.
   const { runPanel, openBrowser, DEFAULT_PANEL_PORT } = await import("./panel.js");
   const { startServer } = await import("./server.js");
 
