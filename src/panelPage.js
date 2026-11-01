@@ -255,8 +255,8 @@ export const page = () => `<!doctype html>
   <aside>
     <div class="brand"><b>opencc</b><small id="ver"></small></div>
     <nav id="nav">
-      <a href="#models" data-page="models">Your models <span class="n" id="n-models"></span></a>
       <a href="#providers" data-page="providers">Providers <span class="n" id="n-prov"></span></a>
+      <a href="#models" data-page="models">Your models <span class="n" id="n-models"></span></a>
       <a href="#requests" data-page="requests">Requests <span class="n" id="n-reqs"></span></a>
     </nav>
     <div class="side-foot">
@@ -274,19 +274,6 @@ export const page = () => `<!doctype html>
   </aside>
 
   <main>
-    <section class="page" id="page-models">
-      <div class="head">
-        <div>
-          <h1>Your models</h1>
-          <p class="lead">Everything opencc can route to. Order here means nothing: which one answers
-            a request is drawn from the Record column, fresh every time, so load spreads over what works.</p>
-        </div>
-        <div class="acts"><button class="primary" id="go-prov">Add models</button></div>
-      </div>
-      <div class="mt-top" id="mt-top"></div>
-      <div id="mt"></div>
-    </section>
-
     <section class="page" id="page-providers">
       <div class="head">
         <div>
@@ -311,6 +298,19 @@ export const page = () => `<!doctype html>
         <div id="plist"></div>
         <div class="picks" id="picks" hidden></div>
       </div>
+    </section>
+
+    <section class="page" id="page-models">
+      <div class="head">
+        <div>
+          <h1>Your models</h1>
+          <p class="lead">Everything opencc can route to. Order here means nothing: which one answers
+            a request is drawn from the Record column, fresh every time, so load spreads over what works.</p>
+        </div>
+        <div class="acts"><button class="primary" id="go-prov">Add models</button></div>
+      </div>
+      <div class="mt-top" id="mt-top"></div>
+      <div id="mt"></div>
     </section>
 
     <section class="page" id="page-requests">
@@ -558,10 +558,12 @@ async function save(providers) {
 }
 
 // --- pages ----------------------------------------------------------------
-var PAGES = ["models", "providers", "requests"];
+// In nav order, and the first is where you land: picking models is the thing
+// you came to do, and "Your models" is empty until you have.
+var PAGES = ["providers", "models", "requests"];
 function current() {
   var want = location.hash.slice(1);
-  return PAGES.indexOf(want) >= 0 ? want : "models";
+  return PAGES.indexOf(want) >= 0 ? want : PAGES[0];
 }
 function showPage() {
   var now = current();
