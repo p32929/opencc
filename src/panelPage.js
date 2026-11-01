@@ -571,9 +571,13 @@ function toast(msg, bad) {
   toastTimer = setTimeout(function () { t.className = "toast"; }, bad ? 6000 : 2400);
 }
 
+// 1,050,000 showed as "1.1M" at one decimal, which reads as a number nobody
+// publishes and made the column look made up. Two decimals, trailing zeros
+// dropped: 1,050,000 is 1.05M, 1,048,576 is 1.05M, 1,000,000 is 1M. The
+// exact figure is in the cell's tooltip either way.
 function kTok(n) {
   if (!n) return "-";
-  if (n >= 1000000) return (Math.round(n / 100000) / 10) + "M";
+  if (n >= 1000000) return Number((n / 1000000).toFixed(2)) + "M";
   if (n >= 1000) return Math.round(n / 1000) + "k";
   return String(n);
 }
@@ -1413,12 +1417,27 @@ function dirText(key, dir) {
 }
 
 var firstDir = function (k) { return COLS[k].first; };
-function clickSort(k) {
+// A plain click sorts by that column and nothing else. Shift-click adds it
+// under the ones already there, to break their ties.
+//
+// It used to always add. With Model sorted A to Z — and every model name is
+// unique — clicking Context put it second, where there were no ties left for
+// it to break, so the order did not move and the column looked broken.
+function clickSort(k, addToIt) {
   var at = null;
   SORT.forEach(function (s) { if (s.key === k) at = s; });
-  if (!at) SORT = SORT.concat([{ key: k, dir: firstDir(k) }]);
-  else if (at.dir === firstDir(k)) at.dir = at.dir === "up" ? "down" : "up";
-  else SORT = SORT.filter(function (s) { return s !== at; });
+
+  if (!addToIt && (!at || SORT.length > 1)) {
+    // Not sorted by it, or sorted by it among others: make it the only one.
+    SORT = [{ key: k, dir: at ? at.dir : firstDir(k) }];
+  } else if (!at) {
+    SORT = SORT.concat([{ key: k, dir: firstDir(k) }]);
+  } else if (at.dir === firstDir(k)) {
+    at.dir = at.dir === "up" ? "down" : "up";
+  } else {
+    SORT = SORT.filter(function (s) { return s !== at; });
+  }
+
   try { localStorage.setItem("opencc-sort", JSON.stringify(SORT)); } catch (e) {}
   drawMine();
 }
@@ -1495,7 +1514,12 @@ function drawMine() {
     var at = -1;
     SORT.forEach(function (s, n) { if (s.key === k) at = n; });
     return h("th", { className: COLS[k].num ? "num" : "" },
-      h("button", { type: "button", className: at >= 0 ? "on" : "", onclick: function () { clickSort(k); } },
+      h("button", {
+        type: "button", className: at >= 0 ? "on" : "",
+        title: "Sort by " + COLS[k].label.toLowerCase() + ": " + dirText(k, firstDir(k)) +
+          ". Click again to reverse it. Shift-click to add it under the sort you have, to break its ties.",
+        onclick: function (e) { clickSort(k, e.shiftKey); },
+      },
         COLS[k].label + (at >= 0
           ? " " + (SORT[at].dir === "up" ? "\\u2191" : "\\u2193") + (SORT.length > 1 ? at + 1 : "")
           : "")));
