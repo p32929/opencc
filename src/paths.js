@@ -26,6 +26,8 @@ export const REQUESTS_PATH = join(GLOBAL_CONFIG_DIR, "requests.jsonl");
 // reload and a restart. Refetched on demand, not on every visit.
 export const CATALOGUES_PATH = join(GLOBAL_CONFIG_DIR, "catalogues.json");
 
-// The last test result per model. Kept so a run's work is still there after
-// a restart, the way the record and the catalogue are.
+// Where test results used to be kept. They are not any more: a result is
+// what is true right now, and one from an hour ago sitting beside one from
+// this second reads as a single set of numbers when it is two. The panel
+// removes this on start so an older version's file does not linger.
 export const TESTS_PATH = join(GLOBAL_CONFIG_DIR, "model-tests.json");

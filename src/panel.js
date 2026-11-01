@@ -9,7 +9,7 @@
 // No dependencies: Node's http server, one hand-written page, and a small
 // JSON API over the same configStore the rest of opencc reads.
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -198,9 +198,9 @@ function reasonFrom(body) {
 // there is no such ceiling. Closing the tab no longer stops a run either,
 // and the results are still here when you come back.
 // --- what is kept on disk --------------------------------------------------
-// Test results and provider model lists both used to live only in memory, so
-// a restart threw away a run that had taken minutes and every provider had
-// to be asked for its catalogue again on every visit.
+// The provider model lists, and only those. They are slow to fetch and they
+// barely change, so asking every backend again on every visit was minutes of
+// waiting for the same answer.
 function readJson(path, fallback) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
@@ -228,8 +228,20 @@ function saveLater(path, get) {
   };
 }
 
-const tests = readJson(TESTS_PATH, {});
-const saveTests = saveLater(TESTS_PATH, () => tests);
+// Test results are what is true right now, not a record. They are cleared
+// when the panel starts and again for every model a run covers, because a
+// result from an hour ago sitting beside one from this second reads as one
+// set of numbers and is not: the outcome pills once showed 397 results while
+// the run they sat under said 99 of 1471.
+//
+// The record in stats.jsonl is the thing that remembers, and it is separate.
+const tests = {};
+try {
+  rmSync(TESTS_PATH, { force: true });
+} catch {
+  // Nothing kept there any more; a leftover file from an older version just
+  // stops being read.
+}
 
 // baseUrl -> { models, error, at }
 const catalogues = readJson(CATALOGUES_PATH, {});
@@ -304,6 +316,13 @@ async function startRun(items) {
   const lanes = Math.max(live.testLanes, Math.ceil(items.length / 100));
 
   run = { total: items.length, done: 0, good: 0, lanes, stopping: false, provs: new Map() };
+
+  // Whatever these models said last time goes now, so the counts under the
+  // strip are this run's and nothing else's.
+  for (const t of items) {
+    const provider = live.providers[t.index];
+    if (provider) delete tests[testKey(provider.baseUrl, t.model)];
+  }
 
   for (const t of items) {
     const provider = live.providers[t.index];
@@ -383,7 +402,6 @@ async function startRun(items) {
       }
 
       tests[key] = { ...outcome, at: Date.now() };
-      saveTests();
       run.done += 1;
       if (outcome.ok) run.good += 1;
       bus.emit("tested", { key, result: tests[key] });
@@ -565,7 +583,6 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         // next test without a restart.
         const outcome = await testModel(provider, model, live.testTimeout * 1000, true);
         tests[testKey(provider.baseUrl, model)] = { ...outcome, at: Date.now() };
-        saveTests();
         bus.emit("tested", { key: testKey(provider.baseUrl, model), result: tests[testKey(provider.baseUrl, model)] });
         // A model that just answered may be the one the proxy was waiting for.
         await onSave?.();
