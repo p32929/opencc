@@ -112,11 +112,20 @@ export async function callUpstream(
     );
 
   if (candidates.length === 0) {
-    return {
-      status: 503,
-      message: `No provider is available: all ${providers.length} are disabled. Run "opencc init" to enable one.`,
-      trail,
-    };
+    // Three ways to end up here and they need different fixes, so say which
+    // one it is. The old message blamed disabled providers for all of them,
+    // which sent you looking for a switch that was already on.
+    const live = providers.filter((provider) => !provider.disabled);
+    const message = providers.length === 0
+      ? "No providers are set up yet. Add one in the opencc panel."
+      : live.length === 0
+        ? `Every provider is switched off (${providers.length} of them). Switch one on in the opencc panel.`
+        : "Pick a model first. " +
+          `${live.length === 1 ? "The provider is" : `All ${live.length} providers are`} set up, ` +
+          "but no model has been put in the pot, so there is nothing to route to. " +
+          "Open the opencc panel, go to Providers, and click the models you want.";
+
+    return { status: 503, message, trail };
   }
 
   // Every model is a candidate for every request. Which one goes first is

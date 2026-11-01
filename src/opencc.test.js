@@ -37,23 +37,38 @@ test("MODELS wins when both the old and the new keys are present", () => {
   assert.deepEqual(p.models, ["current"]);
 });
 
-test("reads numbered providers in order, keeps gaps, drops incomplete ones", () => {
+test("reads numbered providers in order, keeps gaps, and keeps the model-less", () => {
   const providers = providersFromEnv({
     OPENAI_BASE_URL: "https://one.test/v1",
     MODELS: "a",
     // no _2 at all — must not stop the scan at the gap
     OPENAI_BASE_URL_3: "http://localhost:11434/v1",
     MODELS_3: "llama3",
-    // _4 has a URL but no model, so it can never serve a request
+    // _4 has a URL and no model. It cannot serve a request, but it is kept:
+    // adding the backends first and picking models second is a normal way to
+    // set opencc up, and dropping it would throw away the URL and the key
+    // between those two steps.
     OPENAI_BASE_URL_4: "https://four.test/v1",
   });
 
   assert.deepEqual(
     providers.map((p) => p.baseUrl),
-    ["https://one.test/v1", "http://localhost:11434/v1"],
+    ["https://one.test/v1", "http://localhost:11434/v1", "https://four.test/v1"],
   );
+  assert.deepEqual(providers[2].models, [], "it just has nothing in the pot yet");
   assert.equal(providers[1].apiKey, "", "a keyless local backend is valid");
   assert.deepEqual(providers[0].models, ["a"], "a single model parses as a one-item list");
+});
+
+test("a provider with no URL is still dropped", () => {
+  // Nothing can be done with it: there is nowhere to send a request.
+  const providers = providersFromEnv({
+    OPENAI_BASE_URL: "https://one.test/v1",
+    MODELS: "a",
+    PROVIDER_NAME_2: "typo",
+    MODELS_2: "b",
+  });
+  assert.deepEqual(providers.map((p) => p.baseUrl), ["https://one.test/v1"]);
 });
 
 test("names a provider by its PROVIDER_NAME, falling back to the host", () => {
@@ -302,7 +317,7 @@ test("all providers disabled reports 503 rather than an empty failure list", asy
 
   assert.equal(result.upstream, undefined);
   assert.equal(result.status, 503);
-  assert.match(result.message, /all 1 are disabled/);
+  assert.match(result.message, /Every provider is switched off/);
   assert.equal(seen.length, 0);
 });
 
@@ -1837,3 +1852,48 @@ test("a half-written line does not take the whole log listing down", async () =>
 
 
 
+
+// --- nothing to route to ---------------------------------------------------
+
+test("with providers but no models, the answer says to pick one", async () => {
+  // Adding providers first and models second is a normal way to set opencc
+  // up. The old message blamed disabled providers for it, which sent you
+  // looking for a switch that was already on.
+  const out = await callUpstream(
+    { model: "claude", messages: [{ role: "user", content: "hi" }] },
+    [
+      { name: "a", baseUrl: "https://a.test/v1", apiKey: "", models: [], disabled: false, disabledModels: [] },
+      { name: "b", baseUrl: "https://b.test/v1", apiKey: "", models: [], disabled: false, disabledModels: [] },
+    ],
+    true,
+    { order: () => ({ attempts: [], head: [] }), record() {}, coolOff() {}, settled() {} },
+  );
+
+  assert.equal(out.status, 503);
+  assert.match(out.message, /^Pick a model first/);
+  assert.match(out.message, /All 2 providers are set up/);
+  assert.doesNotMatch(out.message, /disabled|switched off/, "they are not off, they are empty");
+});
+
+test("a provider switched off is reported as off, not as empty", async () => {
+  const out = await callUpstream(
+    { model: "claude", messages: [{ role: "user", content: "hi" }] },
+    [{ name: "a", baseUrl: "https://a.test/v1", apiKey: "", models: ["m"], disabled: true, disabledModels: [] }],
+    true,
+    { order: () => ({ attempts: [], head: [] }), record() {}, coolOff() {}, settled() {} },
+  );
+
+  assert.equal(out.status, 503);
+  assert.match(out.message, /switched off/);
+  assert.doesNotMatch(out.message, /Pick a model/);
+});
+
+test("one provider reads as singular", async () => {
+  const out = await callUpstream(
+    { model: "claude", messages: [{ role: "user", content: "hi" }] },
+    [{ name: "a", baseUrl: "https://a.test/v1", apiKey: "", models: [], disabled: false, disabledModels: [] }],
+    true,
+    { order: () => ({ attempts: [], head: [] }), record() {}, coolOff() {}, settled() {} },
+  );
+  assert.match(out.message, /The provider is set up/);
+});

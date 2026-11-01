@@ -91,7 +91,10 @@ export function providersFromEnv(values) {
         disabledModels: modelList(values[`PROVIDER_MODELS_DISABLED${suffix}`]),
       };
     })
-    .filter((provider) => provider.baseUrl && provider.models.length > 0);
+    // A provider with no models is kept. It cannot be routed to, and the
+    // proxy says so when a request arrives, but dropping it would delete the
+    // URL and key you just typed in the moment before you pick a model.
+    .filter((provider) => provider.baseUrl);
 }
 
 // Streaming is on unless explicitly turned off. Some OpenAI-compatible
