@@ -12,9 +12,9 @@ import { bus } from "./events.js";
 
 // How many are kept. There is no time limit: a request from last month is
 // worth the same as one from this morning when you are working out why
-// something failed, and "the last 500" is a number you can reason about
+// something failed, and "the last 100" is a number you can reason about
 // without knowing how busy the week was.
-export const KEEP = 500;
+export const KEEP = 100;
 
 let appended = 0;
 // Pruning used to be driven by this counter alone, which reset with the

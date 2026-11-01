@@ -63,7 +63,7 @@ Each request is filed by what it needed: **tools**, **image** or **document**
 (and **text** for the rare request carrying none of them). opencc saves the
 result of every call in `~/.opencc/stats.jsonl` - provider, model, kind,
 status code. Every request it serves is also logged to
-`~/.opencc/requests.jsonl`, the last 500, which is what the Requests page
+`~/.opencc/requests.jsonl`, the last 100, which is what the Requests page
 shows.
 
 It then picks a model with
@@ -219,7 +219,7 @@ OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
 - The dashboard is two pages. **Providers** lists everything your backends
   serve, searchable across all of them, filterable to free, sortable by name,
   price or context, with multi-select. **Your models** is one sortable table.
-- A request log: the last 500 requests with every model tried and what each
+- A request log: the last 100 requests with every model tried and what each
   answered, filterable to failures or fallbacks, at `~/.opencc/requests.jsonl`.
 - Live updates over SSE, a light/dark toggle, and a loading indicator on every
   network call.
