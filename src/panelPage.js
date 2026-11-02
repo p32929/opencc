@@ -923,6 +923,9 @@ function showPage() {
   Array.prototype.forEach.call(document.querySelectorAll("nav a"), function (a) {
     a.classList.toggle("on", a.dataset.page === now);
   });
+  // A list drawn while its page was hidden had no size to go by and drew
+  // nothing; now it can be seen, so draw it.
+  WINDOWS.forEach(function (w) { if (w.host.isConnected) w.draw(true); else WINDOWS.delete(w); });
   if (now === "providers") {
     S.providers.forEach(function (p) { if (!LISTS[p.name]) loadList(p.name); });
   }
@@ -1939,6 +1942,9 @@ function drawMine() {
         h("th", {}, ""))),
       tbody)));
   win.draw(true);
+  // Never leave a table with models and no rows: if it could not be drawn
+  // yet (its page was hidden), draw it as soon as it can be.
+  requestAnimationFrame(function () { win.draw(true); });
 }
 
 // One row of Your models. Built when it scrolls into view, so it reads the
