@@ -58,7 +58,7 @@ export function sendAnthropicAsStream(res, message) {
 
 // Reads an OpenAI-compatible SSE stream and re-emits it as an Anthropic
 // Messages API SSE stream on `res`.
-export async function streamOpenAIToAnthropic(upstream, res, requestedModel, baseUrl) {
+export async function streamOpenAIToAnthropic(upstream, res, requestedModel, baseUrl, tag = "") {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -82,6 +82,7 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
 
   let nextIndex = 0;
   let textBlockIndex = null;
+  let tagged = false;
   const toolBlocksByOpenAIIndex = new Map();
   let finishReason = "stop";
   let outputTokens = 0;
@@ -118,10 +119,13 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
           content_block: { type: "text", text: "" },
         });
       }
+      // The label goes in front of the first text, once.
+      const text = tag && !tagged ? tag + delta.content : delta.content;
+      tagged = true;
       sendEvent(res, "content_block_delta", {
         type: "content_block_delta",
         index: textBlockIndex,
-        delta: { type: "text_delta", text: delta.content },
+        delta: { type: "text_delta", text },
       });
     }
 

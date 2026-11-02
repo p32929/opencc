@@ -406,6 +406,18 @@ export const page = () => `<!doctype html>
         <label for="lanes">Test lanes <span class="hint">per provider</span></label>
         <input type="number" id="lanes" min="1" max="16" step="1">
       </div>
+      <div>
+        <label for="tag">Reply label <span class="hint">optional</span></label>
+        <select id="tag-pre" aria-label="Reply label presets">
+          <option value="">Off: replies as they are</option>
+          <option value="[{provider}-{model}]">[provider-model]</option>
+          <option value="[{provider}/{model}]">[provider/model]</option>
+          <option value="[{model}]">[model]</option>
+          <option value="[{provider}-{model}]\\n">[provider-model] on its own line</option>
+          <option value="custom">Custom…</option>
+        </select>
+        <input type="text" id="tag" maxlength="200" placeholder="[{provider}-{model}]" hidden>
+      </div>
       <div class="row">
         <button id="streaming"></button>
         <button id="theme" title="Light or dark"></button>
@@ -957,6 +969,23 @@ function drawCatalogButton() {
     : "models.dev could not be reached, so nothing is known about what your models can do. Click to try again.";
 }
 
+// The label put in front of each reply (REPLY_TAG). The select is the
+// presets; Custom shows the text box, where {provider}, {model} and
+// {requested} are filled in and a typed \\n is a line break.
+function drawTag() {
+  var tag = S.replyTag || "";
+  var pre = $("tag-pre");
+  var known = [].some.call(pre.options, function (o) { return o.value && o.value !== "custom" && o.value === tag; });
+  var custom = tag !== "" && !known;
+  if (document.activeElement !== $("tag")) $("tag").value = tag;
+  if (document.activeElement !== pre) pre.value = custom ? "custom" : tag;
+  $("tag").hidden = !custom && !tagEditing;
+  $("tag-pre").title = "Puts a label in front of every reply, so Claude Code shows which provider and model answered. " +
+    "Off: replies are sent exactly as the model wrote them. Only the first line of text gets it; a reply that is only a tool call gets none.";
+  $("tag").title = "{provider}, {model} and {requested} (the model Claude Code asked for) are filled in. A typed \\\\n is a line break.";
+}
+var tagEditing = false;
+
 function drawSidebar() {
   $("ver").textContent = S.version || "";
   if (document.activeElement !== $("port")) $("port").value = S.port;
@@ -967,6 +996,7 @@ function drawSidebar() {
     "A provider that answers 429 drops to one lane on its own.";
   $("ttl").title = "How long the Test button waits for a model to say hello. " +
     "The proxy's own timeout for real requests is separate and much longer.";
+  drawTag();
   $("streaming").textContent = "Streaming " + (S.streaming ? "on" : "off");
   $("streaming").title = S.streaming
     ? "Replies stream through as they are written. Click to switch off."
@@ -2878,6 +2908,17 @@ $("ttl").addEventListener("change", async function () {
   await saveSettings({ testTimeout: n });
   toast("Tests give up after " + n + "s");
 });
+async function saveTag(text) {
+  await saveSettings({ replyTag: text });
+  toast(text ? "Replies start with " + text : "Replies are sent as they are");
+}
+$("tag-pre").addEventListener("change", function () {
+  var v = $("tag-pre").value;
+  tagEditing = v === "custom";
+  if (v === "custom") { $("tag").hidden = false; $("tag").focus(); return; }
+  saveTag(v);
+});
+$("tag").addEventListener("change", function () { saveTag($("tag").value.trim()); });
 $("lanes").addEventListener("change", async function () {
   var n = Math.min(16, Math.max(1, Math.round(Number($("lanes").value) || 4)));
   $("lanes").value = n;

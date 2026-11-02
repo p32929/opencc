@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { config, getConfig, isConfigured, displayName } from "./config.js";
 import { pickModels, toOpenAIRequest, toAnthropicResponse, toAnthropicError } from "./translate.js";
 import { streamOpenAIToAnthropic, sendAnthropicAsStream } from "./stream.js";
+import { renderTag, stripTags, tagMessage } from "./replytag.js";
 import { requirementsOf, describeNeeds, kindOf, chooseOrder, record, coolOff, cooledOffSuccessfully, verdictFor, isTooBig, TOO_BIG_VERDICT, STREAM_DIED_VERDICT } from "./stats.js";
 import { logRequest } from "./reqlog.js";
 import { tooBigForCatalog } from "./modelsdev.js";
@@ -379,6 +380,10 @@ async function handleMessages(anthropicReq, res) {
       ` tools=${(anthropicReq.tools ?? []).length} chars=${chars}`,
   );
 
+  // The label this setup puts on replies is taken back off the earlier ones,
+  // so a model does not learn to write it itself.
+  if (live.replyTag) anthropicReq = { ...anthropicReq, messages: stripTags(live.replyTag, anthropicReq.messages) };
+
   const startedAt = Date.now();
   const result = await callUpstream(
     anthropicReq, live.providers, live.streaming, undefined, chars, live.rank,
@@ -403,10 +408,13 @@ async function handleMessages(anthropicReq, res) {
   }
 
   const served = `${displayName(result.provider)}/${result.model}`;
+  const tag = renderTag(live.replyTag, {
+    provider: displayName(result.provider), model: result.model, requested: anthropicReq.model,
+  });
 
   if (result.streamed) {
     try {
-      const sent = await streamOpenAIToAnthropic(result.upstream, res, anthropicReq.model, result.provider.baseUrl);
+      const sent = await streamOpenAIToAnthropic(result.upstream, res, anthropicReq.model, result.provider.baseUrl, tag);
       result.report(verdictFor(anthropicReq, sent));
       logRequest({ ...logged, served, status: 200, ms: Date.now() - startedAt });
     } catch (err) {
@@ -425,8 +433,9 @@ async function handleMessages(anthropicReq, res) {
 
   // Already read, checked and recorded inside the walk.
   logRequest({ ...logged, served, status: 200, ms: Date.now() - startedAt });
-  if (anthropicReq.stream) sendAnthropicAsStream(res, result.reply);
-  else sendJson(res, 200, result.reply);
+  const reply = tagMessage(result.reply, tag);
+  if (anthropicReq.stream) sendAnthropicAsStream(res, reply);
+  else sendJson(res, 200, reply);
 }
 
 const server = createServer(async (req, res) => {

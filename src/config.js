@@ -186,6 +186,7 @@ function readConfig() {
     streaming,
     testTimeout: testTimeoutFromEnv(merged),
     testLanes: testLanesFromEnv(merged),
+    replyTag: (merged.REPLY_TAG || "").trim(),
   };
 }
 

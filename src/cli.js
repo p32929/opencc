@@ -74,13 +74,19 @@ if (subcommand === "claude") {
 // about is how you get "proxy isn't running" while it plainly is.
 async function rememberPort(port) {
   const { readStoredConfig, writeStoredConfig } = await import("./configStore.js");
-  const { providersFromEnv, streamingFromEnv } = await import("./config.js");
+  const { providersFromEnv, streamingFromEnv, rankFromEnv, testTimeoutFromEnv, testLanesFromEnv } = await import("./config.js");
   const stored = readStoredConfig();
   if (String(stored.PORT ?? "") === String(port)) return;
+  // Everything else is carried over: writing only some of it would drop the
+  // rest from the file.
   writeStoredConfig({
     providers: providersFromEnv(stored),
     port: String(port),
     streaming: streamingFromEnv(stored),
+    rank: rankFromEnv(stored),
+    testTimeout: testTimeoutFromEnv(stored),
+    testLanes: testLanesFromEnv(stored),
+    replyTag: (stored.REPLY_TAG || "").trim(),
   });
 }
 

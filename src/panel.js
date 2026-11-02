@@ -144,6 +144,7 @@ function stateOf() {
     rank: cfg.rank,
     testTimeout: cfg.testTimeout,
     testLanes: cfg.testLanes,
+    replyTag: cfg.replyTag,
     prefs: prefs(),
     version,
   };

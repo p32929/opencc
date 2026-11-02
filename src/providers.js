@@ -422,6 +422,7 @@ export function loadConfig() {
     rank: rankFromEnv(stored),
     testTimeout: testTimeoutFromEnv(stored),
     testLanes: testLanesFromEnv(stored),
+    replyTag: (stored.REPLY_TAG || "").trim(),
   };
 }
 
@@ -574,6 +575,7 @@ export function saveSettings(input) {
     if (input.streaming !== undefined) cfg.streaming = input.streaming !== false;
     if (Array.isArray(input.rank)) cfg.rank = input.rank;
     if (input.testTimeout !== undefined) cfg.testTimeout = testTimeoutFromEnv({ TEST_TIMEOUT: input.testTimeout });
+    if (input.replyTag !== undefined) cfg.replyTag = String(input.replyTag ?? "").replace(/[\r\n]+/g, " ").trim().slice(0, 200);
     if (input.testLanes !== undefined) cfg.testLanes = testLanesFromEnv({ TEST_LANES: input.testLanes });
   });
 }

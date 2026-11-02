@@ -176,6 +176,7 @@ answered, which one replied. Filter to failures or fallbacks.
 | Refresh | ask a provider for its model list again |
 | models.dev | fetch the catalogue again |
 | Streaming | off = wait for the full reply |
+| Reply label | put `[provider-model]` (or your own) in front of each reply |
 | Reset record | forget all results |
 
 Testing runs on the server, every provider at once, **Test lanes** models at
@@ -247,6 +248,13 @@ OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
 
 **Added**
 
+- **Reply label** (sidebar, `REPLY_TAG` in the config): puts a label such as
+  `[groq-llama-3.3-70b]` in front of each reply, so Claude Code shows which
+  model answered. Off by default: replies are untouched. The template takes
+  `{provider}`, `{model}` and `{requested}`, and `\n` for a line break. Only
+  the first text gets it (a reply that is only a tool call gets none), and the
+  label is taken back off earlier replies in the conversation so a model
+  does not learn to write it itself.
 - Providers work like HeartCode's: unique names, per-provider list switch,
   Hello on a model or on the ticked ones, per-model setup with Measure, a
   provider's own list details (context, price, owner), and presets.
