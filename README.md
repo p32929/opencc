@@ -32,7 +32,7 @@ opencc claude  # cd to your project first
 `opencc` starts two things:
 
 ```
-  opencc 4.0.0
+  opencc 4.1.0
   panel  http://localhost:3450
   proxy  http://localhost:9753   26 models, 5 providers
 ```
@@ -42,7 +42,7 @@ what Claude Code talks to. It starts as soon as there is a provider, and
 starts by itself the moment you add one:
 
 ```
-  opencc 4.0.0
+  opencc 4.1.0
   panel  http://localhost:3450
   proxy  waiting - add a provider in the panel and it starts on its own
 ```
@@ -121,9 +121,11 @@ characters are the one that can be measured without guessing.
 
 ## What a model can do
 
-Context window, price, tool calling and images come from
-[models.dev](https://models.dev). opencc caches the list for a day in
-`~/.opencc/models-dev.json` and shows it per model in the panel.
+Context window, price, tool calling, thinking, images and a dozen other
+facts come from [models.dev](https://models.dev): 8,900 models, 23 fields
+each. opencc fetches it once into `~/.opencc/models-dev.json` and keeps it.
+There is no expiry — the **models.dev** button fetches it again when you
+want it, and nothing else does.
 
 opencc does not probe for any of this. There is no warm-up and no capability
 test. A model it does not recognise just shows `?` and still gets its turn.
@@ -144,9 +146,21 @@ filter to free, sort by name, price or context. Click a model to put it in the
 pot, or tick several and add them together. Add one by name if the provider
 does not list it.
 
-**Your models** is what is in the pot, as one table: model, provider, context,
-tools, images, price in and out, record, tried. Click a column to sort;
-click more columns to break ties. Shift-click to select a range.
+**Your models** is what is in the pot, as one table: model, provider,
+context, abilities, tools, thinking, images, price in and out, **From**,
+record, tried and **Works?**. From says where a row's abilities come from —
+models.dev, or "not found" when it has never heard of the name, which is the
+answer to "why does this say it cannot call tools".
+
+Click a column to sort by it; click again to reverse; shift-click to add one
+under the sort you have, to break its ties.
+
+Ten filters sit above it: search, provider, test result, tools, thinking,
+images, how many abilities, context, price, whether models.dev knows it, and
+whether it is in rotation, parked or switched off. Everything that acts on
+"all" acts on what the filters show — **Test these 51**, **Take 51 out**,
+and select-all ticks the rows you can see. **Keep only these N** turns the
+list you are looking at into the list you keep.
 
 **Requests** is what the proxy served: which models were tried, what each
 answered, which one replied. Filter to failures or fallbacks.
@@ -154,12 +168,25 @@ answered, which one replied. Filter to failures or fallbacks.
 | Button | What it does |
 |---|---|
 | Park | keep the model in the list, never call it |
-| Test | send one real request, and show what was sent and received |
+| Test | send one real request; the result lands in Works? |
+| Test all | a run on the server, which keeps going if you close the tab |
+| Keep only these | drop everything the filters hide |
+| Provider ranking | which providers you would rather use |
 | Edit | a provider's URL, key, on/off, delete |
 | Refresh | ask a provider for its model list again |
 | models.dev | fetch the catalogue again |
 | Streaming | off = wait for the full reply |
 | Reset record | forget all results |
+
+Testing runs on the server, every provider at once, **Test lanes** models at
+a time from each. A provider that answers 429 drops to one lane, waits, and
+its models go back on the queue — a rate limit is not a verdict on a model.
+A model that has not answered within **Test timeout** counts as a failure.
+
+Model lists are kept in `~/.opencc/catalogues.json`, so leaving the panel and
+coming back does not fetch them all again. Test results are not kept: they
+are what is true now, and they are cleared when the panel starts and for
+every model a run covers.
 
 ![Picking models](PASTE_IMAGE_URL_HERE)
 
@@ -187,6 +214,7 @@ are numbered: first has no suffix, then `_2`, `_3`.
 | `PROVIDER_MODELS_DISABLED` | models to skip, comma separated |
 | `PORT` `STREAMING` | global settings |
 | `TEST_TIMEOUT` | seconds the panel's Test waits for a model, default 10 |
+| `TEST_LANES` | models tested at once per provider, default 4 |
 | `PROVIDER_RANK` | providers you prefer, best first, by base URL |
 
 Old configs with `BIG_MODEL` and `SMALL_MODEL` still work. Both become one
@@ -200,6 +228,42 @@ OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
 ```
 
 ## Changelog
+
+### 4.1.0 - 2026-11-02
+
+**Added**
+
+- Ten filters on Your models, and **Keep only these N** to make the list you
+  filtered to the list you keep. Everything that acts on "all" acts on what
+  is shown.
+- **From**, **Abilities** and **Thinking** columns, so a row says where its
+  abilities come from rather than leaving you to guess from empty cells.
+- Provider ranking: say which backends you prefer. It tilts the draw by at
+  most 0.04 and cannot float a model that keeps failing.
+- `TEST_LANES`, and `TEST_TIMEOUT` is now yours to set.
+
+**Changed**
+
+- models.dev is fetched once and kept, with everything it publishes rather
+  than seven fields. It had a day's expiry, which meant re-downloading six
+  megabytes to be told the same thing.
+- Test runs happen on the server. The page used to drive them, and a browser
+  holds six connections to one origin, so thirty-six lanes were six: 54
+  models took 101s from the page against 8s from outside it.
+- Test results show in the table as they land, with progress above it, and
+  are cleared when the panel starts and for each model a run covers.
+- Provider model lists are kept on disk.
+
+**Fixed**
+
+- A column click sorts by that column instead of adding it under the others,
+  where there were often no ties left to break and nothing appeared to
+  happen.
+- The progress strip threw on every update and died silently: the page held
+  the right numbers and never drew them.
+- A provider that answered 429 kept one lane for the rest of a run.
+- Context read 1.1M for a 1,050,000-token window.
+- The request log could grow without limit, and keeps 100 entries now.
 
 ### 4.0.0 - 2026-11-02
 
