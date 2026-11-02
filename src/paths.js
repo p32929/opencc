@@ -22,12 +22,28 @@ export const MODELS_DEV_PATH = join(GLOBAL_CONFIG_DIR, "models-dev.json");
 // bodies, no keys, so it stays small enough to keep around.
 export const REQUESTS_PATH = join(GLOBAL_CONFIG_DIR, "requests.jsonl");
 
-// What each provider's /v1/models returned, so the model lists survive a
-// reload and a restart. Refetched on demand, not on every visit.
-export const CATALOGUES_PATH = join(GLOBAL_CONFIG_DIR, "catalogues.json");
+// What each provider's /v1/models returned: the names, and what the list
+// says about them (context, price, owner), kept so the lists survive a
+// reload and a restart. Asked for again when the list is switched on or off,
+// when the provider's address or key changes, or when you press Refresh.
+export const LISTS_PATH = join(GLOBAL_CONFIG_DIR, "model-lists.json");
+
+// Where this used to be kept, keyed by address. Removed on start.
+export const OLD_LISTS_PATH = join(GLOBAL_CONFIG_DIR, "catalogues.json");
 
 // Where test results used to be kept. They are not any more: a result is
 // what is true right now, and one from an hour ago sitting beside one from
 // this second reads as a single set of numbers when it is two. The panel
 // removes this on start so an older version's file does not linger.
 export const TESTS_PATH = join(GLOBAL_CONFIG_DIR, "model-tests.json");
+
+// What you have said about a model that models.dev gets wrong or does not
+// know: its context window, and whether it calls tools, thinks, reads images
+// and streams. Yours, so it is kept, and it is read above what models.dev
+// says.
+export const SETUP_PATH = join(GLOBAL_CONFIG_DIR, "model-setup.json");
+
+// The page's own choices: sorts, folded providers, filters. Kept here rather
+// than in the browser, whose storage belongs to an address, and the panel's
+// address changes whenever its port does.
+export const PREFS_PATH = join(GLOBAL_CONFIG_DIR, "settings-page.json");

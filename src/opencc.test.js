@@ -1050,17 +1050,12 @@ test("the proxy stays down until a provider exists, then comes up on its own", a
     assert.equal(await up(proxyPort), false, "the proxy does not, with nothing to route to");
 
     // add a provider exactly as the panel's form does
-    await fetch(`http://localhost:${panelPort}/api/state`, {
+    const added = await fetch(`http://localhost:${panelPort}/api/provider`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        providers: [{
-          name: "test", baseUrl: "https://example.test/v1", apiKey: "",
-          models: ["m1"], disabled: false, disabledModels: [],
-        }],
-        port: String(proxyPort), streaming: true,
-      }),
+      body: JSON.stringify({ name: "test", baseUrl: "https://example.test/v1", apiKey: "" }),
     });
+    assert.equal(added.status, 200);
 
     for (let i = 0; i < 40 && !(await up(proxyPort)); i++) await wait(100);
     assert.equal(await up(proxyPort), true, "and starts by itself once there is");

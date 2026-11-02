@@ -6,6 +6,7 @@ import { streamOpenAIToAnthropic, sendAnthropicAsStream } from "./stream.js";
 import { requirementsOf, describeNeeds, kindOf, chooseOrder, record, coolOff, cooledOffSuccessfully, verdictFor, isTooBig, TOO_BIG_VERDICT, STREAM_DIED_VERDICT } from "./stats.js";
 import { logRequest } from "./reqlog.js";
 import { tooBigForCatalog } from "./modelsdev.js";
+import { setupFor } from "./setup.js";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -95,6 +96,9 @@ export async function callUpstream(
   // Your provider ranking, best first. Empty is the default and means the
   // record decides on its own.
   rank = config.rank,
+  // Whether this model streams. Injectable so a test does not read the
+  // setup file of whoever runs it.
+  modelStreams = (baseUrl, model) => setupFor(baseUrl, model)?.stream !== false,
 ) {
   const failures = [];
   // One entry per model actually asked, in the order they were tried. Handed
@@ -163,10 +167,15 @@ export async function callUpstream(
 
   // With streaming off we ask upstream for the whole reply at once, then
   // re-stream it ourselves if the client wanted a stream.
-  const streamUpstream = Boolean(anthropicReq.stream) && streaming;
+  const wantsStream = Boolean(anthropicReq.stream) && streaming;
 
   for (const [i, { provider, model }] of ordered.attempts.entries()) {
     const label = `attempt ${i + 1}/${ordered.attempts.length} (${displayName(provider)}, ${model})`;
+
+    // Per model as well as global: a backend whose streaming is unreliable
+    // can be told so for that one model, without giving up streaming for the
+    // rest. Set in the model's setup.
+    const streamUpstream = wantsStream && modelStreams(provider.baseUrl, model);
 
     const remaining = deadline - Date.now();
     if (remaining < MIN_ATTEMPT_MS) {

@@ -12,6 +12,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { GLOBAL_CONFIG_DIR, MODELS_DEV_PATH } from "./paths.js";
+import { withSetup } from "./setup.js";
 
 const URL_DEFAULT = "https://models.dev/api.json";
 
@@ -208,9 +209,16 @@ const CHARS_PER_TOKEN = 5;
 
 // Does the catalogue say this model cannot possibly hold a request this big?
 // Null means it does not know, which is not a no.
+// What is known about a model, with what you said about it laid over what
+// models.dev says: a window you set, or the one the server stated when asked,
+// beats the published one.
+export function factsFor(baseUrl, model) {
+  return withSetup(lookupModel(baseUrl, model), baseUrl, model);
+}
+
 export function tooBigForCatalog(baseUrl, model, chars) {
   if (!Number.isFinite(chars)) return false;
-  const known = lookupModel(baseUrl, model);
+  const known = factsFor(baseUrl, model);
   if (!known?.context) return false;
   return chars / CHARS_PER_TOKEN > known.context;
 }

@@ -183,10 +183,24 @@ a time from each. A provider that answers 429 drops to one lane, waits, and
 its models go back on the queue — a rate limit is not a verdict on a model.
 A model that has not answered within **Test timeout** counts as a failure.
 
-Model lists are kept in `~/.opencc/catalogues.json`, so leaving the panel and
-coming back does not fetch them all again. Test results are not kept: they
-are what is true now, and they are cleared when the panel starts and for
-every model a run covers.
+Each provider keeps its own model list in `~/.opencc/model-lists.json`, so
+leaving the panel and coming back does not fetch them all again. Editing a
+provider, or switching its list on or off, drops that provider's list. Test
+results are not kept: they are what is true now, and they are cleared when
+the panel starts and for every model a run covers.
+
+**Providers** works the way HeartCode's does. Each provider has a unique
+name, an on/off switch and a list switch (off: only the models you add by
+hand). **Test** on a model sends it "Hello" from the server and shows exactly
+what was sent (key masked) and what came back; **Test** on ticked models does
+it for all of them. A model's **setup** (its row in Your models) sets its
+context window, tools, thinking, images and streaming above what models.dev
+says, and **Measure** asks the server for its real window with one oversized
+request. Keys never reach the page. Long lists are drawn a screenful at a
+time, so thousands of models scroll smoothly.
+
+Unlike HeartCode there is no hand-made order and no rotation rules: the order
+comes from the record.
 
 ![Picking models](PASTE_IMAGE_URL_HERE)
 
@@ -228,6 +242,23 @@ OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
 ```
 
 ## Changelog
+
+### 4.2.0 - 2026-11-02
+
+**Added**
+
+- Providers work like HeartCode's: unique names, per-provider list switch,
+  Hello on a model or on the ticked ones, per-model setup with Measure, a
+  provider's own list details (context, price, owner), and presets.
+- Long lists are drawn a screenful at a time (redraw of 1,485 models: 140 ms
+  to under 10 ms), and each provider's list keeps its scroll position.
+
+**Changed**
+
+- The panel edits one provider or model at a time on the server instead of
+  posting the whole config, so two writers cannot wipe each other's models.
+- Keys are masked and never sent to the page.
+- Model lists are in `model-lists.json` (was `catalogues.json`).
 
 ### 4.1.0 - 2026-11-02
 

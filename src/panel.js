@@ -3,23 +3,34 @@
 //
 // Nothing here sets ordering and nothing probes for capabilities. Ordering is
 // read from the record in stats.jsonl as the proxy runs; what a model can do
-// is read from models.dev. What is left to set is the part neither can know:
-// a URL, a key, and which models to put in the pot.
+// is read from models.dev, and from what you have said about it. What is left
+// to set is the part neither can know: a URL, a key, and which models to put
+// in the pot.
 //
 // No dependencies: Node's http server, one hand-written page, and a small
-// JSON API over the same configStore the rest of opencc reads.
+// JSON API. Every change to a provider or to the pot is its own request,
+// applied to the config in one synchronous step, so the page never sends the
+// whole config back and can never overwrite a change it has not seen.
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { readStoredConfig, writeStoredConfig } from "./configStore.js";
-import { providersFromEnv, displayName, streamingFromEnv, rankFromEnv, testTimeoutFromEnv, testLanesFromEnv } from "./config.js";
-import { allStats, successRate, coolingFor, record, resetStats } from "./stats.js";
-import { loadCatalog, lookupModel, catalogAge, catalogSize } from "./modelsdev.js";
+import { displayName } from "./config.js";
+import {
+  mask, loadConfig, fetchModelEntries, entryDetails, hello, measureContext,
+  saveProvider, deleteProvider, setProviderOn, setProviderList, setAdded,
+  potAdd, potRemove, potPark, saveSettings,
+} from "./providers.js";
+import { allStats, successRate, coolingFor, resetStats } from "./stats.js";
+import { loadCatalog, factsFor, catalogAge, catalogSize } from "./modelsdev.js";
+import { saveSetup, saveMeasured, forgetSetup, setupFor } from "./setup.js";
+import {
+  tests, runState, startRun, stopRun, running, testOne, forgetTests, onRunEnd,
+} from "./testrun.js";
 import { listRequests, clearRequests, KEEP } from "./reqlog.js";
 import { bus } from "./events.js";
-import { CATALOGUES_PATH, TESTS_PATH, GLOBAL_CONFIG_DIR } from "./paths.js";
+import { LISTS_PATH, OLD_LISTS_PATH, TESTS_PATH, PREFS_PATH, GLOBAL_CONFIG_DIR } from "./paths.js";
 import { page } from "./panelPage.js";
 
 const json = (res, status, body) => {
@@ -55,391 +66,130 @@ try {
   // Running from somewhere package.json is not reachable.
 }
 
-function loadState() {
-  const stored = readStoredConfig();
-  return {
-    providers: providersFromEnv(stored).map((p) => ({ ...p, label: displayName(p) })),
-    port: stored.PORT || "3000",
-    streaming: streamingFromEnv(stored),
-    rank: rankFromEnv(stored),
-    testTimeout: testTimeoutFromEnv(stored),
-    testLanes: testLanesFromEnv(stored),
-    version,
-  };
-}
-
-// One real request, and what came back.
-//
-// Not a capability check: what a model can do is models.dev's answer, read
-// from the catalogue, and opencc does not go asking. This is "does this name
-// exist at this backend, and does it answer", which is the question a wrong
-// model name or a dead key actually raises. The result is recorded like any
-// other call, so the Record column has something in it before Claude Code
-// sends the first request.
-//
-// The request and the reply are both returned, trimmed, because "it failed"
-// without the body is the answer that sends you to curl.
-const DUMP_LIMIT = 4000;
-const trim = (text) => (text.length > DUMP_LIMIT ? text.slice(0, DUMP_LIMIT) + "\n…" : text);
-
-// How many requests this process has out to providers right now. Reported
-// with the run, because "it has gone quiet" and "it is waiting on a hundred
-// replies" look identical from the outside and need different fixes.
-let inFlight = 0;
-
-async function testModel(provider, model, timeoutMs, keepDump) {
-  inFlight += 1;
-  try {
-    return await testModelInner(provider, model, timeoutMs, keepDump);
-  } finally {
-    inFlight -= 1;
-  }
-}
-
-async function testModelInner(provider, model, timeoutMs, keepDump) {
-  const headers = { "Content-Type": "application/json" };
-  if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
-
-  // Streamed, and with no max_tokens, which is what HeartCode sends.
-  //
-  // On a single request this makes no difference — measured, four models
-  // serially came out the same either way. At a hundred-odd in flight it
-  // makes all of it: a buffered reply holds the connection until the
-  // provider has written the whole thing, and a hundred of those through one
-  // rotator queue behind each other. Streaming, the first bytes come back at
-  // once and the connection clears. 127 in flight with 2 finished at two
-  // seconds was the shape of the problem.
-  const body = {
-    model,
-    messages: [{ role: "user", content: "Reply with just the word OK." }],
-    stream: true,
-  };
-  // Pretty-printing the request and the reply for every model costs real CPU
-  // on a run of a thousand, and that CPU is the same event loop driving the
-  // requests. Only a single Test keeps them, which is the only place they
-  // are ever read.
-  const sent = keepDump ? JSON.stringify(body, null, 2) : "";
-  const startedAt = Date.now();
-
-  try {
-    const res = await fetch(`${provider.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    const ms = Date.now() - startedAt;
-    const text = await res.text();
-
-    // "text" rather than a needs-based kind: this request carries no tools,
-    // no image and no document, so that is the bucket it belongs in.
-    record({ baseUrl: provider.baseUrl, model, kind: "text", status: res.status, ms });
-
-    let got = "";
-    if (keepDump) {
-      got = text;
-      try {
-        got = JSON.stringify(JSON.parse(text), null, 2);
-      } catch {
-        // Not JSON — an HTML error page, most likely. Shown as it came.
-      }
-    }
-
-    // A 429 usually says when to come back. Honouring it beats guessing,
-    // and a run that waits the stated time turns a rate limit into a result
-    // instead of recording the model as broken.
-    const after = Number(res.headers.get("retry-after"));
-
-    return {
-      ok: res.ok,
-      status: res.status,
-      ms,
-      retryAfter: Number.isFinite(after) && after > 0 ? after : undefined,
-      sent: keepDump ? trim(sent) : undefined,
-      got: keepDump ? trim(got) : undefined,
-      error: res.ok ? undefined : reasonFrom(text) || `HTTP ${res.status}`,
-    };
-  } catch (err) {
-    const ms = Date.now() - startedAt;
-    record({ baseUrl: provider.baseUrl, model, kind: "text", status: 0, ms });
-    // "The operation was aborted due to timeout" is the runtime's wording for
-    // something the person asked for, so say what actually happened.
-    const timedOut = err.name === "TimeoutError" || /timeout/i.test(err.message);
-    return {
-      ok: false,
-      status: 0,
-      ms,
-      sent: trim(sent),
-      error: timedOut ? `no answer within ${Math.round(timeoutMs / 1000)}s` : err.message,
-    };
-  }
-}
-
-// Providers say why in a dozen shapes: a JSON envelope, a bare string, or a
-// whole HTML error page. Pull out the sentence if there is one, and failing
-// that collapse it onto a line, because a 403 from Google is a document.
-function reasonFrom(body) {
-  try {
-    const parsed = JSON.parse(body);
-    for (const candidate of [parsed?.error?.message, parsed?.message, parsed?.detail, parsed?.title, parsed?.error]) {
-      if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
-    }
-  } catch {
-    // Fall through to the flattened text.
-  }
-  return body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
-}
-
-// --- test runs -------------------------------------------------------------
-// Runs live here rather than in the page, which is how HeartCode does it and
-// the reason its runs are quick. A browser holds six connections to one
-// origin on HTTP/1.1, so a page firing thirty-six slow requests at its own
-// panel gets six at a time however many lanes it thinks it has. From here
-// there is no such ceiling. Closing the tab no longer stops a run either,
-// and the results are still here when you come back.
 // --- what is kept on disk --------------------------------------------------
-// The provider model lists, and only those. They are slow to fetch and they
-// barely change, so asking every backend again on every visit was minutes of
-// waiting for the same answer.
-function readJson(path, fallback) {
+const readJson = (path, fallback) => {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch {
     return fallback;
   }
-}
+};
 
-// Written a moment after the last change rather than on every one: a run
-// lands hundreds of results a second and each would otherwise be a file
-// write.
-function saveLater(path, get) {
-  let timer = null;
-  return () => {
-    if (timer) return;
-    timer = setTimeout(() => {
-      timer = null;
-      try {
-        mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
-        writeFileSync(path, JSON.stringify(get()), { mode: 0o600 });
-      } catch {
-        // A full disk should not take a run down with it.
-      }
-    }, 1000);
-  };
-}
-
-// Test results are what is true right now, not a record. They are cleared
-// when the panel starts and again for every model a run covers, because a
-// result from an hour ago sitting beside one from this second reads as one
-// set of numbers and is not: the outcome pills once showed 397 results while
-// the run they sat under said 99 of 1471.
-//
-// The record in stats.jsonl is the thing that remembers, and it is separate.
-const tests = {};
-try {
-  rmSync(TESTS_PATH, { force: true });
-} catch {
-  // Nothing kept there any more; a leftover file from an older version just
-  // stops being read.
-}
-
-// baseUrl -> { models, error, at }
-const catalogues = readJson(CATALOGUES_PATH, {});
-const saveCatalogues = saveLater(CATALOGUES_PATH, () => catalogues);
-let run = null;
-
-const testKey = (baseUrl, model) => `${baseUrl}|${model}`;
-
-// A 429 is the provider saying "not now", so the model is tried again rather
-// than written down as broken.
-//
-// These numbers look over-patient on a short list and are not. A shorter
-// ladder (5s, 10s, 20s) was measured against this one on the full 1482-model
-// catalogue: it came back before the limit had cleared, earned another 429,
-// and spent the run thrashing between short pauses — 17.8 models a second
-// against 38. Waiting 15 seconds once beats waiting 5 seconds three times.
-//
-// A Retry-After from the provider still wins over the ladder.
-const RATE_TRIES = 4;
-const FIRST_BACKOFF = 15000;
-const MAX_BACKOFF = 120000;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function runState() {
-  if (!run) return { running: false };
-  const paused = {};
-  for (const [name, p] of run.provs) {
-    const left = p.until - Date.now();
-    if (left > 0) paused[name] = Math.ceil(left / 1000);
-  }
-  return {
-    running: true,
-    total: run.total, done: run.done, good: run.good,
-    lanes: run.lanes, stopping: run.stopping, paused, inFlight,
-  };
-}
-
-// Progress goes out at most this often. Every result used to emit, and so
-// did every worker on every pass of a pause: at sixteen lanes across nine
-// providers that is a hundred and forty workers, several hundred events a
-// second, each one re-serialising the whole run. The page drowned and the
-// progress strip stopped moving, which read as the run being stuck.
-const PROGRESS_EVERY_MS = 250;
-let lastProgress = 0;
-let progressTimer = null;
-
-function sendProgress(force) {
-  if (progressTimer) {
-    clearTimeout(progressTimer);
-    progressTimer = null;
-  }
-  const wait = PROGRESS_EVERY_MS - (Date.now() - lastProgress);
-  if (!force && wait > 0) {
-    // Nothing is lost by coalescing: the state is read when it is sent, so a
-    // late send carries the newest numbers rather than the ones that were
-    // current when it was asked for.
-    progressTimer = setTimeout(() => {
-      progressTimer = null;
-      sendProgress(true);
-    }, wait);
-    return;
-  }
-  lastProgress = Date.now();
-  bus.emit("testrun", runState());
-}
-
-async function startRun(items) {
-  const live = loadState();
-  const timeoutMs = live.testTimeout * 1000;
-  // Your setting, and one more lane per hundred models so a long list keeps
-  // scaling.
-  const lanes = Math.max(live.testLanes, Math.ceil(items.length / 100));
-
-  run = { total: items.length, done: 0, good: 0, lanes, stopping: false, provs: new Map() };
-
-  // Whatever these models said last time goes now, so the counts under the
-  // strip are this run's and nothing else's.
-  for (const t of items) {
-    const provider = live.providers[t.index];
-    if (provider) delete tests[testKey(provider.baseUrl, t.model)];
-  }
-
-  for (const t of items) {
-    const provider = live.providers[t.index];
-    if (!provider) continue;
-    const name = displayName(provider);
-    if (!run.provs.has(name)) {
-      run.provs.set(name, {
-        provider, queue: [], cap: lanes, until: 0, pausedAt: 0,
-        backoff: FIRST_BACKOFF, refused: new Map(), live: 0,
-      });
-    }
-    run.provs.get(name).queue.push(t.model);
-  }
-  run.total = [...run.provs.values()].reduce((n, p) => n + p.queue.length, 0);
-  sendProgress(true);
-
-  // The pauses counting down, which nothing else reports now that a waiting
-  // worker is silent.
-  const ticker = setInterval(() => {
-    if (run && Object.keys(runState().paused).length) sendProgress(true);
-  }, 1000);
-
-  // Worker n of a provider: takes its next model while there is one and n is
-  // under the cap. A provider that says it is busy drops its cap to one, so
-  // the others finish and leave; the last never does, or the queue would
-  // never drain.
-  const worker = async (p, n) => {
-    while (!run.stopping && p.queue.length) {
-      if (p.until > Date.now()) {
-        await sleep(Math.min(200, p.until - Date.now()));
-        continue;
-      }
-      // Over the cap: wait for it to come back rather than leave. Exiting
-      // here is what made a busy provider stay at one lane for the whole
-      // run — measured, the in-flight count collapsed from 127 to 15 within
-      // ten seconds and never recovered. One worker always carries on, or a
-      // queue narrowed to one lane would never drain.
-      if (n >= p.cap && n > 0) {
-        await sleep(150);
-        continue;
-      }
-
-      const model = p.queue.shift();
-      const key = testKey(p.provider.baseUrl, model);
-      const sentAt = Date.now();
-      const outcome = await testModel(p.provider, model, timeoutMs, false);
-
-      if (outcome.status === 429) {
-        const times = (p.refused.get(key) ?? 0) + 1;
-        p.refused.set(key, times);
-        p.cap = 1;
-        // One pause per burst: refusals of requests sent before the current
-        // pause began are the same burst and must not extend it again.
-        if (!(sentAt < p.pausedAt)) {
-          p.pausedAt = Date.now();
-          p.until = Date.now() + Math.min(MAX_BACKOFF, outcome.retryAfter > 0 ? outcome.retryAfter * 1000 : p.backoff);
-          p.backoff = Math.min(MAX_BACKOFF, p.backoff * 2);
-        }
-        if (times < RATE_TRIES) {
-          p.queue.push(model);
-          sendProgress();
-          continue;
-        }
-        outcome.error = `the provider kept saying it is busy (429), ${times} times with pauses between: try it again later`;
-      } else {
-        // Anything that is not a 429 means the provider is talking to us: a
-        // 402 or a 404 is an answer about the model, not a complaint about
-        // the rate. So it gets its lanes back.
-        //
-        // This used to require a success, and these lists are mostly models
-        // the account cannot use. One 429 therefore pinned a provider at a
-        // single lane for the rest of the run: measured, 785 models finished
-        // in the first three seconds and the remaining six hundred trickled
-        // out one at a time behind two throttled providers.
-        p.backoff = FIRST_BACKOFF;
-        p.cap = lanes;
-      }
-
-      tests[key] = { ...outcome, at: Date.now() };
-      run.done += 1;
-      if (outcome.ok) run.good += 1;
-      bus.emit("tested", { key, result: tests[key] });
-      sendProgress();
-    }
-    p.live -= 1;
-  };
-
-  const all = [];
-  for (const p of run.provs.values()) {
-    p.live = Math.min(lanes, p.queue.length);
-    for (let n = 0; n < p.live; n++) all.push(worker(p, n));
-  }
-
+const writeJson = (path, value) => {
   try {
-    await Promise.all(all);
-  } finally {
-    clearInterval(ticker);
-    if (progressTimer) {
-      clearTimeout(progressTimer);
-      progressTimer = null;
-    }
-    const over = { ...runState(), running: false, over: true };
-    run = null;
-    await onSaveRef?.();
-    bus.emit("testrun", over);
+    mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
+    writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
+  } catch {
+    // A full disk should not take a request down with it.
   }
+};
+
+// Test results are not kept (see testrun.js), and neither is the file an
+// older version kept them in. The model lists it used to keep by address are
+// replaced by the ones kept by name.
+rmSync(TESTS_PATH, { force: true });
+rmSync(OLD_LISTS_PATH, { force: true });
+
+// Each provider's model list, kept after it is loaded:
+//   name -> { v, baseUrl, at, models, details }
+// what the provider said (names, sizes, prices), not what is known from
+// models.dev or from you, which changes. Asked for again when its list is
+// switched on or off, when the provider is changed, and on Refresh.
+//
+// A provider that listed nothing is asked again every time, which is what
+// makes a failed or empty answer retryable instead of permanent.
+const LIST_V = 2; // how a saved list was read; another: read again
+const lists = readJson(LISTS_PATH, {});
+const saveLists = () => writeJson(LISTS_PATH, lists);
+
+function forgetList(...names) {
+  let changed = false;
+  for (const name of names) {
+    if (name in lists) {
+      delete lists[name];
+      changed = true;
+    }
+  }
+  if (changed) saveLists();
 }
 
-// Set by runPanel, so a finished run can tell the proxy to look again.
-let onSaveRef = null;
+// The page's own choices — sorts, folded providers, filters, the model
+// search — kept here and not in the browser, whose storage is per address and
+// a new port is a new address.
+const PREF_KEYS = ["catSort", "freeOnly", "folded", "sorts", "filters"];
+const prefs = () => readJson(PREFS_PATH, {});
+
+// --- the state the page draws from ----------------------------------------
+
+// What a provider looks like to the page. Never the key: an edit that leaves
+// the key box empty keeps the one it has.
+const shown = (p) => ({
+  name: p.name,
+  label: displayName(p),
+  baseUrl: p.baseUrl,
+  key: mask(p.apiKey),
+  list: p.list,
+  disabled: p.disabled,
+  models: p.models,
+  disabledModels: p.disabledModels,
+  added: p.added,
+});
+
+function stateOf() {
+  const cfg = loadConfig();
+  return {
+    providers: cfg.providers.map(shown),
+    port: cfg.port,
+    streaming: cfg.streaming,
+    rank: cfg.rank,
+    testTimeout: cfg.testTimeout,
+    testLanes: cfg.testLanes,
+    prefs: prefs(),
+    version,
+  };
+}
+
+// The facts the page shows for a model: models.dev's with yours laid over
+// them, and where they came from.
+const knownOf = (baseUrl, model) => factsFor(baseUrl, model) ?? undefined;
+
+// A provider's models and what is known about each: what its own list says
+// (name, window, owner, date, description, price), and what is known from
+// models.dev and from you. The facts are attached when asked, never stored
+// with the list, because they change when models.dev is fetched again.
+async function modelsOf(name, fresh) {
+  const provider = loadConfig().providers.find((p) => p.name === name);
+  if (!provider) throw Object.assign(new Error(`no provider "${name}"`), { status: 404 });
+  if (!provider.list) return { models: [], details: {}, off: true };
+
+  let saved = lists[name];
+  const valid = saved && saved.baseUrl === provider.baseUrl && saved.v === LIST_V && saved.models?.length;
+  if (!valid || fresh) {
+    const entries = await fetchModelEntries(provider);
+    saved = {
+      v: LIST_V,
+      baseUrl: provider.baseUrl,
+      at: Date.now(),
+      models: entries.map((m) => String(m.id ?? m.name)),
+      details: Object.fromEntries(entries.map((m) => [String(m.id ?? m.name), entryDetails(m)])),
+    };
+    lists[name] = saved;
+    saveLists();
+  }
+
+  await loadCatalog().catch(() => {});
+  const details = Object.fromEntries(saved.models.map((id) => [
+    id, { ...saved.details[id], known: knownOf(provider.baseUrl, id) },
+  ]));
+  return { models: saved.models, details, at: saved.at };
+}
 
 export const DEFAULT_PANEL_PORT = 3450;
 
 function listen(server, port) {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    // localhost only — this edits your API keys.
+    // localhost only: this edits your providers.
     server.listen(port, "localhost", () => resolve(server));
   });
 }
@@ -449,17 +199,22 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
   // it fails: everything here works without a catalogue, just with less to
   // show.
   loadCatalog().catch(() => {});
-  onSaveRef = onSave;
+  onRunEnd(onSave);
+
+  // After anything that changes what there is to route to, so a proxy that
+  // was waiting for exactly this starts.
+  const changed = async () => {
+    await onSave?.();
+  };
 
   const server = createServer(async (req, res) => {
-    const path = req.url.split("?")[0];
+    const url = new URL(req.url, "http://localhost");
+    const path = url.pathname;
 
     try {
       if (req.method === "GET" && (path === "/" || path === "/index.html")) {
         // The page is built fresh from source on every request and has no
-        // URL to version, so a cached copy is only ever a stale one. Without
-        // this a browser keeps serving yesterday's panel after an upgrade,
-        // and the only cure is a hard reload nobody thinks to do.
+        // URL to version, so a cached copy is only ever a stale one.
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, must-revalidate",
@@ -469,68 +224,209 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
       }
 
       if (req.method === "GET" && path === "/api/state") {
-        json(res, 200, loadState());
+        json(res, 200, stateOf());
         return;
       }
 
-      // What has actually worked. This is the whole of what decides routing,
-      // so the page shows it per model and per kind of request.
-      if (req.method === "GET" && path === "/api/stats") {
-        // Coverage below reads the catalogue, so it has to be loaded first or
-        // the first paint reports every model as untested and offers to probe
-        // the lot.
+      // --- providers ---------------------------------------------------
+
+      // Add one, or change one (`was`: the name it had, if it is renamed).
+      // Anything that changes where it points or how it signs in makes its
+      // model list and its test results stale.
+      if (req.method === "POST" && path === "/api/provider") {
+        const body = await readBody(req);
+        const done = await saveProvider(body);
+        forgetList(done.name, ...(done.was ? [done.was] : []));
+        forgetTests();
+        json(res, 200, { ...stateOf(), saved: done.name });
+        await changed();
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/provider/delete") {
+        const { name } = await readBody(req);
+        const gone = loadConfig().providers.find((p) => p.name === name);
+        deleteProvider(name);
+        forgetList(name);
+        forgetTests();
+        // What was said about its models went with it.
+        for (const model of gone?.models ?? []) forgetSetup(gone.baseUrl, model);
+        json(res, 200, stateOf());
+        await changed();
+        return;
+      }
+
+      // One provider's list on or off, or every provider's (no name).
+      if (req.method === "POST" && path === "/api/provider/list") {
+        const { name, on } = await readBody(req);
+        const names = setProviderList(name, on);
+        forgetList(...names);
+        json(res, 200, stateOf());
+        return;
+      }
+
+      // A provider switched off keeps its key and its models, and is skipped.
+      if (req.method === "POST" && path === "/api/provider/on") {
+        const { name, on } = await readBody(req);
+        setProviderOn(name, on);
+        json(res, 200, stateOf());
+        await changed();
+        return;
+      }
+
+      // A model added by name: one the provider does not list, or whose list
+      // is off. Remembered, and forgotten one by one or all at once.
+      if (req.method === "POST" && path === "/api/provider/added") {
+        const { name, ...rest } = await readBody(req);
+        setAdded(name, rest);
+        json(res, 200, stateOf());
+        return;
+      }
+
+      // --- the pot -----------------------------------------------------
+
+      if (req.method === "POST" && path === "/api/pot/add") {
+        const { items } = await readBody(req);
+        potAdd(items ?? []);
+        json(res, 200, stateOf());
+        await changed();
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/pot/remove") {
+        const { items } = await readBody(req);
+        potRemove(items ?? []);
+        json(res, 200, stateOf());
+        await changed();
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/pot/park") {
+        const { provider, model, parked } = await readBody(req);
+        potPark(provider, model, parked);
+        json(res, 200, stateOf());
+        await changed();
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/settings") {
+        saveSettings(await readBody(req));
+        json(res, 200, stateOf());
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/prefs") {
+        const { key, value } = await readBody(req);
+        if (!PREF_KEYS.includes(key)) throw new Error(`no such choice: ${key}`);
+        writeJson(PREFS_PATH, { ...prefs(), [key]: value });
+        json(res, 200, {});
+        return;
+      }
+
+      // --- a provider's model list ------------------------------------
+
+      if (req.method === "POST" && path === "/api/models") {
+        const { name, fresh } = await readBody(req);
+        json(res, 200, await modelsOf(name, Boolean(fresh)));
+        return;
+      }
+
+      // --- models.dev, and what you have said about a model -----------
+
+      if (req.method === "GET" && path === "/api/catalog") {
         await loadCatalog();
-        const { providers } = loadState();
-        const cooling = {};
-        for (const p of providers) {
+        const known = {};
+        for (const p of loadConfig().providers) {
           for (const model of p.models) {
-            const ms = coolingFor(p.baseUrl, model);
-            if (ms) cooling[p.baseUrl + "|" + model] = ms;
+            const info = knownOf(p.baseUrl, model);
+            if (info) known[`${p.baseUrl}|${model}`] = info;
           }
         }
-        json(res, 200, {
-          cooling,
-          rows: allStats().map((row) => ({ ...row, rate: successRate(row) })),
-        });
+        json(res, 200, { known, size: catalogSize(), age: catalogAge() });
         return;
       }
 
-      // Start over. Every model goes back to untried and routing is even
-      // odds again until real requests fill it back in.
-      if (req.method === "POST" && path === "/api/stats/reset") {
-        json(res, 200, resetStats());
+      // Fetch models.dev again. Its facts are never stored with a model list,
+      // so there is nothing else to refresh.
+      if (req.method === "POST" && path === "/api/catalog/refresh") {
+        try {
+          await loadCatalog({ force: true });
+          json(res, 200, { size: catalogSize(), age: catalogAge() });
+        } catch (err) {
+          json(res, 200, { error: err.message, size: catalogSize(), age: catalogAge() });
+        }
         return;
       }
 
-      if (req.method === "POST" && path === "/api/state") {
-        const body = await readBody(req);
-        writeStoredConfig({
-          providers: body.providers ?? [],
-          port: body.port,
-          streaming: body.streaming !== false,
-          rank: Array.isArray(body.rank) ? body.rank : [],
-          testTimeout: Number(body.testTimeout) || undefined,
-          testLanes: Number(body.testLanes) || undefined,
-        });
-        json(res, 200, loadState());
-        // The proxy may have been waiting for exactly this.
-        await onSave?.();
+      // What a model can do, set by you: for one models.dev does not know, or
+      // to correct it. Kept above what models.dev says.
+      if (req.method === "POST" && path === "/api/model-setup") {
+        const { provider, model, context, tools, thinking, images, stream } = await readBody(req);
+        const target = loadConfig().providers.find((p) => p.name === provider);
+        if (!target) throw new Error(`no provider "${provider}"`);
+        if (!String(model ?? "").trim()) throw new Error("a model is needed");
+        saveSetup(target.baseUrl, model, { context, tools, thinking, images, stream });
+        json(res, 200, { known: knownOf(target.baseUrl, model) ?? null });
+        return;
+      }
+
+      // Take back what you said about a model: it is what models.dev says again.
+      if (req.method === "POST" && path === "/api/model-setup/forget") {
+        const { provider, model } = await readBody(req);
+        const target = loadConfig().providers.find((p) => p.name === provider);
+        if (!target) throw new Error(`no provider "${provider}"`);
+        forgetSetup(target.baseUrl, model);
+        json(res, 200, { known: knownOf(target.baseUrl, model) ?? null });
+        return;
+      }
+
+      // Measure a model's window: one request far too big for any model; the
+      // server's refusal states its limit, which is kept above models.dev's.
+      if (req.method === "POST" && path === "/api/measure") {
+        const { provider, model } = await readBody(req);
+        const target = loadConfig().providers.find((p) => p.name === provider);
+        if (!target) throw new Error(`no provider "${provider}"`);
+        const measured = await measureContext(target, model);
+        if (measured.error) throw new Error(`couldn't measure it: ${measured.error}`);
+        if (measured.limit) saveMeasured(target.baseUrl, model, measured.limit);
+        json(res, 200, { measured, known: knownOf(target.baseUrl, model) ?? null, set: setupFor(target.baseUrl, model) });
+        return;
+      }
+
+      // --- testing ------------------------------------------------------
+
+      // "Hello" to a model, and exactly what was sent and what came back.
+      if (req.method === "POST" && path === "/api/hello") {
+        const { provider, model } = await readBody(req);
+        const cfg = loadConfig();
+        const target = cfg.providers.find((p) => p.name === provider);
+        if (!target || !model) throw new Error(`no provider "${provider}"`);
+        json(res, 200, await hello(target, model, cfg.testTimeout * 1000));
+        return;
+      }
+
+      // One short test, on its own: it neither waits for a run nor stops one.
+      if (req.method === "POST" && path === "/api/try") {
+        const { provider, model } = await readBody(req);
+        const result = await testOne(provider, String(model ?? ""));
+        json(res, 200, result);
+        await changed();
         return;
       }
 
       // Start, stop, and what is known so far. The page asks for a run and
       // then watches; it never drives one itself.
       if (req.method === "POST" && path === "/api/tests/start") {
-        if (run) {
+        if (running()) {
           json(res, 409, { error: "a test run is going already" });
           return;
         }
         const body = await readBody(req);
-        const live = loadState();
+        const cfg = loadConfig();
         const items = Array.isArray(body.only) && body.only.length
           ? body.only
-          : live.providers.flatMap((p, index) =>
-              p.disabled ? [] : p.models.map((model) => ({ index, model })));
+          : cfg.providers.flatMap((p) =>
+              p.disabled ? [] : p.models.map((model) => ({ provider: p.name, model })));
 
         if (!items.length) {
           json(res, 200, { ...runState(), results: tests });
@@ -543,7 +439,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
       }
 
       if (req.method === "POST" && path === "/api/tests/stop") {
-        if (run) run.stopping = true;
+        stopRun();
         json(res, 200, runState());
         return;
       }
@@ -555,9 +451,9 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
       // drops — and one does, under a few hundred results a second — takes
       // every event with it, because there is nothing to replay. The page
       // caught up to nothing and sat there looking seized while the run was
-      // still going: measured at 318 of 1471 on screen against 650 here.
+      // still going.
       if (req.method === "GET" && path === "/api/tests") {
-        const since = Number(new URL(req.url, "http://localhost").searchParams.get("since"));
+        const since = Number(url.searchParams.get("since"));
         let results = tests;
         if (Number.isFinite(since) && since > 0) {
           results = {};
@@ -569,29 +465,32 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         return;
       }
 
-      if (req.method === "POST" && path === "/api/test") {
-        // `kind` used to be accepted here and quietly ignored: testModel has
-        // taken no such argument since the capability probes were removed.
-        const { index, model } = await readBody(req);
-        const live = loadState();
-        const provider = live.providers[index];
-        if (!provider) {
-          json(res, 404, { ok: false, error: "no such provider" });
-          return;
+      // --- the record and the log --------------------------------------
+
+      // What has actually worked. This is the whole of what decides routing,
+      // so the page shows it per model and per kind of request.
+      if (req.method === "GET" && path === "/api/stats") {
+        const cooling = {};
+        for (const p of loadConfig().providers) {
+          for (const model of p.models) {
+            const ms = coolingFor(p.baseUrl, model);
+            if (ms) cooling[`${p.baseUrl}|${model}`] = ms;
+          }
         }
-        // Read fresh, so changing the timeout in the panel applies to the
-        // next test without a restart.
-        const outcome = await testModel(provider, model, live.testTimeout * 1000, true);
-        tests[testKey(provider.baseUrl, model)] = { ...outcome, at: Date.now() };
-        bus.emit("tested", { key: testKey(provider.baseUrl, model), result: tests[testKey(provider.baseUrl, model)] });
-        // A model that just answered may be the one the proxy was waiting for.
-        await onSave?.();
-        json(res, 200, outcome);
+        json(res, 200, {
+          cooling,
+          rows: allStats().map((row) => ({ ...row, rate: successRate(row) })),
+        });
         return;
       }
 
-      // Every request the proxy has served, newest first. The page filters
-      // these itself: the whole list is at most a few hundred summaries.
+      // Start over. Every model goes back to untried and routing is even odds
+      // again until real requests fill it back in.
+      if (req.method === "POST" && path === "/api/stats/reset") {
+        json(res, 200, resetStats());
+        return;
+      }
+
       if (req.method === "GET" && path === "/api/requests") {
         json(res, 200, { keep: KEEP, items: listRequests() });
         return;
@@ -602,37 +501,8 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         return;
       }
 
-      // What models.dev says about the models you have configured: context
-      // window, price, and whether it lists them as calling tools or reading
-      // images. A hint shown beside the record, never instead of it.
-      if (req.method === "GET" && path === "/api/catalog") {
-        await loadCatalog();
-        const { providers } = loadState();
-        const known = {};
-        for (const p of providers) {
-          for (const model of p.models) {
-            const info = lookupModel(p.baseUrl, model);
-            if (info) known[p.baseUrl + "|" + model] = info;
-          }
-        }
-        json(res, 200, { known, size: catalogSize(), age: catalogAge() });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/api/catalog/refresh") {
-        try {
-          await loadCatalog({ force: true });
-          json(res, 200, { size: catalogSize(), age: catalogAge() });
-        } catch (err) {
-          json(res, 200, { error: err.message, size: catalogSize(), age: catalogAge() });
-        }
-        return;
-      }
-
-      // Server-sent events, so a request served by the proxy shows up in the
-      // page without it polling. The payload is only ever "something
-      // changed": the page refetches what it needs, which keeps one copy of
-      // the rule for what each view shows.
+      // Server-sent events, so a request served by the proxy, or a test
+      // result, shows up in the page without it polling.
       if (req.method === "GET" && path === "/api/events") {
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
@@ -641,115 +511,36 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         });
         res.write("retry: 2000\n\n");
 
-        const send = (what) => {
-          if (!res.writableEnded) res.write(`data: ${JSON.stringify({ what })}\n\n`);
+        const send = (what, extra) => {
+          if (!res.writableEnded) res.write(`data: ${JSON.stringify({ what, ...extra })}\n\n`);
         };
-        const onRequest = () => send("request");
-        const onCleared = () => send("requests-cleared");
-        // These two carry a payload: the page needs the result itself, not a
-        // nudge to go and refetch every result it already has.
-        const onTested = (e) => {
-          if (!res.writableEnded) res.write(`data: ${JSON.stringify({ what: "tested", ...e })}\n\n`);
+        const handlers = {
+          request: () => send("request"),
+          "requests-cleared": () => send("requests-cleared"),
+          testsforgotten: () => send("testsforgotten"),
+          // These two carry a payload: the page needs the result itself, not
+          // a nudge to go and refetch every result it already has.
+          tested: (e) => send("tested", e),
+          testrun: (state) => send("testrun", { run: state }),
         };
-        const onRun = (state) => {
-          if (!res.writableEnded) res.write(`data: ${JSON.stringify({ what: "testrun", run: state })}\n\n`);
-        };
-        bus.on("request", onRequest);
-        bus.on("requests-cleared", onCleared);
-        bus.on("tested", onTested);
-        bus.on("testrun", onRun);
+        for (const [name, fn] of Object.entries(handlers)) bus.on(name, fn);
 
-        // Proxies and browsers drop an idle event stream; a comment line
-        // every twenty seconds is enough to keep it open and costs nothing.
+        // Proxies and browsers drop an idle event stream; a comment line every
+        // twenty seconds keeps it open and costs nothing.
         const beat = setInterval(() => {
           if (!res.writableEnded) res.write(": beat\n\n");
         }, 20000);
 
         req.on("close", () => {
           clearInterval(beat);
-          bus.off("request", onRequest);
-          bus.off("requests-cleared", onCleared);
-          bus.off("tested", onTested);
-          bus.off("testrun", onRun);
+          for (const [name, fn] of Object.entries(handlers)) bus.off(name, fn);
         });
-        return;
-      }
-
-      // The provider's own catalogue, so you can pick a model instead of
-      // typing one and finding out later it doesn't exist.
-      // A provider's own model list, from the last time it was asked.
-      //
-      // It used to be fetched on every visit, so adding a provider, picking
-      // models, leaving and coming back meant waiting for all of them again.
-      // Kept on disk now and only refetched when you press Refresh, or when
-      // nothing has ever been fetched for that backend.
-      if (req.method === "GET" && path === "/api/catalogue") {
-        const url = new URL(req.url, "http://localhost");
-        const index = Number(url.searchParams.get("index"));
-        const fresh = url.searchParams.get("fresh") === "1";
-        const provider = loadState().providers[index];
-        if (!provider) {
-          json(res, 404, { models: [] });
-          return;
-        }
-
-        const cached = catalogues[provider.baseUrl];
-        if (cached && !fresh) {
-          // models.dev may know more than it did when this was stored, so
-          // the facts are attached now rather than frozen in with the names.
-          await loadCatalog();
-          json(res, 200, {
-            models: cached.models.map((id) => ({ id, ...(lookupModel(provider.baseUrl, id) ?? {}) })),
-            error: cached.error || undefined,
-            at: cached.at,
-            cached: true,
-          });
-          return;
-        }
-
-        const headers = {};
-        if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
-        try {
-          const upstream = await fetch(`${provider.baseUrl}/models`, {
-            headers,
-            signal: AbortSignal.timeout(30000),
-          });
-          // A backend that refuses to list is worth saying out loud rather
-          // than showing as an empty catalogue: "this provider has no
-          // models" and "this provider would not tell us" are different
-          // problems with different fixes.
-          if (!upstream.ok) {
-            const error = `${upstream.status} ${(await upstream.text()).slice(0, 200)}`;
-            // Remembered too: a provider that will not list should not be
-            // asked again on every visit either.
-            catalogues[provider.baseUrl] = { models: cached?.models ?? [], error, at: Date.now() };
-            saveCatalogues();
-            json(res, 200, { models: [], error });
-            return;
-          }
-          const body = await upstream.json();
-          const data = Array.isArray(body) ? body : (body.data ?? []);
-          const ids = data.map((m) => m.id).filter(Boolean).sort();
-
-          catalogues[provider.baseUrl] = { models: ids, error: "", at: Date.now() };
-          saveCatalogues();
-
-          await loadCatalog();
-          json(res, 200, {
-            models: ids.map((id) => ({ id, ...(lookupModel(provider.baseUrl, id) ?? {}) })),
-            at: catalogues[provider.baseUrl].at,
-          });
-        } catch (err) {
-          catalogues[provider.baseUrl] = { models: cached?.models ?? [], error: err.message, at: Date.now() };
-          saveCatalogues();
-          json(res, 200, { models: cached?.models?.map((id) => ({ id })) ?? [], error: err.message });
-        }
         return;
       }
 
       json(res, 404, { error: "not found" });
     } catch (err) {
-      json(res, 500, { error: err.message });
+      json(res, err.status === 404 ? 404 : 400, { error: err.message });
     }
   });
 

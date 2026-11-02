@@ -25,6 +25,9 @@ export function writeStoredConfig({ providers, port, streaming = true, rank = []
     if (provider.disabled) lines.push(`PROVIDER_DISABLED${suffix}=true`);
     const off = joinModels(provider.disabledModels);
     if (off) lines.push(`PROVIDER_MODELS_DISABLED${suffix}=${off}`);
+    if (provider.list === false) lines.push(`PROVIDER_LIST${suffix}=off`);
+    const added = joinModels(provider.added);
+    if (added) lines.push(`PROVIDER_ADDED${suffix}=${added}`);
     lines.push(`OPENAI_BASE_URL${suffix}=${provider.baseUrl}`);
     lines.push(`OPENAI_API_KEY${suffix}=${provider.apiKey || ""}`);
     lines.push(`MODELS${suffix}=${joinModels(provider.models)}`);

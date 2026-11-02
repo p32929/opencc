@@ -89,6 +89,15 @@ export function providersFromEnv(values) {
         // when picking one to call. Per provider rather than per tier: "this
         // model, from this provider" is the thing you want to switch off.
         disabledModels: modelList(values[`PROVIDER_MODELS_DISABLED${suffix}`]),
+        // Whether to ask this provider for its model list at all. Some
+        // backends have thousands of models, charge for the listing, or do
+        // not implement it; with it off only the models you have added by
+        // name show. Anything but "off" means on.
+        list: String(values[`PROVIDER_LIST${suffix}`] ?? "").trim().toLowerCase() !== "off",
+        // Models added by name, which the provider's own list may not carry.
+        // Remembered separately from the pot: taking one out of the pot does
+        // not forget it, so it can be put back without retyping.
+        added: modelList(values[`PROVIDER_ADDED${suffix}`]),
       };
     })
     // A provider with no models is kept. It cannot be routed to, and the
