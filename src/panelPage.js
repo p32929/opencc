@@ -484,12 +484,12 @@ export const page = () => `<!doctype html>
           <option value="yes">Reads images</option>
           <option value="no">No images</option>
         </select>
-        <select id="f-count-of" aria-label="How many abilities">
+        <select id="f-count-of" aria-label="How many abilities" title="Exactly this many of: calls tools, thinks, reads images. It works together with the Tools, Thinking and Images filters: with Tools and Images set to yes, exactly 2 can only be the ones that do not think.">
           <option value="">Abilities: any</option>
-          <option value="3">3 of 3</option>
-          <option value="2">2 of 3</option>
-          <option value="1">1 of 3</option>
-          <option value="0">0 of 3</option>
+          <option value="3">Exactly 3 of 3</option>
+          <option value="2">Exactly 2 of 3</option>
+          <option value="1">Exactly 1 of 3</option>
+          <option value="0">Exactly 0 of 3</option>
         </select>
         <select id="f-ctx" aria-label="Context window">
           <option value="">Context: any</option>
