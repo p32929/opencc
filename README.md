@@ -6,7 +6,7 @@ Code does not notice.
 
 Zero dependencies. Add many free tiers and opencc finds which ones work.
 
-![The opencc admin panel](PASTE_IMAGE_URL_HERE)
+![The opencc admin panel](https://res.cloudinary.com/m0jnrul4/image/upload/v1793598151/aab0da67-5374-4260-870a-4bfb47787ebf.png)
 
 ## Why
 
@@ -52,7 +52,7 @@ busy, opencc uses the next free one.
 
 Claude Code flags still work: `opencc claude --continue`.
 
-![Claude Code running through opencc](PASTE_IMAGE_URL_HERE)
+![Claude Code running through opencc](https://res.cloudinary.com/m0jnrul4/image/upload/v1793598199/Screenshot_2026-11-02_at_9.43.14_AM.png)
 
 ## How it works
 
@@ -203,7 +203,7 @@ time, so thousands of models scroll smoothly.
 Unlike HeartCode there is no hand-made order and no rotation rules: the order
 comes from the record.
 
-![Picking models](PASTE_IMAGE_URL_HERE)
+![Picking models](https://res.cloudinary.com/m0jnrul4/image/upload/v1793598232/19daf0e5-2e20-49d7-9cd2-f51f7ff5e127.png)
 
 ## Reset
 
