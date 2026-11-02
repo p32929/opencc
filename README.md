@@ -244,7 +244,7 @@ OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
 
 ## Changelog
 
-### 4.2.0 - 2026-11-02
+### 5.0.0 - 2026-11-02
 
 **Added**
 
