@@ -484,12 +484,11 @@ export const page = () => `<!doctype html>
           <option value="yes">Reads images</option>
           <option value="no">No images</option>
         </select>
-        <select id="f-count-of" aria-label="How many abilities" title="Exactly this many of: calls tools, thinks, reads images. It works together with the Tools, Thinking and Images filters: with Tools and Images set to yes, exactly 2 can only be the ones that do not think.">
+        <select id="f-count-of" aria-label="How many abilities" title="At least this many of: calls tools, thinks, reads images. It works together with the Tools, Thinking and Images filters.">
           <option value="">Abilities: any</option>
-          <option value="3">Exactly 3 of 3</option>
-          <option value="2">Exactly 2 of 3</option>
-          <option value="1">Exactly 1 of 3</option>
-          <option value="0">Exactly 0 of 3</option>
+          <option value="3">All 3</option>
+          <option value="2">2 or more</option>
+          <option value="1">1 or more</option>
         </select>
         <select id="f-ctx" aria-label="Context window">
           <option value="">Context: any</option>
@@ -1707,7 +1706,7 @@ function passes(t) {
   if (FILTER.count !== "") {
     if (!d) return false;
     var n = (d.tools ? 1 : 0) + (d.reasoning ? 1 : 0) + (d.vision ? 1 : 0);
-    if (n !== Number(FILTER.count)) return false;
+    if (n < Number(FILTER.count)) return false;
   }
 
   if (FILTER.ctx !== "") {
