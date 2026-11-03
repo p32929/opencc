@@ -374,6 +374,10 @@ OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
 
 ## Changelog
 
+### 5.1.1 - 2026-11-03
+
+- README: a Thanks section (models.dev, LMArena, contributors).
+
 ### 5.1.0 - 2026-11-03
 
 From HeartCode's 0.1.38 to 0.1.42, the parts that belong in a proxy.
@@ -650,6 +654,14 @@ Before submitting a pull request, please:
 4. Submit your pull request with a clear description of changes
 
 This approach helps avoid duplicate efforts and ensures smooth collaboration. Thank you for considering contributing!
+
+## Thanks
+
+opencc leans on other people's work:
+
+- [models.dev](https://models.dev) (the SST team and its contributors) publishes the open catalogue of context windows, prices and abilities behind most of the panel.
+- [LMArena](https://lmarena.ai) publishes the public rankings (via its [Hugging Face dataset](https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset)) behind the Coding, Web apps and Vision columns.
+- Everyone who reported a bug, sent a pull request or starred the repository.
 
 ## Share
 
