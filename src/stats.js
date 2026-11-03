@@ -137,8 +137,15 @@ export const TOO_BIG_VERDICT = "too_big";
 // request cannot be retried, because Claude Code already has half an answer.
 export const STREAM_DIED_VERDICT = "stream_died";
 
-export function verdictFor(anthropicReq, { blocks, toolUse, badArguments }) {
+// A reply that went round in circles until it was cut, and one that wrote a
+// tool call out as text instead of making it: neither is an answer.
+export const LOOP_VERDICT = "loop";
+export const GARBLED_VERDICT = "garbled";
+
+export function verdictFor(anthropicReq, { blocks, toolUse, badArguments, looped, garbled }) {
   if (blocks === 0) return "empty";
+  if (looped) return LOOP_VERDICT;
+  if (garbled) return GARBLED_VERDICT;
   if (badArguments) return "bad_arguments";
 
   const choice = anthropicReq?.tool_choice?.type;
@@ -448,7 +455,10 @@ const streaks = new Map();
 
 const coolKey = (baseUrl, model) => `${baseUrl}\u0000${model}`;
 
-export function coolOff(baseUrl, model, status, now = Date.now()) {
+// asked: how long the provider said to wait (Retry-After), in ms. It wins
+// over the ladder when it is longer: coming back earlier only earns another
+// refusal.
+export function coolOff(baseUrl, model, status, now = Date.now(), asked = 0) {
   const base = status === 429 ? COOLDOWN_MS[429]
     : status === 503 ? COOLDOWN_MS[503]
     : status === 0 || status >= 500 ? COOLDOWN_MS.other
@@ -459,7 +469,7 @@ export function coolOff(baseUrl, model, status, now = Date.now()) {
   const streak = (streaks.get(key) ?? 0) + 1;
   streaks.set(key, streak);
 
-  const ms = Math.min(base * Math.pow(2, streak - 1), COOLDOWN_CAP_MS);
+  const ms = Math.min(Math.max(base * Math.pow(2, streak - 1), asked), COOLDOWN_CAP_MS);
   cooling.set(key, now + ms);
   return ms;
 }
@@ -682,6 +692,13 @@ export function chooseOrder(attempts, kind, {
   catalogTooBig = null,
   // Your provider ranking, best first. Empty means no preference.
   rank = [],
+  // (baseUrl, model) => a small number added to the draw: what public
+  // rankings say about the model. Left out, it is the record alone.
+  bonus = null,
+  // (baseUrl, model) => boolean: the model is known not to do something this
+  // request needs (no tool calls, no images). Behind the others that can,
+  // ahead of the ones that cannot take the size.
+  unfit = null,
 } = {}) {
   const prefer = preferenceOf(rank);
 
@@ -696,7 +713,8 @@ export function chooseOrder(attempts, kind, {
       b,
       cooling: coolingFor(baseUrl, attempt.model, now),
       tooSmall: tooSmallFor(entry, chars, catalogTooBig, baseUrl, attempt.model),
-      draw: betaSample(a, b, rng) - slowness(meanMs(entry)) + prefer(baseUrl),
+      unfit: Boolean(unfit?.(baseUrl, attempt.model)),
+      draw: betaSample(a, b, rng) - slowness(meanMs(entry)) + prefer(baseUrl) + (bonus?.(baseUrl, attempt.model) ?? 0),
     };
   });
 
@@ -717,6 +735,7 @@ export function chooseOrder(attempts, kind, {
     // A model too small for this request goes behind even a cooling one: the
     // cooling model will work in a minute, this one will never take this.
     (x.tooSmall ? 1 : 0) - (y.tooSmall ? 1 : 0) ||
+    (x.unfit ? 1 : 0) - (y.unfit ? 1 : 0) ||
     (x.cooling === 0 ? 0 : 1) - (y.cooling === 0 ? 0 : 1) ||
     x.cooling - y.cooling ||
     y.draw - x.draw ||

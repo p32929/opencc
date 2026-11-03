@@ -379,6 +379,16 @@ export const page = () => `<!doctype html>
      same otherwise, and "nothing here" is a lie while it is still loading. */
   .loading { padding: 26px; text-align: center; color: var(--ink-3); font-size: 13px; }
 
+  .upd { display: block; margin: 0 8px 10px; padding: 6px 8px; border-radius: var(--r-s); background: var(--hover); color: var(--ink-2); font-size: 12px; text-align: left; border: 1px solid var(--rule); cursor: pointer; }
+  .testing #filters select, .testing #filters input, .testing #filters button, .testing table.mt thead button { pointer-events: none; opacity: .55; }
+  .upd[hidden] { display: none; }
+  .fields .chk { display: flex; gap: 8px; align-items: flex-start; white-space: normal; line-height: 1.4; }
+  .fields .chk input { margin-top: 3px; flex: none; }
+  .rk { font: 12px var(--mono); color: var(--ink-2); }
+  .rk.top { color: var(--ok); }
+  .fields { display: grid; gap: 12px; margin: 10px 0; }
+  .fields .fld select, .fields .fld input[type=number] { width: 100%; }
+  .linkbox { font: 12px var(--mono); word-break: break-all; padding: 6px 8px; border: 1px solid var(--rule); border-radius: var(--r-s); margin-top: 6px; user-select: all; }
   .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 50; background: var(--ink); color: var(--bg); padding: 9px 14px; border-radius: var(--r-s); font-size: 13px; opacity: 0; transition: opacity .18s; pointer-events: none; max-width: 80vw; }
   .toast.show { opacity: 1; }
   .toast.bad { background: var(--bad); color: #fff; }
@@ -388,6 +398,7 @@ export const page = () => `<!doctype html>
 <div class="app">
   <aside>
     <div class="brand"><b>opencc</b><small id="ver"></small></div>
+    <button id="upd" class="upd" hidden></button>
     <nav id="nav">
       <a href="#providers" data-page="providers">Providers <span class="n" id="n-prov"></span></a>
       <a href="#models" data-page="models">Your models <span class="n" id="n-models"></span></a>
@@ -418,6 +429,7 @@ export const page = () => `<!doctype html>
         </select>
         <input type="text" id="tag" maxlength="200" placeholder="[{provider}-{model}]" hidden>
       </div>
+      <button id="behavior" title="What happens when a model fails or is slow, rankings, what is kept, and opening the panel from other devices">Behavior\u2026</button>
       <div class="row">
         <button id="streaming"></button>
         <button id="theme" title="Light or dark"></button>
@@ -683,6 +695,8 @@ var LISTS = {};      // provider name -> { models, details, error, loading, off,
 // none was loading, how many are back, how many could not be listed.
 var listLoads = { total: 0, done: 0, failed: 0 };
 var REQS = [];
+var RANKS = {};      // model name -> { coding, webdev, vision: { rank, of, score, votes } }
+var USAGE = {};      // "baseUrl|model" -> { requests, input, output, cached, cost, priced }
 // Until the first load lands, an empty area means "not here yet", not
 // "nothing to show". Saying the wrong one of those is how a slow panel looks
 // like a broken one.
@@ -869,6 +883,37 @@ async function loadCatalog() {
   drawCatalogButton();
 }
 
+// What the public rankings say about the models in the pot, and what each has
+// used and cost. Asked together, after the pot or the record changes.
+async function loadExtras() {
+  try {
+    var names = [];
+    S.providers.forEach(function (p) { if (!p.disabled) p.models.forEach(function (m) { names.push(m); }); });
+    RANKS = (await post("/api/ranks", { models: names })).ranks || {};
+  } catch (e) { RANKS = {}; }
+  try { USAGE = (await api("/api/usage")).usage || {}; } catch (e) { USAGE = {}; }
+}
+
+// models.dev and the rankings, fetched again: one click for what each model
+// can do, costs and how people rate it.
+async function updateInfo() {
+  var b = $("upd-info");
+  if (b) { b.disabled = true; b.textContent = "updating\u2026"; }
+  try {
+    var out = await post("/api/info/update");
+    await loadCatalog();
+    await loadState();
+    await loadExtras();
+    drawAll();
+    toast(out.errors && out.errors.length ? out.errors.join(". ") : "Model info is up to date: " + (out.size || 0).toLocaleString() + " models in models.dev", Boolean(out.errors && out.errors.length));
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (b) b.disabled = false;
+    drawMine();
+  }
+}
+
 async function loadRequests() {
   try { REQS = (await api("/api/requests")).items || []; } catch (e) { REQS = []; }
   drawRequests();
@@ -988,6 +1033,8 @@ var tagEditing = false;
 
 function drawSidebar() {
   $("ver").textContent = S.version || "";
+  $("upd").hidden = !S.update;
+  if (S.update) $("upd").textContent = "opencc " + S.update + " is out";
   if (document.activeElement !== $("port")) $("port").value = S.port;
   if (document.activeElement !== $("ttl")) $("ttl").value = S.testTimeout;
   if (document.activeElement !== $("lanes")) $("lanes").value = S.testLanes;
@@ -1421,6 +1468,9 @@ function drawPicks() {
 async function applyState(path, body) {
   S = await post(path, body);
   drawAll();
+  // The models in the pot may have changed: where people rate them is asked
+  // again, without holding anything up.
+  loadExtras().then(function () { drawMine(); });
   return S;
 }
 
@@ -1612,6 +1662,11 @@ function worksCell(t) {
 // and null always sorts last, whichever direction you asked for: an unknown
 // price is not a cheap one. Where two nulls are not the same thing, missing()
 // separates them.
+function rankCol(label, which) {
+  return { label: label, num: true, first: "up", words: ["best first", "worst first"],
+    get: function (t) { var r = RANKS[t.model]; return r && r[which] ? r[which].rank : null; } };
+}
+
 var COLS = {
   model: { label: "Model", first: "up", words: ["A to Z", "Z to A"],
     get: function (t) { return t.model; } },
@@ -1659,6 +1714,17 @@ var COLS = {
   // Where the four columns before it come from, which is the answer to "why
   // does this row say it cannot do tools" — models.dev was asked and said
   // so, or models.dev has never heard of this name.
+  // Where people rate it, from public rankings: lower is better.
+  coding: rankCol("Coding", "coding"),
+  webdev: rankCol("Web apps", "webdev"),
+  vision: rankCol("Vision", "vision"),
+
+  used: { label: "Used", num: true, first: "down", words: ["least first", "most first"],
+    get: function (t) { var u = USAGE[key(t.baseUrl, t.model)]; return u ? u.input + u.output : null; } },
+
+  spent: { label: "Spent", num: true, first: "down", words: ["least first", "most first"],
+    get: function (t) { var u = USAGE[key(t.baseUrl, t.model)]; return u && u.priced ? u.cost : null; } },
+
   from: { label: "From", first: "up", words: ["known first", "unknown first"],
     get: function (t) { return facts(t.baseUrl, t.model) ? 0 : 1; } },
 
@@ -1828,6 +1894,7 @@ var firstDir = function (k) { return COLS[k].first; };
 // unique — clicking Context put it second, where there were no ties left for
 // it to break, so the order did not move and the column looked broken.
 function clickSort(k, addToIt) {
+  if (running) { toast("The list holds still while models are tested"); return; }
   var at = null;
   SORT.forEach(function (s) { if (s.key === k) at = s; });
 
@@ -1896,7 +1963,9 @@ function drawMine() {
         : "Say which providers you would rather use. It tilts the draw; it does not override the record.",
       onclick: rankingDialog,
     }, ranked() ? "Ranking \\u2713" : "Provider ranking") : null,
-    list.length ? h("button", { className: "sm", title: "Ask models.dev again for context, price and abilities", onclick: refreshCatalog }, "Refresh from models.dev") : null,
+    list.length ? h("button", { className: "sm", id: "upd-info", disabled: Boolean(running),
+      title: "Ask models.dev again for context, price and abilities, and get the public rankings",
+      onclick: updateInfo }, "Update model info") : null,
     list.length ? h("button", { className: "sm", disabled: Boolean(running),
       title: filtering() ? "Only the models these filters show" : "Every model in the pot",
       onclick: function () { testMany(view); } },
@@ -1943,7 +2012,7 @@ function drawMine() {
 
   var tbody = h("tbody", {});
   var win = windowed(tbody, {
-    count: view.length, height: 38, scroller: window, tag: "tr", cols: 16,
+    count: view.length, height: 38, scroller: window, tag: "tr", cols: 21,
     row: function (n) { return tableRow(view[n], n, view); },
   });
 
@@ -1966,14 +2035,50 @@ function drawMine() {
         h("th", { className: "num", title: "Its place in the order shown" }, "#"),
         head("model"), head("provider"), head("context"), head("abilities"),
         head("tools"), head("thinking"), head("images"),
-        head("input"), head("output"), head("from"),
-        head("record"), head("tried"), head("works"),
+        head("input"), head("output"),
+        head("coding"), head("webdev"), head("vision"), head("from"),
+        head("record"), head("tried"), head("used"), head("spent"), head("works"),
         h("th", {}, ""))),
       tbody)));
   win.draw(true);
   // Never leave a table with models and no rows: if it could not be drawn
   // yet (its page was hidden), draw it as soon as it can be.
   requestAnimationFrame(function () { win.draw(true); });
+}
+
+// Where the window came from: what you set, what the server measured or said,
+// models.dev, or what a refusal showed.
+function contextWhy(d) {
+  var from = d.contextFrom || (d.source === "you" ? "you" : "models.dev");
+  var words = { you: "set by you", measured: "measured: the server said its limit", server: "the running server says so",
+    "models.dev": "from models.dev", learned: "learned: the server refused or cut a bigger request (kept a day)",
+    rate: "your per-minute cap at this provider" };
+  return " (" + (words[from] || from) + ")";
+}
+
+function rankCell(t, which) {
+  var r = RANKS[t.model] && RANKS[t.model][which];
+  if (!r) return h("td", { className: "num" }, h("span", { className: "no" }, "-"));
+  return h("td", { className: "num", title: r.as + ": rated " + r.score + " from " + (r.votes || 0).toLocaleString() + " votes, place " + r.rank + " of " + r.of + " in LMArena" },
+    h("span", { className: "rk" + (r.rank / r.of <= 0.1 ? " top" : "") }, "#" + r.rank));
+}
+
+function spendText(n) {
+  if (n >= 1) return "$" + n.toFixed(2);
+  if (n >= 0.01) return "$" + n.toFixed(3);
+  return n > 0 ? "$" + n.toFixed(4) : "$0";
+}
+function usedCell(t) {
+  var u = USAGE[key(t.baseUrl, t.model)];
+  if (!u) return h("td", { className: "num" }, h("span", { className: "no" }, "-"));
+  return h("td", { className: "num", title: u.input.toLocaleString() + " in" + (u.cached ? " (" + u.cached.toLocaleString() + " cached)" : "") + ", " + u.output.toLocaleString() + " out, in " + u.requests + " replies" },
+    kTok(u.input + u.output));
+}
+function spentCell(t) {
+  var u = USAGE[key(t.baseUrl, t.model)];
+  if (!u) return h("td", { className: "num" }, h("span", { className: "no" }, "-"));
+  return h("td", { className: "num", title: u.priced ? "What these replies cost, from the provider or models.dev prices" : "No price is known for this model" },
+    u.priced ? spendText(u.cost) : h("span", { className: "no" }, "?"));
 }
 
 // One row of Your models. Built when it scrolls into view, so it reads the
@@ -2011,17 +2116,19 @@ function tableRow(t, n, view) {
           h("td", {}, t.name,
             t.off ? h("span", { className: "tag", style: "margin-left:6px" }, "off") : null,
             t.parked ? h("span", { className: "tag", style: "margin-left:6px" }, "parked") : null),
-          h("td", { className: "num", title: d && d.context ? d.context.toLocaleString() + " tokens" : "models.dev does not list this model" }, kTok(d && d.context)),
+          h("td", { className: "num", title: d && d.context ? d.context.toLocaleString() + " tokens" + contextWhy(d) : "models.dev does not list this model" }, kTok(d && d.context)),
           h("td", { className: "num" }, d ? COLS.abilities.get(t) + " of 3" : h("span", { className: "no" }, "?")),
           h("td", {}, yesNo(COLS.tools.get(t))),
           h("td", {}, yesNo(COLS.thinking.get(t))),
           h("td", {}, yesNo(COLS.images.get(t))),
           h("td", { className: "num" }, d && d.input !== undefined ? usd(d.input) : "-"),
           h("td", { className: "num" }, d && d.output !== undefined ? usd(d.output) : "-"),
+          rankCell(t, "coding"), rankCell(t, "webdev"), rankCell(t, "vision"),
           h("td", {}, fromCell(t)),
           h("td", { className: "num", title: r.total ? r.ok + " of " + r.total + " requests answered" : "Nothing has been sent to this model yet" },
             r.pct === null ? h("span", { className: "no" }, "-") : (r.pct + "%")),
           h("td", { className: "num" }, r.total || "-"),
+          usedCell(t), spentCell(t),
           h("td", {}, worksCell(t)),
           h("td", {}, h("div", { className: "acts" },
             wait ? h("span", { className: "tag warn", title: "Rate limited or down. It goes to the back of the queue until this runs out." }, Math.ceil(wait / 1000) + "s") : null,
@@ -2217,6 +2324,9 @@ function watchRun() {
 }
 
 function drawRun() {
+  // While a run is going the list holds still: a sort or a filter would move
+  // the rows under the results as they arrive.
+  document.body.classList.toggle("testing", Boolean(running));
   if (!running) { put($("run")); return; }
   var pct = running.total ? Math.round((running.done / running.total) * 100) : 0;
   put($("run"), h("div", { className: "run" },
@@ -2774,6 +2884,7 @@ function drawRequests() {
       h("span", { className: "when" }, ago(r.at)),
       h("span", { className: "who" }, r.ok ? r.served
         : (r.status || "failed") + " after " + r.attempts.length + (r.attempts.length === 1 ? " try" : " tries")),
+      r.place && r.place.of > 1 ? h("span", { className: "when", title: "answered by the " + r.place.at + ". model tried" }, "#" + r.place.at + " of " + r.place.of) : null,
       h("span", { className: "when" }, r.kind));
   }));
   drawDetail();
@@ -2795,8 +2906,13 @@ function drawDetail() {
     ["Size", r.chars.toLocaleString() + " chars" + (kb ? " (~" + kb + "kB)" : "") + ", " + r.tools + " tools"],
     ["Streaming", r.stream ? "yes" : "no"],
     ["Took", r.ms ? (r.ms / 1000).toFixed(1) + "s" : "-"],
-    ["Result", r.ok ? "served by " + r.served : "failed"],
+    ["First words", r.firstMs ? (r.firstMs / 1000).toFixed(1) + "s" : "-"],
+    ["Result", r.ok ? "served by " + r.served + (r.place && r.place.of > 1 ? " (#" + r.place.at + " of " + r.place.of + ": a fallback)" : "") : "failed"],
   ];
+  if (r.usage) {
+    about.push(["Tokens", r.usage.input.toLocaleString() + " in" + (r.usage.cached ? " (" + r.usage.cached.toLocaleString() + " cached)" : "") + ", " + r.usage.output.toLocaleString() + " out"]);
+    if (typeof r.cost === "number") about.push(["Cost", spendText(r.cost)]);
+  }
 
   put($("reqdetail"),
     about.map(function (f) { return h("div", { className: "kv" }, h("b", {}, f[0]), h("span", {}, f[1])); }),
@@ -2809,7 +2925,24 @@ function drawDetail() {
             a.error ? h("div", { className: "err" }, a.error) : null);
         })
       : h("li", {}, "No model was tried.")),
-    r.error && !r.ok ? h("div", { className: "walk" }, h("div", { className: "err" }, r.error)) : null);
+    r.error && !r.ok ? h("div", { className: "walk" }, h("div", { className: "err" }, r.error)) : null,
+    r.detail ? h("button", { className: "sm", style: "margin-top:10px", onclick: function () { showRequest(r); } }, "See the request and reply") : null);
+}
+
+// The whole request and what came back, kept because the log is set to keep
+// them. It holds your conversation, which the summary never does.
+async function showRequest(r) {
+  try {
+    var d = await api("/api/request?id=" + encodeURIComponent(r.id));
+    var text = JSON.stringify(d, null, 2);
+    var cut = text.length > 200000;
+    openDialog([
+      h("h2", {}, "Request " + ago(r.at)),
+      h("p", { className: "muted" }, cut ? "Showing the first 200,000 of " + text.length.toLocaleString() + " characters." : text.length.toLocaleString() + " characters."),
+      h("pre", { className: "dump" }, cut ? text.slice(0, 200000) : text),
+      h("div", { className: "btns" }, h("button", { className: "primary", type: "button", onclick: function () { if (closeDialog) closeDialog(); } }, "Close")),
+    ], { wide: true });
+  } catch (e) { toast(e.message, true); }
 }
 
 // --- live updates ---------------------------------------------------------
@@ -2861,6 +2994,7 @@ async function handleEvent(e) {
     }
     if (what === "request" || what === "requests-cleared") {
       await Promise.all([loadRequests(), loadRecord()]);
+      try { USAGE = (await api("/api/usage")).usage || {}; } catch (e2) {}
       drawAll();
     }
   }
@@ -2908,6 +3042,111 @@ $("ttl").addEventListener("change", async function () {
   await saveSettings({ testTimeout: n });
   toast("Tests give up after " + n + "s");
 });
+// --- behavior ---------------------------------------------------------------
+// How the proxy treats a model that fails or is slow, what it keeps, and who
+// may open this page. Every one starts at what opencc always did.
+async function behaviorDialog() {
+  var b = S.behavior || {};
+  var onFail = h("select", {},
+    h("option", { value: "failure" }, "Move on to the next model at once"),
+    h("option", { value: "retries" }, "Ask the same one again first (a busy or broken one)"),
+    h("option", { value: "any" }, "Move on at once, retry nothing"));
+  onFail.value = b.onFail;
+  var retries = h("input", { type: "number", min: "1", max: "20", step: "1", value: b.retries });
+  var start = h("input", { type: "number", min: "5", max: "600", step: "1", value: b.replyStart });
+  var keep = h("input", { type: "checkbox", checked: Boolean(b.keepTrying) });
+  var effort = h("select", {},
+    h("option", { value: "default" }, "Send nothing"),
+    h("option", { value: "follow" }, "Follow Claude Code's thinking setting"),
+    h("option", { value: "low" }, "Low"), h("option", { value: "medium" }, "Medium"), h("option", { value: "high" }, "High"));
+  effort.value = b.effort;
+  var fit = h("input", { type: "checkbox", checked: Boolean(b.fit) });
+  var stay = h("input", { type: "checkbox", checked: Boolean(b.stay) });
+  var detail = h("select", {},
+    h("option", { value: "summary" }, "A summary of each request"),
+    h("option", { value: "full" }, "Everything: the request and the reply too"));
+  detail.value = b.logDetail;
+  var days = h("input", { type: "number", min: "1", max: "3650", step: "1", value: b.logDays });
+  var remote = h("input", { type: "checkbox", checked: Boolean(b.remote) });
+  var links = h("div", {});
+  var err = h("p", { className: "err" });
+
+  var field = function (label, el, hint) {
+    return h("div", { className: "fld" }, h("label", {}, label, hint ? h("span", { className: "hint" }, " " + hint) : null), el);
+  };
+  var check = function (el, label, hint) {
+    return h("label", { className: "chk", style: "text-transform:none;letter-spacing:0;font-size:13px;color:var(--ink-2)" },
+      el, " ", label, hint ? h("span", { className: "muted" }, " \u2014 " + hint) : null);
+  };
+
+  var ranks = S.rankings
+    ? "Rankings fetched " + ago(S.rankings.at) + ", from LMArena."
+    : "No rankings yet: they are fetched the first time this is on, or with Update model info.";
+
+  async function showLinks() {
+    try {
+      var l = await api("/api/link");
+      put(links, h("p", { className: "muted" }, "Open this on another device on your network:"),
+        l.network.length ? l.network.map(function (u) { return h("div", { className: "linkbox" }, u); })
+          : h("p", { className: "muted" }, "This machine has no network address to open it from."));
+    } catch (e) { put(links); }
+  }
+  if (b.remote) showLinks();
+
+  openDialog([
+    h("h2", {}, "Behavior"),
+    h("div", { className: "fields" },
+      field("If a model fails", onFail),
+      field("Tries of one model", retries, "used by Ask the same one again, 1 to 20"),
+      field("A reply must start within", start, "seconds, 5 to 600"),
+      check(keep, "Keep trying when every model is busy", "wait, then go round again, instead of giving Claude Code the error"),
+      field("Reasoning effort", effort, "sent to models that take it"),
+      check(fit, "Tilt the draw by public rankings", "a small nudge toward models people rate higher at coding, agent work and images; the record still decides"),
+      h("p", { className: "muted" }, ranks, " "),
+      check(stay, "Keep a conversation on the model that answered it", "the provider's prompt cache holds"),
+      field("Request log", detail),
+      field("Keep full requests for", days, "days"),
+      check(remote, "Panel from other devices on your network", "needs its key; off means this machine only"),
+      links),
+    err,
+    h("div", { className: "btns" },
+      h("button", { type: "button", onclick: function () { if (closeDialog) closeDialog(); } }, "Cancel"),
+      h("button", { className: "primary", type: "button", onclick: async function () {
+        try {
+          await saveSettings({ behavior: {
+            onFail: onFail.value, retries: Number(retries.value), replyStart: Number(start.value),
+            keepTrying: keep.checked, effort: effort.value, fit: fit.checked, stay: stay.checked,
+            logDetail: detail.value, logDays: Number(days.value), remote: remote.checked,
+          } });
+          if (closeDialog) closeDialog();
+          toast("Saved");
+          if (fit.checked && !S.rankings) updateInfo();
+        } catch (e) { err.textContent = e.message; }
+      } }, "Save")),
+  ], { wide: true });
+  remote.addEventListener("change", function () { if (remote.checked) { put(links, h("p", { className: "muted" }, "Save, then open this again to see the link.")); } else put(links); });
+}
+
+async function updateDialog() {
+  var out = null;
+  openDialog([
+    h("h2", {}, "opencc " + (S.update || "") + " is out"),
+    h("p", {}, "You have " + S.version + ". To update, in a terminal:"),
+    h("div", { className: "linkbox" }, "npm install -g opencc"),
+    h("div", { className: "btns" },
+      h("button", { type: "button", onclick: async function () {
+        try {
+          out = await post("/api/update/check");
+          S.update = out.update;
+          drawSidebar();
+          toast(out.update ? "opencc " + out.update + " is out" : "You have the latest");
+          if (!out.update && closeDialog) closeDialog();
+        } catch (e) { toast(e.message, true); }
+      } }, "Check again"),
+      h("button", { className: "primary", type: "button", onclick: function () { if (closeDialog) closeDialog(); } }, "Close")),
+  ]);
+}
+
 async function saveTag(text) {
   await saveSettings({ replyTag: text });
   toast(text ? "Replies start with " + text : "Replies are sent as they are");
@@ -2926,6 +3165,8 @@ $("lanes").addEventListener("change", async function () {
   toast(n === 1 ? "One model at a time per provider" : n + " at a time per provider");
 });
 $("catalog").addEventListener("click", refreshCatalog);
+$("behavior").addEventListener("click", behaviorDialog);
+$("upd").addEventListener("click", updateDialog);
 $("add-prov").addEventListener("click", function () { providerForm(); });
 $("go-prov").addEventListener("click", function () { location.hash = "#providers"; showPage(); });
 $("q").addEventListener("input", function (e) { query = e.target.value; searchOpen = true; drawProviders(); });
@@ -2986,6 +3227,7 @@ $("reset").addEventListener("click", async function () {
   if (!ok) return;
   var out = await post("/api/stats/reset");
   await loadRecord();
+  USAGE = {};
   drawAll();
   toast(out.moved ? "Reset. The old record is in stats.jsonl.previous" : "Reset");
 });
@@ -3013,7 +3255,7 @@ function applyPrefs() {
   }
   applyPrefs();
   drawAll();
-  await Promise.all([loadRecord(), loadCatalog(), loadRequests(), loadTests()]);
+  await Promise.all([loadRecord(), loadCatalog(), loadRequests(), loadTests(), loadExtras()]);
   ready = true;
   drawAll();
   listen();

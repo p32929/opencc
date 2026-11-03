@@ -49,7 +49,9 @@ Claude Code talks to, and it starts as soon as there is something to route to.
 // keys and settings are in a different file and are not read here.
 if (args.includes("--reset-stats")) {
   const { resetStats } = await import("./stats.js");
+  const { resetUsage } = await import("./usage.js");
   const { moved, previous } = resetStats();
+  resetUsage();
   console.log("");
   console.log(moved
     ? `  Record reset. The old one is at ${previous}`
@@ -87,6 +89,7 @@ async function rememberPort(port) {
     testTimeout: testTimeoutFromEnv(stored),
     testLanes: testLanesFromEnv(stored),
     replyTag: (stored.REPLY_TAG || "").trim(),
+    behavior: (await import("./behavior.js")).behaviorFromEnv(stored),
   });
 }
 
@@ -176,6 +179,21 @@ async function run() {
   console.log("");
   console.log(`  opencc ${version}`);
   console.log(`  panel  ${panelUrl}`);
+
+  // From another device, when that is switched on: the link carries the key.
+  const { behaviorFromEnv } = await import("./behavior.js");
+  const { readStoredConfig } = await import("./configStore.js");
+  if (behaviorFromEnv(readStoredConfig()).remote) {
+    const { panelLinks } = await import("./access.js");
+    for (const link of panelLinks(panel.address().port).network) console.log(`  panel  ${link}   (from another device)`);
+  }
+
+  // Is there a newer opencc? Asked in the background; the line comes when
+  // the answer does, and only if there is news.
+  const { checkForUpdate, newer } = await import("./update.js");
+  checkForUpdate().then((latest) => {
+    if (latest && newer(latest, version)) console.log(`\n  opencc ${latest} is out (you have ${version}). Update: npm install -g opencc\n`);
+  });
 
   await startProxy();
 

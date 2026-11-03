@@ -94,6 +94,73 @@ Other rules:
   hour. One answer clears it.
 - `max_tokens` is not sent. Some backends reject large values.
 
+When a model fails, what happens next is a setting (**Behavior** in the
+sidebar). The default is what is described above. See
+[When a model fails or is slow](#when-a-model-fails-or-is-slow).
+
+## When a model fails or is slow
+
+Everything here is learned or set, never assumed, and none of it is on by
+default unless it says so.
+
+**A reply must start.** A streamed reply is held until its first real chunk.
+A model that doesn't start answering within **A reply must start within**
+(default 60 s, 5 to 600), or answers with an error inside a 200, or ends the
+stream with nothing in it, is passed over and the next model goes on, before
+Claude Code has been sent anything. A keep-alive ping does not count as
+starting. Once started, a stream that goes silent for 150 s fails instead of
+hanging.
+
+**A reply that loops** (the last 200 characters said six times within 12,000)
+is cut and the model told to stop generating. What was sent can't be taken
+back, so it counts against the model. A tool call written out as text (a chat
+template's markup) is not an answer either: the next model is tried when
+that's possible, and it counts against the model when it isn't.
+
+**If a model fails**, by **If a model fails** in Behavior:
+
+| Setting | What it does |
+|---|---|
+| Move on at once (default) | next model; a 5xx is asked again once |
+| Ask the same one again first | for a rate limit, an outage or a timeout, up to **Tries of one model** (1 to 20), waiting as long as the provider said (`Retry-After`, or Gemini's `retryDelay`) |
+| Move on, retry nothing | never asks one model twice |
+
+A provider whose key is refused (401, 402, 403), that can't be reached, or
+whose gateway is down, is not asked again through its other models until the
+other providers have had a turn. A 429 or a 404 is about one model, so its
+provider keeps its place. A 403 that is a web page comes from a gateway and
+counts as an outage.
+
+**Keep trying when every model is busy** (off by default) waits, then goes
+round again until the ten-minute deadline or until Claude Code goes away,
+instead of handing it the error. Only for failures waiting can fix.
+
+**A part of the request a model refuses** (`temperature`, `reasoning_effort`,
+`stream_options`, streaming, images, or tool schemas with `anyOf`) is left
+out and the request sent again. If that works, it is remembered for that
+model for a day (`~/.opencc/model-learned.json`). If it doesn't, the first
+refusal stands and nothing is learned. Tool schemas are flattened to what
+Gemini takes.
+
+**Stay on the model that worked** (off by default): a conversation goes back
+to the model that answered it while that model is available, so the
+provider's prompt cache holds. A conversation is known by its system prompt
+and first message.
+
+**Reasoning effort** (default: nothing is sent): `low`, `medium`, `high`, or
+follow Claude Code's thinking budget.
+
+**Public rankings** (off by default): **Tilt the draw by public rankings**
+adds a small bonus to models people rate higher on
+[LMArena](https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset)
+for what the request needs: code always, agent work when tools are offered,
+images when there are some, long input when it is long. It is a thumb on
+the scale like your provider ranking, about a tenth at most; a model that
+keeps failing still sinks. The rankings are fetched once a week in the
+background into `~/.opencc/rankings.json`, and **Update model info** fetches
+them again along with models.dev. The Coding, Web apps and Vision columns on
+Your models always show them once fetched.
+
 ## Request size
 
 Claude Code sends big requests. A model with a small window refuses one with a
@@ -115,9 +182,32 @@ that size or larger puts it at the back of the queue, behind even a
 rate-limited model: the rate-limited one will work in a minute, this one never
 will at this size.
 
-Sizes are counted in characters, not tokens. Nothing here converts between the
-two, so the unit only has to be the same on both sides of a comparison, and
-characters are the one that can be measured without guessing.
+Sizes in the record are counted in characters. Against a model's window they
+are counted in tokens, estimated the way tokenizers split text (a word or a
+number is about one token, every symbol one), never below characters ÷ 4, and
+scaled by the ratio learned from what each provider reports. Code, CSS and
+JSON came out up to twice too low when it was a flat characters ÷ 3.5.
+
+**Where a model's window comes from**, most trusted first:
+
+1. what you set on its setup,
+2. what **Measure** found (one oversized request: the server's error states
+   its limit),
+3. what the running server says: llama.cpp (`/props`), LM Studio, Ollama and
+   Ollama Cloud (`/api/ps`, `/api/show`), vLLM and a `/models` list; asked
+   once a day per model, when a request first goes to it,
+4. models.dev's published window.
+
+Then two things lower it, each for a day, and the table's tooltip says which:
+a refusal that states its limit ("maximum context length is 131072"), or a
+silent cut seen twice (Ollama beyond its `num_ctx` drops the start: far fewer
+tokens counted than were sent); and a per-minute token cap, which is yours,
+not the model's. A bigger request that works lifts a learned limit.
+
+A model known not to call tools (models.dev, or you) is tried after the ones
+that can for a request with tools; the same for images. A model that can't
+see images gets a note where the image was, and one that can't call tools
+gets the conversation's tool turns as plain text.
 
 ## What a model can do
 
@@ -203,6 +293,33 @@ time, so thousands of models scroll smoothly.
 Unlike HeartCode there is no hand-made order and no rotation rules: the order
 comes from the record.
 
+**Your models** also shows each model's **Coding**, **Web apps** and
+**Vision** place in LMArena (the top tenth in green; hover for the score and
+votes), what it has **Used** in tokens and what it has **Spent**, from the
+provider's own figure or models.dev's price. **Update model info** fetches
+models.dev and the rankings together. While a test run is going the list
+holds still: filters and sorting wait, Stop still works.
+
+**Requests** shows where in the walk the reply came from ("#2 of 3" is a
+fallback), the time to the first words, tokens and cost. With **Request log**
+set to *Everything* in Behavior, each request also keeps the whole request and
+the reply (`~/.opencc/request-detail/`, removed after **Keep full requests
+for** days, 3 by default). Those hold your conversation, so it is off by
+default.
+
+**Behavior** (sidebar) holds the settings above, plus **Panel from other
+devices on your network**.
+
+**Who can open the panel.** It answers this machine, with no key. Any request
+must name this machine in its `Host` header, and a request made by a web page
+from another site is refused. With **Panel from other devices** on, devices on
+your private network can open it with the link opencc prints
+(`http://192.168.x.x:3450/?t=...`); the key is in `~/.opencc/panel-key`, goes
+into a cookie, and is taken out of the address bar. Off by default.
+
+opencc checks npm for a newer version at each start. The panel says so in the
+sidebar, and the terminal prints a line.
+
 ![Picking models](https://res.cloudinary.com/m0jnrul4/image/upload/v1793598232/19daf0e5-2e20-49d7-9cd2-f51f7ff5e127.png)
 
 ## Reset
@@ -231,6 +348,19 @@ are numbered: first has no suffix, then `_2`, `_3`.
 | `TEST_TIMEOUT` | seconds the panel's Test waits for a model, default 10 |
 | `TEST_LANES` | models tested at once per provider, default 4 |
 | `PROVIDER_RANK` | providers you prefer, best first, by base URL |
+| `REPLY_TAG` | label put in front of each reply, e.g. `[{provider}-{model}]` |
+| `ON_FAIL` | `failure` (default), `retries` or `any` |
+| `RETRIES` | tries of one model for `retries`, 1 to 20, default 2 |
+| `REPLY_START` | seconds a streamed reply may take to start, default 60 |
+| `KEEP_TRYING` | `on`: when everything is busy, wait and go round again |
+| `EFFORT` | `low`, `medium`, `high` or `follow`; default sends nothing |
+| `BEST_FIT` | `on`: tilt the draw by public rankings |
+| `STAY` | `on`: keep a conversation on the model that answered it |
+| `LOG_DETAIL` | `full` keeps whole requests and replies; default `summary` |
+| `LOG_DAYS` | days `full` detail is kept, default 3 |
+| `PANEL_REMOTE` | `on`: panel answers other devices on your network, with its key |
+
+Only what differs from the default is written.
 
 Old configs with `BIG_MODEL` and `SMALL_MODEL` still work. Both become one
 `MODELS` list.
@@ -243,6 +373,64 @@ OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
 ```
 
 ## Changelog
+
+### 5.1.0 - 2026-11-03
+
+From HeartCode's 0.1.38 to 0.1.42, the parts that belong in a proxy.
+
+**Added**
+
+- **A reply must start**: a streamed reply is held until it has begun, so a
+  model that never starts, errors inside a 200 or ends with nothing hands over
+  to the next one (default 60 s, a setting). A stream that goes silent for 150
+  s fails instead of hanging. Loops are cut. A tool call written out as text
+  is not an answer.
+- **Parts a model refuses are left out and learned**: `temperature`,
+  `reasoning_effort`, `stream_options`, streaming, images and tool schemas,
+  remembered per model for a day. Tool schemas are flattened for Gemini.
+- **If a model fails** (Behavior): move on at once (the default), ask the same
+  one again first up to N times, or retry nothing. `Retry-After` and Gemini's
+  `retryDelay` are honoured and cool the model for as long as it asked.
+  **Keep trying when every model is busy**, off by default.
+- A provider whose key is refused, or that can't be reached, is not asked
+  again through its other models until the others have had a turn.
+- **Windows learned**: a refusal that states its limit, a silent cut, and a
+  per-minute cap lower a model's window for a day, and a bigger request that
+  works lifts it. Local servers (llama.cpp, LM Studio, Ollama, vLLM) are asked
+  what window they run with. Sizes are estimated like a tokenizer, not
+  characters ÷ 5.
+- **Stay on the model that worked**: a conversation goes back to its model,
+  so the provider's prompt cache holds. Off by default.
+- **Public rankings** (LMArena): Coding, Web apps and Vision columns on Your
+  models, and an optional small tilt of the draw. Fetched once a week.
+- **Used and Spent** per model, from usage and the provider's or models.dev's
+  price.
+- **Reasoning effort** setting, including following Claude Code's thinking
+  budget.
+- **Update model info**: models.dev and the rankings in one click.
+- The list holds still while models are tested.
+- **Requests** shows the place in the walk, time to first words, tokens and
+  cost; **Request log: Everything** keeps each request and reply.
+- **Panel from other devices**, with a key; every request must name this
+  machine, and a request from another site is refused.
+- A newer opencc is announced in the panel and the terminal.
+
+**Changed**
+
+- Name matching against models.dev: `gpt-oss:120b` is `gpt-oss-120b`,
+  `:free` and `-cloud` are dropped a part at a time, `-latest` is the newest
+  dated version, and images count only if every provider that lists the model
+  takes them.
+- Tool call ids go out as nine letters and digits, as every provider takes.
+  A model's own `<think>` block is no longer shown as its answer. A model that
+  can't see images gets a note instead of the image.
+- Changing the port no longer drops the ranking, timeouts and label from the
+  config.
+
+**Not copied from HeartCode**: it re-sends a model's reasoning to the model
+that wrote it, which needs a reply format opencc doesn't have; opencc turns
+thinking into nothing. Its separate log kinds don't apply to a proxy: there
+is one request log, summary or full.
 
 ### 5.0.0 - 2026-11-02
 

@@ -13,6 +13,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { GLOBAL_CONFIG_DIR, MODELS_DEV_PATH } from "./paths.js";
 import { withSetup } from "./setup.js";
+import { windowFor, ratioOf } from "./learned.js";
 
 const URL_DEFAULT = "https://models.dev/api.json";
 
@@ -79,30 +80,28 @@ let table = null;
 // the page and a scan of nine thousand entries per call turned a cached
 // catalogue listing into nearly four seconds of work.
 //
-// Two indexes: one per host, since the same name can mean different things
-// at two providers, and one of every name anywhere, which is what makes this
-// work behind a key-rotating proxy whose host models.dev has never seen.
+// Every entry under its name made plain, the whole id and its last part, with
+// the host of the provider that lists it and its place in the list (ties go
+// to the first). Names are matched against this, not scanned.
 let index = null;
+let memo = new Map();
 
 function buildIndex() {
-  const byHost = new Map();
-  const anywhere = new Map();
-
+  const byName = new Map();
+  let n = 0;
   for (const provider of Object.values(table?.providers ?? {})) {
     const host = provider.api ? hostOf(provider.api) : "";
-    const forHost = host ? byHost.get(host) ?? new Map() : null;
-    if (forHost && host) byHost.set(host, forHost);
-
     for (const [id, info] of Object.entries(provider.models)) {
-      for (const name of [norm(id), norm(id.split("/").pop())]) {
+      const hit = { host, info, n: n++ };
+      for (const name of new Set([norm(id), norm(id.split("/").pop())])) {
         if (!name) continue;
-        if (forHost && !forHost.has(name)) forHost.set(name, info);
-        if (!anywhere.has(name)) anywhere.set(name, info);
+        const list = byName.get(name);
+        if (list) list.push(hit); else byName.set(name, [hit]);
       }
     }
   }
-
-  index = { byHost, anywhere };
+  index = byName;
+  memo = new Map();
 }
 
 function readCache() {
@@ -129,6 +128,7 @@ export async function loadCatalog({
   if (!table) {
     table = readCache();
     index = null;
+    memo = new Map();
   }
   // Kept until you ask for it again. There was a day's expiry here, which
   // meant re-downloading six megabytes to be told the same thing.
@@ -139,6 +139,7 @@ export async function loadCatalog({
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     table = { v: VERSION, at: Date.now(), providers: compact(await res.json()) };
     index = null;
+    memo = new Map();
     mkdirSync(dirname(MODELS_DEV_PATH) || GLOBAL_CONFIG_DIR, { recursive: true });
     writeFileSync(MODELS_DEV_PATH, JSON.stringify(table));
   } catch (err) {
@@ -170,57 +171,111 @@ const hostOf = (url) => {
 // case carry no meaning here.
 const norm = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
+// A "...-latest" name models.dev doesn't list: the newest dated version it
+// does list (magistral-small-latest -> magistral-small-2509), its entries at
+// every provider. [] if none.
+function newestOf(name) {
+  const base = /^(.+?)[-_.:]?latest$/i.exec(name)?.[1];
+  if (!base) return [];
+  // A date or version after the name (2509, 20250929); a vendor before it
+  // (mistral.magistral-small-2509).
+  const re = new RegExp(`^[a-z]{0,12}${norm(base)}(\\d{4,8})$`);
+  let best = null;
+  for (const [k, list] of index) {
+    const d = re.exec(k)?.[1];
+    if (d && (!best || Number(d) > Number(best.d))) best = { d, list };
+  }
+  return best ? [...best.list].sort((a, b) => a.n - b.n) : [];
+}
+
 // What is known about `model` as served by the backend at `baseUrl`, or null.
 //
+// Found by its name however it is written (google/gemini-2.5-flash,
+// models/gemini-2.5-flash, gpt-oss:120b is gpt-oss-120b). Not by its whole
+// name: without what a provider adds at the end (":free", "-cloud",
+// "-instruct-turbo"), one part at a time, the most specific first.
+//
 // The provider whose own API URL matches is asked first, because the same
-// name can mean different things at two providers — a gateway may serve a
-// quantised build with a shorter window. Only if no provider matches by URL
-// does any provider listing that name answer, which is what makes this work
-// for key-rotating proxies and self-hosted gateways.
+// name can mean different things at two providers (a gateway may serve a
+// quantised build with a shorter window). Otherwise, among all that list it,
+// the window most of them say: a proxy or a provider models.dev does not know
+// serves the model at its usual size. And not at one it does not know: images
+// only when every provider that lists the model takes them, since one that
+// does not would refuse the request.
 export function lookupModel(baseUrl, model) {
   if (!table || !model) return null;
   if (!index) buildIndex();
+  const host = hostOf(baseUrl);
+  const memoKey = `${host}\u0000${model}`;
+  if (memo.has(memoKey)) return memo.get(memoKey);
 
-  const wanted = [norm(model), norm(String(model).split("/").pop())];
-  const forHost = index.byHost.get(hostOf(baseUrl));
+  const last = (m) => m.split("/").pop();
+  const lookup = (names) =>
+    [...new Set(names.map(norm).flatMap((w) => index.get(w) ?? []))].sort((a, b) => a.n - b.n);
+  let hits = lookup([model, String(model).replace(/^models\//, ""), last(String(model))]);
+  for (let name = last(String(model)); !hits.length && /[:-][^:-]+$/.test(name);) {
+    hits = lookup([(name = name.replace(/[:-][^:-]+$/, ""))]);
+  }
+  if (!hits.length) hits = newestOf(last(String(model)));
 
-  if (forHost) {
-    for (const name of wanted) {
-      const hit = forHost.get(name);
-      if (hit) return hit;
-    }
+  let found = null;
+  if (hits.length) {
+    const own = host ? hits.filter((h) => h.host === host) : [];
+    const list = own.length ? own : hits;
+    const count = (x) => list.filter((y) => y.info.context === x.info.context).length;
+    const best = list.reduce((a, b) => (count(b) > count(a) || (count(b) === count(a) && b.info.context > a.info.context) ? b : a));
+    found = own.length ? best.info : { ...best.info, vision: list.every((x) => x.info.vision) };
   }
-  for (const name of wanted) {
-    const hit = index.anywhere.get(name);
-    if (hit) return hit;
-  }
-  return null;
+  memo.set(memoKey, found);
+  return found;
 }
 
-// Characters per token, used only to turn a published context window into a
-// request size opencc can compare against.
-//
-// Deliberately generous. Real text runs about 3.5 characters per token and
-// code rather less, so assuming 5 understates how many tokens a request
-// carries and the ceiling only trips when a request overflows even on the
-// kindest reading. Being wrong here would demote a model that could have
-// answered, so the bias is all one way.
-const CHARS_PER_TOKEN = 5;
-
-// Does the catalogue say this model cannot possibly hold a request this big?
-// Null means it does not know, which is not a no.
 // What is known about a model, with what you said about it laid over what
-// models.dev says: a window you set, or the one the server stated when asked,
-// beats the published one.
+// models.dev says: a window you set beats everything; then what the server
+// stated when asked (measured, or what the running server says), models.dev's
+// published one, and what a refusal showed (see learned.js).
 export function factsFor(baseUrl, model) {
-  return withSetup(lookupModel(baseUrl, model), baseUrl, model);
+  const facts = withSetup(lookupModel(baseUrl, model), baseUrl, model);
+  if (!facts || facts.set?.context) return facts;
+  const w = windowOfModel(baseUrl, model, facts);
+  return w ? { ...facts, context: w.size, contextFrom: w.from } : facts;
 }
 
-export function tooBigForCatalog(baseUrl, model, chars) {
+// The window to plan with: { size, from } or null. A window you set wins; then
+// the ladder in learned.js. `facts` is what factsFor started from, so it can
+// be called from inside it.
+export function windowOfModel(baseUrl, model, facts = withSetup(lookupModel(baseUrl, model), baseUrl, model)) {
+  if (facts?.set?.context) return { size: facts.set.context, from: "you" };
+  return windowFor(baseUrl, model, {
+    measured: facts?.set?.measured,
+    size: lookupModel(baseUrl, model)?.context,
+  });
+}
+
+// Does this model's window say it cannot hold a request this big?
+// Null means it does not know, which is not a no.
+//
+// `tokens` is the request estimated the way tokenizers split it (textfix.js);
+// without it, characters at five to a token, which is deliberately generous:
+// being wrong here would demote a model that could have answered, so the
+// bias is all one way.
+export function tooBigForCatalog(baseUrl, model, chars, tokens) {
   if (!Number.isFinite(chars)) return false;
-  const known = factsFor(baseUrl, model);
-  if (!known?.context) return false;
-  return chars / CHARS_PER_TOKEN > known.context;
+  const window = windowOfModel(baseUrl, model);
+  if (!window) return false;
+  const need = Number.isFinite(tokens)
+    ? Math.max(tokens * ratioOf(baseUrl, model), Math.min(tokens, chars / 4))
+    : chars / 5;
+  return need > window.size;
+}
+
+// Is the model known not to do something this request needs? What it can do
+// comes from models.dev and from you; a model nobody has described is not
+// "unfit", it is unknown.
+export function unfitFor(baseUrl, model, needs = {}) {
+  const facts = factsFor(baseUrl, model);
+  if (!facts) return false;
+  return (needs.tools && facts.tools === false) || (needs.vision && facts.vision === false) || false;
 }
 
 // For tests and for `opencc --reset-stats`, which should not leave a cached
@@ -228,4 +283,5 @@ export function tooBigForCatalog(baseUrl, model, chars) {
 export function forgetCatalog() {
   table = null;
   index = null;
+  memo = new Map();
 }

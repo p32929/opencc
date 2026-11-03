@@ -28,7 +28,14 @@ import { saveSetup, saveMeasured, forgetSetup, setupFor } from "./setup.js";
 import {
   tests, runState, startRun, stopRun, running, testOne, forgetTests, onRunEnd,
 } from "./testrun.js";
-import { listRequests, clearRequests, KEEP } from "./reqlog.js";
+import { listRequests, clearRequests, readDetail, KEEP } from "./reqlog.js";
+import { authorize, panelLinks } from "./access.js";
+import { readStoredConfig } from "./configStore.js";
+import { behaviorFromEnv } from "./behavior.js";
+import { rankings, loadRankings, rankIn } from "./rankings.js";
+import { forgetRankingsCache } from "./fit.js";
+import { allUsage, resetUsage } from "./usage.js";
+import { updateFor, checkForUpdate } from "./update.js";
 import { bus } from "./events.js";
 import { LISTS_PATH, OLD_LISTS_PATH, TESTS_PATH, PREFS_PATH, GLOBAL_CONFIG_DIR } from "./paths.js";
 import { page } from "./panelPage.js";
@@ -145,6 +152,9 @@ function stateOf() {
     testTimeout: cfg.testTimeout,
     testLanes: cfg.testLanes,
     replyTag: cfg.replyTag,
+    behavior: cfg.behavior,
+    rankings: rankingsMeta(),
+    update: updateFor(version),
     prefs: prefs(),
     version,
   };
@@ -153,6 +163,30 @@ function stateOf() {
 // The facts the page shows for a model: models.dev's with yours laid over
 // them, and where they came from.
 const knownOf = (baseUrl, model) => factsFor(baseUrl, model) ?? undefined;
+
+// What the public rankings are and when they were fetched, for the sidebar.
+function rankingsMeta() {
+  const data = loadRankings();
+  return data ? { at: data.fetched, source: data.source, lists: Object.keys(data.lists).length } : null;
+}
+
+// Where each of these models stands in the rankings the page shows: coding,
+// web apps and vision, as { rank, of, score, votes } or nothing.
+const RANK_COLUMNS = { coding: "text:coding", webdev: "webdev:webdev", vision: "vision:overall" };
+function ranksOf(models) {
+  const data = loadRankings();
+  if (!data) return {};
+  const out = {};
+  for (const model of models) {
+    const row = {};
+    for (const [column, list] of Object.entries(RANK_COLUMNS)) {
+      const r = rankIn(model, list, data);
+      if (r) row[column] = r;
+    }
+    if (Object.keys(row).length) out[model] = row;
+  }
+  return out;
+}
 
 // A provider's models and what is known about each: what its own list says
 // (name, window, owner, date, description, price), and what is known from
@@ -189,9 +223,21 @@ export const DEFAULT_PANEL_PORT = 3450;
 
 function listen(server, port) {
   return new Promise((resolve, reject) => {
-    server.once("error", reject);
+    server.once("error", (err) => {
+      // No IPv6 on this machine: every IPv4 address instead.
+      if (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL") {
+        server.once("error", reject);
+        server.listen(port, "0.0.0.0", () => resolve(server));
+        return;
+      }
+      reject(err);
+    });
     // localhost only: this edits your providers.
-    server.listen(port, "localhost", () => resolve(server));
+    //
+    // Bound to every address so that, when you switch it on, other devices on
+    // your network can reach it; whether they may is decided per request
+    // (access.js), and the answer is no unless you said yes.
+    server.listen(port, "::", () => resolve(server));
   });
 }
 
@@ -211,6 +257,19 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     const path = url.pathname;
+
+    // Who is asking, before anything is read or changed.
+    const verdict = authorize(req, url, { remote: behaviorFromEnv(readStoredConfig()).remote });
+    if (!verdict.ok) {
+      res.writeHead(verdict.status, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end(verdict.message);
+      return;
+    }
+    if (verdict.redirect) {
+      res.writeHead(302, { Location: verdict.redirect, "Set-Cookie": verdict.cookie });
+      res.end();
+      return;
+    }
 
     try {
       if (req.method === "GET" && (path === "/" || path === "/index.html")) {
@@ -488,7 +547,60 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
       // Start over. Every model goes back to untried and routing is even odds
       // again until real requests fill it back in.
       if (req.method === "POST" && path === "/api/stats/reset") {
+        resetUsage();
         json(res, 200, resetStats());
+        return;
+      }
+
+      // Tokens and money spent per model, keyed like the record.
+      if (req.method === "GET" && path === "/api/usage") {
+        json(res, 200, { usage: allUsage() });
+        return;
+      }
+
+      // Where each model stands in the public rankings.
+      if (req.method === "POST" && path === "/api/ranks") {
+        const { models } = await readBody(req);
+        json(res, 200, { ranks: ranksOf(Array.isArray(models) ? models.map(String) : []), meta: rankingsMeta() });
+        return;
+      }
+
+      // models.dev and the rankings, both fetched again: the one button.
+      if (req.method === "POST" && path === "/api/info/update") {
+        const out = { errors: [] };
+        try {
+          await loadCatalog({ force: true });
+        } catch (err) {
+          out.errors.push(err.message);
+        }
+        try {
+          if (!(await rankings({ now: true }))) throw new Error("could not get the rankings (huggingface.co)");
+          forgetRankingsCache();
+        } catch (err) {
+          out.errors.push(err.message);
+        }
+        json(res, 200, { ...out, size: catalogSize(), age: catalogAge(), rankings: rankingsMeta() });
+        return;
+      }
+
+      // How to open the panel: here, and from other devices.
+      if (req.method === "GET" && path === "/api/link") {
+        json(res, 200, panelLinks(req.socket.localPort));
+        return;
+      }
+
+      // A newer opencc, asked of npm now.
+      if (req.method === "POST" && path === "/api/update/check") {
+        await checkForUpdate();
+        json(res, 200, { update: updateFor(version) });
+        return;
+      }
+
+      // One request in full, kept when the log is set to keep them.
+      if (req.method === "GET" && path === "/api/request") {
+        const detail = readDetail(url.searchParams.get("id"));
+        if (!detail) throw Object.assign(new Error("that request's detail is not kept"), { status: 404 });
+        json(res, 200, detail);
         return;
       }
 

@@ -47,3 +47,24 @@ export const SETUP_PATH = join(GLOBAL_CONFIG_DIR, "model-setup.json");
 // than in the browser, whose storage belongs to an address, and the panel's
 // address changes whenever its port does.
 export const PREFS_PATH = join(GLOBAL_CONFIG_DIR, "settings-page.json");
+
+// LMArena's public rankings (coding, web apps, vision…), fetched once a week
+// and used to tilt the draw toward models people rate higher.
+export const RANKINGS_PATH = join(GLOBAL_CONFIG_DIR, "rankings.json");
+
+// What opencc has learned about how each provider's model behaves: parts of a
+// request it refuses, the window it really takes. Learned by asking, kept for
+// a day, then learned again if it still holds.
+export const LEARNED_PATH = join(GLOBAL_CONFIG_DIR, "model-learned.json");
+
+// Tokens and money spent per model.
+export const USAGE_PATH = join(GLOBAL_CONFIG_DIR, "usage.json");
+
+// The panel's key, for reaching it from another device.
+export const PANEL_KEY_PATH = join(GLOBAL_CONFIG_DIR, "panel-key");
+
+// The latest version npm has, asked once per start.
+export const UPDATE_PATH = join(GLOBAL_CONFIG_DIR, "update-check.json");
+
+// Full requests and replies, one file each, when the log is set to keep them.
+export const DETAIL_DIR = join(GLOBAL_CONFIG_DIR, "request-detail");

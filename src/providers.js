@@ -6,6 +6,7 @@
 // Ported from HeartCode's settings server, because providers disagree about
 // all of this and HeartCode already learned how.
 import { readStoredConfig, writeStoredConfig } from "./configStore.js";
+import { behaviorFromEnv, changeBehavior } from "./behavior.js";
 import {
   providersFromEnv, streamingFromEnv, rankFromEnv, testTimeoutFromEnv, testLanesFromEnv,
 } from "./config.js";
@@ -423,6 +424,7 @@ export function loadConfig() {
     testTimeout: testTimeoutFromEnv(stored),
     testLanes: testLanesFromEnv(stored),
     replyTag: (stored.REPLY_TAG || "").trim(),
+    behavior: behaviorFromEnv(stored),
   };
 }
 
@@ -575,6 +577,7 @@ export function saveSettings(input) {
     if (input.streaming !== undefined) cfg.streaming = input.streaming !== false;
     if (Array.isArray(input.rank)) cfg.rank = input.rank;
     if (input.testTimeout !== undefined) cfg.testTimeout = testTimeoutFromEnv({ TEST_TIMEOUT: input.testTimeout });
+    if (input.behavior && typeof input.behavior === "object") cfg.behavior = changeBehavior(cfg.behavior, input.behavior);
     if (input.replyTag !== undefined) cfg.replyTag = String(input.replyTag ?? "").replace(/[\r\n]+/g, " ").trim().slice(0, 200);
     if (input.testLanes !== undefined) cfg.testLanes = testLanesFromEnv({ TEST_LANES: input.testLanes });
   });

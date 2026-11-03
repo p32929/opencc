@@ -1,4 +1,5 @@
 import { generateId } from "./ids.js";
+import { callId, stripThink } from "./textfix.js";
 
 // Every model a provider offers is a candidate for every request. The name
 // Claude Code asks for is ignored: it names Anthropic models, which say
@@ -66,7 +67,7 @@ function convertUserMessage(content) {
     } else if (block.type === "tool_result") {
       toolMessages.push({
         role: "tool",
-        tool_call_id: block.tool_use_id,
+        tool_call_id: callId(block.tool_use_id),
         content: toolResultToString(block.content),
       });
     }
@@ -112,7 +113,9 @@ function convertAssistantMessage(content, baseUrl) {
       text += block.text;
     } else if (block.type === "tool_use") {
       const call = {
-        id: block.id,
+        // Nine letters and digits, which every provider takes; the same for
+        // a call and its result, whenever they are sent.
+        id: callId(block.id),
         type: "function",
         function: { name: block.name, arguments: JSON.stringify(block.input ?? {}) },
       };
@@ -169,7 +172,13 @@ function convertToolChoice(toolChoice) {
 
 // baseUrl identifies which provider this request is being built for, so any
 // remembered thought_signature is only replayed to the backend that issued it.
-export function toOpenAIRequest(anthropicReq, model, baseUrl, stream = undefined) {
+//
+// can: what is known about the model, { vision, tools } (false: it is known not
+// to). A model that cannot see images gets a note where the image was; one
+// that cannot call tools gets none, and the tool turns already in the
+// conversation as plain text. effort: a reasoning_effort to send.
+export const NO_IMAGE_NOTE = "(an image was here, but this model can't see images)";
+export function toOpenAIRequest(anthropicReq, model, baseUrl, stream = undefined, { can = {}, effort } = {}) {
   const messages = [];
   const systemParts = [];
   const system = systemToOpenAI(anthropicReq.system);
@@ -213,6 +222,27 @@ export function toOpenAIRequest(anthropicReq, model, baseUrl, stream = undefined
   if (request.stream) {
     request.stream_options = { include_usage: true };
   }
+  if (effort) request.reasoning_effort = effort;
+
+  if (can.vision === false) {
+    for (const m of request.messages) {
+      if (Array.isArray(m.content)) {
+        m.content = m.content.map((p) => (p.type === "image_url" ? { type: "text", text: NO_IMAGE_NOTE } : p));
+      }
+    }
+  }
+  if (can.tools === false) {
+    delete request.tools;
+    delete request.tool_choice;
+    request.messages = request.messages.map((m) => {
+      if (m.role === "tool") return { role: "user", content: `(the result of your earlier tool call)\n${m.content}` };
+      if (m.role === "assistant" && m.tool_calls) {
+        const calls = m.tool_calls.map((c) => `(you called ${c.function.name} with ${c.function.arguments})`).join("\n");
+        return { role: "assistant", content: [m.content, calls].filter(Boolean).join("\n") };
+      }
+      return m;
+    });
+  }
 
   return request;
 }
@@ -244,7 +274,9 @@ export function toAnthropicResponse(openaiResp, requestedModel, baseUrl) {
   const msg = choice.message;
   const content = [];
 
-  if (msg.content) content.push({ type: "text", text: msg.content });
+  // A model's own <think> block is its thinking, not its answer.
+  const said = typeof msg.content === "string" ? stripThink(msg.content) : msg.content;
+  if (said) content.push({ type: "text", text: said });
   if (msg.tool_calls) {
     for (const call of msg.tool_calls) {
       rememberToolExtra(call.id, call.extra_content, baseUrl);

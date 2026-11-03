@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { GLOBAL_CONFIG_PATH } from "./paths.js";
+import { behaviorFromEnv } from "./behavior.js";
 
 export function parseEnvFile(path) {
   if (!existsSync(path)) return {};
@@ -187,6 +188,7 @@ function readConfig() {
     testTimeout: testTimeoutFromEnv(merged),
     testLanes: testLanesFromEnv(merged),
     replyTag: (merged.REPLY_TAG || "").trim(),
+    behavior: behaviorFromEnv(merged),
   };
 }
 

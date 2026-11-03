@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_PATH } from "./paths.js";
+import { behaviorToEnv } from "./behavior.js";
 import { parseEnvFile, DEFAULT_TEST_TIMEOUT, DEFAULT_TEST_LANES } from "./config.js";
 
 export function readStoredConfig() {
@@ -12,7 +13,7 @@ const joinModels = (models) => (Array.isArray(models) ? models.join(", ") : mode
 // `models` takes an array or a plain string. The order of either is only how
 // the file reads; what gets called is decided from the record in stats.jsonl.
 // `streaming` defaults to on, so it only gets written when it's switched off.
-export function writeStoredConfig({ providers, port, streaming = true, rank = [], testTimeout, testLanes, replyTag }) {
+export function writeStoredConfig({ providers, port, streaming = true, rank = [], testTimeout, testLanes, replyTag, behavior }) {
   mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
 
   const lines = [];
@@ -47,6 +48,7 @@ export function writeStoredConfig({ providers, port, streaming = true, rank = []
 
   // Off by default, so it is written only once there is one.
   if (replyTag) lines.push(`REPLY_TAG=${replyTag}`);
+  lines.push(...behaviorToEnv(behavior));
 
   writeFileSync(GLOBAL_CONFIG_PATH, lines.join("\n") + "\n", { mode: 0o600 });
 }

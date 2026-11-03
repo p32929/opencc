@@ -111,6 +111,8 @@ function stubFetch(responders) {
       // The walk reads a non-streamed reply to check it is usable, so a
       // stubbed success has to look like one.
       json: async () => ({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }),
+      // A streamed success has to start, or the walk passes it over.
+      body: new Response('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n').body,
     };
   };
   return seen;
