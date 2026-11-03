@@ -374,6 +374,10 @@ OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
 
 ## Changelog
 
+### 5.1.2 - 2026-11-03
+
+- README: thanks to Reika, OpenCode, Cline, OpenClaw and Pi.
+
 ### 5.1.1 - 2026-11-03
 
 - README: a Thanks section (models.dev, LMArena, contributors).
