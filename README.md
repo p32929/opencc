@@ -661,6 +661,7 @@ opencc leans on other people's work:
 
 - [models.dev](https://models.dev) (the SST team and its contributors) publishes the open catalogue of context windows, prices and abilities behind most of the panel.
 - [LMArena](https://lmarena.ai) publishes the public rankings (via its [Hugging Face dataset](https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset)) behind the Coding, Web apps and Vision columns.
+- [Reika](https://github.com/alexwkleung/reika), [OpenCode](https://github.com/anomalyco/opencode), [Cline](https://github.com/cline/cline), [OpenClaw](https://github.com/openclaw/openclaw) and [Pi](https://github.com/earendil-works/pi): other coding agents whose use cases and findings taught me a lot of what a proxy like this has to handle.
 - Everyone who reported a bug, sent a pull request or starred the repository.
 
 ## Share
