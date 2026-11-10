@@ -2,6 +2,7 @@
 // never in the way: no answer is the same as no news.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { UPDATE_PATH, GLOBAL_CONFIG_DIR } from "./paths.js";
+import { fetch } from "./http.js"; // not the built-in one: see http.js
 
 const REGISTRY = "https://registry.npmjs.org/opencc/latest";
 

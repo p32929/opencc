@@ -10,6 +10,13 @@
 //   retries     how many tries "retries" gives one model (1 to 20)
 //   replyStart  seconds a streamed reply may take to start before it counts
 //               as a failure and the next model goes on (5 to 600)
+//   replyIdle   seconds a reply that has started may go quiet before it counts
+//               as stalled and the next model goes on (10 to 1800). Never
+//               under replyStart: a pause mid-reply has the same causes as a
+//               slow start (a queue, thinking that is not sent)
+//   pick        which model is asked first: "order" (default) goes down
+//               your models in the order saved on Your models, as HeartCode
+//               does; "record" draws by what the record says each has done
 //   keepTrying  when every model fails with something that may pass (a rate
 //               limit, an outage), wait and go round again until the
 //               deadline, instead of giving Claude Code the error
@@ -27,6 +34,8 @@ export const DEFAULTS = {
   onFail: "failure",
   retries: 2,
   replyStart: 60,
+  replyIdle: 150,
+  pick: "order",
   keepTrying: false,
   effort: "default",
   remote: false,
@@ -36,14 +45,15 @@ export const DEFAULTS = {
   logDays: 3,
 };
 
-const ENV = {
-  onFail: "ON_FAIL", retries: "RETRIES", replyStart: "REPLY_START", keepTrying: "KEEP_TRYING", effort: "EFFORT",
+export const ENV = {
+  onFail: "ON_FAIL", retries: "RETRIES", replyStart: "REPLY_START", replyIdle: "REPLY_IDLE", pick: "PICK", keepTrying: "KEEP_TRYING", effort: "EFFORT",
   remote: "PANEL_REMOTE", fit: "BEST_FIT", stay: "STAY", logDetail: "LOG_DETAIL", logDays: "LOG_DAYS",
 };
 
 const ONFAIL = ["failure", "retries", "any"];
 const EFFORTS = ["default", "follow", "low", "medium", "high"];
 const DETAILS = ["summary", "full"];
+const PICKS = ["order", "record"];
 
 const truthy = (v) => ["on", "true", "1", "yes"].includes(String(v ?? "").trim().toLowerCase());
 const whole = (v, lo, hi, fallback) => {
@@ -58,8 +68,10 @@ export function behaviorFromEnv(values = {}) {
   const v = (k) => values[ENV[k]];
   return {
     onFail: oneOf(v("onFail"), ONFAIL, DEFAULTS.onFail),
+    pick: oneOf(v("pick"), PICKS, DEFAULTS.pick),
     retries: whole(v("retries"), 1, 20, DEFAULTS.retries),
     replyStart: whole(v("replyStart"), 5, 600, DEFAULTS.replyStart),
+    replyIdle: whole(v("replyIdle"), 10, 1800, DEFAULTS.replyIdle),
     effort: oneOf(v("effort"), EFFORTS, DEFAULTS.effort),
     keepTrying: truthy(v("keepTrying")),
     remote: truthy(v("remote")),
@@ -89,15 +101,33 @@ export function changeBehavior(current, input = {}) {
     if (!(k in DEFAULTS)) continue;
     const v = input[k];
     if (k === "onFail") ONFAIL.includes(v) ? (next.onFail = v) : bad(`if one fails: ${ONFAIL.join(", ")}`);
+    else if (k === "pick") PICKS.includes(v) ? (next.pick = v) : bad(`pick: ${PICKS.join(" or ")}`);
     else if (k === "effort") EFFORTS.includes(v) ? (next.effort = v) : bad(`effort: ${EFFORTS.join(", ")}`);
     else if (k === "logDetail") DETAILS.includes(v) ? (next.logDetail = v) : bad(`log detail: ${DETAILS.join(" or ")}`);
     else if (k === "fit" || k === "stay" || k === "keepTrying" || k === "remote") typeof v === "boolean" ? (next[k] = v) : bad(`${k}: on or off`);
     else {
-      const range = { retries: [1, 20], replyStart: [5, 600], logDays: [1, 3650] }[k];
+      const range = { retries: [1, 20], replyStart: [5, 600], replyIdle: [10, 1800], logDays: [1, 3650] }[k];
       Number.isInteger(v) && v >= range[0] && v <= range[1] ? (next[k] = v) : bad(`${k}: a whole number, ${range[0]} to ${range[1]}`);
     }
   }
   return next;
+}
+
+// The two waits kept from contradicting each other: a reply that has started
+// may go quiet at least as long as a model gets to start. The one just set
+// stays; the other moves to fit. Changes `b`, and returns what moved and why
+// for the page to say.
+export function fitTimes(b, input = {}) {
+  const notes = [];
+  if (b.replyIdle >= b.replyStart) return notes;
+  if (input.replyIdle !== undefined && input.replyStart === undefined) {
+    b.replyStart = Math.max(5, b.replyIdle);
+    notes.push(`A reply must start within lowered to ${b.replyStart} s too: a model can't get longer to start than a started reply may go quiet`);
+  } else {
+    b.replyIdle = b.replyStart;
+    notes.push(`A started reply may go quiet for raised to ${b.replyIdle} s too: it may pause at least as long as a model gets to start`);
+  }
+  return notes;
 }
 
 // Claude Code's thinking budget as a reasoning_effort, for effort "follow".

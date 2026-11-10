@@ -209,12 +209,13 @@ export const page = () => `<!doctype html>
   .chip button { border: 0; background: none; padding: 0 2px; color: var(--ink-3); font-size: 12px; }
 
   .mt-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); }
-  table.mt { border-collapse: collapse; width: 100%; font-size: 13px; }
-  table.mt th, table.mt td { padding: 7px 9px; text-align: left; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  table.mt { border-collapse: collapse; width: 100%; font-size: 12px; }
+  table.mt th, table.mt td { padding: 6px 4px; text-align: left; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  table.mt th:first-child, table.mt td:first-child { padding-left: 9px; }
   /* One height for every row, for the same reason as the catalogue's. */
   table.mt tbody tr:not(.spacer) td { height: 38px; padding-top: 0; padding-bottom: 0; }
   table.mt tbody tr.spacer td { padding: 0; border: 0; }
-  table.mt thead th { background: var(--panel-2); position: sticky; top: 0; z-index: 1; font-weight: 600; font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; }
+  table.mt thead th { background: var(--panel-2); position: sticky; top: 0; z-index: 1; font-weight: 600; font-size: 10.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .02em; }
   table.mt thead th button { border: 0; background: none; padding: 2px 0; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; }
   table.mt thead th button:hover { color: var(--ink); background: none; }
   table.mt thead th button.on { color: var(--accent); }
@@ -222,11 +223,19 @@ export const page = () => `<!doctype html>
   table.mt tbody tr:hover { background: var(--hover); }
   table.mt tr.picked { background: var(--accent-soft); }
   table.mt tr.dim td { opacity: .45; }
-  table.mt td.m { font-family: var(--mono); font-size: 12.5px; color: var(--ink); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
-  table.mt td.num, table.mt th.num { text-align: right; font-family: var(--mono); font-size: 12px; }
+  /* The model takes what the other columns leave, its name over its provider,
+     and is cut with an ellipsis rather than pushing the table past the screen. */
+  table.mt td.m { font-family: var(--mono); font-size: 12px; color: var(--ink); width: 100%; max-width: 0; overflow: hidden; line-height: 1.25; }
+  table.mt td.m div { overflow: hidden; text-overflow: ellipsis; }
+  table.mt td.m .sub { font: 10.5px var(--sans, inherit); color: var(--ink-3); }
+  table.mt th.m button + button { margin-left: 5px; }
+  table.mt td.num, table.mt th.num { text-align: right; font-family: var(--mono); font-size: 11.5px; }
+  .abil { display: inline-flex; gap: 3px; }
+  .abil span { font: 600 10px var(--mono); width: 17px; height: 17px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; background: var(--rule); color: var(--ink-3); }
+  .abil span.on { background: var(--accent-soft); color: var(--ok); }
   /* --- the last test, per model --------------------------------------- */
-  .try { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
-  .try .msg { font: 11.5px var(--mono); color: var(--ink-3); }
+  .try { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .try .msg { font: 11px var(--mono); color: var(--ink-3); }
   .try.ok .msg { color: var(--ok); }
   .try.bad .msg { color: var(--bad); cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
   .try.ok .msg { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
@@ -329,7 +338,11 @@ export const page = () => `<!doctype html>
   .mrow .can { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46%; text-align: right; }
   .mrow .forget { border: 0; background: none; color: var(--ink-3); padding: 2px 6px; }
   .mrow .forget:hover { color: var(--bad); background: none; }
-  .src { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .src { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 5px; white-space: nowrap; line-height: 1.2; }
+  table.mt .src { white-space: normal; max-width: 100px; }
+  table.mt .src.warn { flex-wrap: nowrap; }
+  table.mt .src button { padding: 1px 5px; font-size: 11px; }
+  table.mt .src .meta { font-size: 10.5px; color: var(--ink-3); }
   .src.warn .msg { color: var(--warn); font: 11.5px var(--mono); }
 
   /* the first start: what to do, and where you are */
@@ -477,8 +490,7 @@ export const page = () => `<!doctype html>
       <div class="head">
         <div>
           <h1>Your models</h1>
-          <p class="lead">Everything opencc can route to. Order here means nothing: which one answers
-            a request is drawn from the Record column, fresh every time, so load spreads over what works.</p>
+          <p class="lead">Everything opencc can route to, in the order it asks for them: the top one first, then down the list when one fails or can't take the request. Sort a column and press Save list to keep that order. (Behavior can switch this to a draw by each model's record.)</p>
         </div>
         <div class="acts"><button class="primary" id="go-prov">Add models</button></div>
       </div>
@@ -962,6 +974,8 @@ function savePref(k, value) {
 // A change to the settings that are not about a provider.
 async function saveSettings(patch) {
   S = await post("/api/settings", patch);
+  // Settings that depend on each other, moved to fit: said, not done silently.
+  (S.notes || []).forEach(function (n) { toast(n); });
   drawAll();
 }
 
@@ -1533,7 +1547,37 @@ async function setProviderOn(name, on) {
   } catch (e) { toast(e.message, true); }
 }
 
-function drawFilters(total, shown) {
+// The Result filter with how many models each choice would show (the other
+// filters still applying), one line for each way a test can have failed.
+function drawResults(all) {
+  var counts = { works: 0, failed: 0, untested: 0, tools: 0 };
+  var outcomes = {};
+  all.filter(function (t) { return passes(t, "works"); }).forEach(function (t) {
+    var r = TRIES[pk(t.i, t.model)];
+    if (!r || r.going) { counts.untested++; return; }
+    if (r.ok) { counts.works++; if (r.toolsOk === false) counts.tools++; return; }
+    counts.failed++;
+    var o = outcome(r);
+    outcomes[o] = (outcomes[o] || 0) + 1;
+  });
+  var list = [["", "Any result"], ["works", "\\u2713 Works (" + counts.works + ")"]];
+  if (counts.tools) list.push(["tools", "   \\u2717 tools (" + counts.tools + ")"]);
+  list.push(["failed", "\\u2717 Doesn't work (" + counts.failed + ")"]);
+  Object.keys(outcomes).sort().forEach(function (o) { list.push(["o:" + o, "   \\u2717 " + o + " (" + outcomes[o] + ")"]); });
+  list.push(["untested", "Not tested (" + counts.untested + ")"]);
+  // A choice that has nothing in it now stays, or the filter would be on
+  // with nothing showing it.
+  if (FILTER.works && !list.some(function (x) { return x[0] === FILTER.works; })) list.push([FILTER.works, FILTER.works.replace(/^o:/, "") + " (0)"]);
+  var sel = $("f-works");
+  var now = list.map(function (x) { return x.join("="); }).join("|");
+  if (sel.getAttribute("data-now") !== now) {
+    put(sel, list.map(function (x) { return h("option", { value: x[0] }, x[1]); }));
+    sel.setAttribute("data-now", now);
+  }
+}
+
+function drawFilters(total, shown, all) {
+  if (all) drawResults(all);
   var sel = $("f-prov");
   var want = S.providers.filter(function (p) { return p.models.length && !p.disabled; });
   // Rebuilt only when the set changes, or picking one would reset itself on
@@ -1615,9 +1659,9 @@ function fromCell(t) {
     onclick: function () { setupDialog(t); } }, d ? "Edit" : "Set up");
 
   if (!d) {
-    return h("div", { className: "src warn", title: "models.dev doesn't know it: Retry, or set up what it can do" },
-      h("span", { className: "msg" }, "not found"),
-      h("button", { className: "sm", title: "look it up in models.dev again", onclick: function () { lookUp(t); } }, "Retry"),
+    return h("div", { className: "src warn", title: "not found: models.dev doesn't know it. Retry, or set up what it can do" },
+      h("span", { className: "msg" }, "?"),
+      h("button", { className: "sm", title: "look it up in models.dev again", "aria-label": "Retry", onclick: function () { lookUp(t); } }, "\\u21bb"),
       setup);
   }
   return h("div", { className: "src" },
@@ -1630,15 +1674,18 @@ function fromCell(t) {
 
 function worksCell(t) {
   var r = TRIES[pk(t.i, t.model)];
-  var when = r && r.at ? " \\u00b7 tested " + new Date(r.at).toLocaleTimeString() : "";
+  var when = r && r.at ? " \\u00b7 tested " + new Date(r.at).toLocaleString() : "";
   var secs = r && r.ms != null ? " \\u00b7 " + (r.ms / 1000).toFixed(1) + "s" : "";
 
   var cls = "", text = "not tested", about = "Send it a short message to see that it really answers (your key, access to it, its name)";
   if (r && r.going) {
     cls = "going"; text = "testing\\u2026"; about = "Sending it a short message";
+  } else if (r && r.ok && r.toolsOk === false) {
+    cls = "ok"; text = "\\u2713 " + (r.ms / 1000).toFixed(1) + "s \\u2717tools";
+    about = "it answers ('" + (r.reply || "") + "'), but it could not do a small job with a tool, so it is a poor choice for Claude Code: " + r.toolsWhy + secs + when;
   } else if (r && r.ok) {
     cls = "ok"; text = "\\u2713 " + (r.ms / 1000).toFixed(1) + "s";
-    about = "works: it answered '" + (r.reply || "") + "'" + secs + when;
+    about = "works: it answered '" + (r.reply || "") + "'" + (r.toolsOk ? ", and did a small job with a tool" : "") + secs + when;
   } else if (r) {
     cls = "bad"; text = "\\u2717 " + outcome(r);
     about = "doesn't work: " + (MEANS[outcome(r)] ? MEANS[outcome(r)] + ". " : "") + (r.error || "") + secs + when;
@@ -1774,7 +1821,20 @@ function can(d, key) {
   return Boolean(d.vision);
 }
 
-function passes(t) {
+// Does this model's last test fit what the Result filter asks for? "works",
+// "failed" (any failure), "untested", "tools" (answers, but failed the
+// small job with a tool), or one outcome by name ("o:404", "o:empty").
+function resultIs(t, want) {
+  var r = TRIES[pk(t.i, t.model)];
+  var tested = Boolean(r) && !r.going;
+  if (want === "works") return tested && r.ok;
+  if (want === "failed") return tested && !r.ok;
+  if (want === "untested") return !tested;
+  if (want === "tools") return tested && r.ok && r.toolsOk === false;
+  return want.indexOf("o:") === 0 && outcome(r) === want.slice(2);
+}
+
+function passes(t, skip) {
   var d = facts(t.baseUrl, t.model);
 
   if (FILTER.prov && t.baseUrl !== FILTER.prov) return false;
@@ -1784,11 +1844,7 @@ function passes(t) {
     if (t.model.toLowerCase().indexOf(q) < 0 && String(t.name).toLowerCase().indexOf(q) < 0) return false;
   }
 
-  if (FILTER.works) {
-    var r = TRIES[pk(t.i, t.model)];
-    var state = !r || r.going ? "untested" : r.ok ? "works" : "failed";
-    if (state !== FILTER.works) return false;
-  }
+  if (FILTER.works && skip !== "works" && !resultIs(t, FILTER.works)) return false;
 
   var abilities = ["tools", "thinking", "images"];
   for (var i = 0; i < abilities.length; i++) {
@@ -1837,6 +1893,9 @@ function passes(t) {
 // sorted or counted for a provider you have said to skip.
 function rows() {
   var out = [];
+  // Where each model stands in the order requests ask for them.
+  var place = {};
+  (S.order || []).forEach(function (e, n) { place[e.provider + "|" + e.model] = n; });
   S.providers.forEach(function (p) {
     if (p.disabled) return;
     p.models.forEach(function (m) {
@@ -1846,7 +1905,31 @@ function rows() {
       });
     });
   });
-  return out;
+  return out.sort(function (a, b) {
+    var x = place[a.i + "|" + a.model], y = place[b.i + "|" + b.model];
+    return (x === undefined ? 1e9 : x) - (y === undefined ? 1e9 : y);
+  });
+}
+
+// Does the table show the models in the order they are saved in?
+function orderIsSaved(view) {
+  var saved = (S.order || []).filter(function (e) {
+    return view.some(function (t) { return t.i === e.provider && t.model === e.model; });
+  });
+  return saved.length === view.length && saved.every(function (e, n) { return view[n].i === e.provider && view[n].model === e.model; });
+}
+
+// The models in first go first, in the order given, and the rest after them
+// as they were. The sort and the filters stay as they are, so the list can be
+// saved at any moment without losing the view; moving some to the top is the
+// one case that clears the sort, since it is the order you are asking for.
+async function saveOrder(first, then) {
+  try {
+    await applyState("/api/order", { items: first.map(function (t) { return { provider: t.i, model: t.model }; }) });
+    if (then && then.clearSort) { SORT = []; savePref("sorts", SORT); }
+    drawMine();
+    toast(then && then.say ? then.say : "List saved: requests ask for models in the order shown");
+  } catch (e) { toast(e.message, true); }
 }
 
 function sortRows(list) {
@@ -1920,9 +2003,9 @@ function yesNo(v) {
 
 function drawMine() {
   var all = rows();
-  var list = all.filter(passes);
+  var list = all.filter(function (t) { return passes(t); });
   var view = sortRows(list);
-  drawFilters(all.length, list.length);
+  drawFilters(all.length, list.length, all);
 
   MINE.forEach(function (k) {
     var t = unpk(k);
@@ -1941,7 +2024,7 @@ function drawMine() {
             h("button", { type: "button", "aria-label": "Stop sorting by " + COLS[s.key].label,
               onclick: function () { SORT = SORT.filter(function (x) { return x !== s; }); drawMine(); } }, "\\u2715"));
         })]
-      : (list.length > 1 ? "Click a column to sort. Sorting changes nothing about routing." : "")),
+      : (list.length > 1 ? "Requests ask for models in this order, top first. Sort a column, then Save list to keep that order." : "")),
     picked.length ? h("button", { className: "sm", disabled: Boolean(running),
       onclick: function () { testMany(picked); } }, "Test " + picked.length) : null,
     picked.length ? h("button", { className: "sm danger", onclick: function () { removeModels(picked); } }, "Take " + picked.length + " out") : null,
@@ -1955,6 +2038,11 @@ function drawMine() {
         lastRow = null;
         drawMine();
       } }, "Invert selection") : null,
+    picked.length ? h("button", { className: "sm", title: "Ask for the ticked ones first, in the order shown",
+      onclick: function () { saveOrder(picked, { clearSort: true, say: picked.length + " moved to the top" }); } }, "Move " + picked.length + " to the top") : null,
+    h("button", { className: "sm primary",
+      title: "Save the list as it is shown: requests ask for models in this order, top first" + (filtering() ? " (the ones shown first, the rest after them)" : "") + (orderIsSaved(view) ? ". It is saved this way already." : ""),
+      onclick: function () { saveOrder(view); } }, "Save list"),
     SORT.length ? h("button", { className: "sm", onclick: function () { SORT = []; drawMine(); } }, "Clear sort") : null,
     S.providers.length > 1 ? h("button", {
       className: "sm" + (ranked() ? " on" : ""),
@@ -1993,26 +2081,29 @@ function drawMine() {
     return;
   }
 
-  var head = function (k) {
+  var sortButton = function (k, text) {
     var at = -1;
     SORT.forEach(function (s, n) { if (s.key === k) at = n; });
-    return h("th", { className: COLS[k].num ? "num" : "" },
+    return (
       h("button", {
         type: "button", className: at >= 0 ? "on" : "",
         title: "Sort by " + COLS[k].label.toLowerCase() + ": " + dirText(k, firstDir(k)) +
           ". Click again to reverse it. Shift-click to add it under the sort you have, to break its ties.",
         onclick: function (e) { clickSort(k, e.shiftKey); },
       },
-        COLS[k].label + (at >= 0
+        (text || COLS[k].label) + (at >= 0
           ? " " + (SORT[at].dir === "up" ? "\\u2191" : "\\u2193") + (SORT.length > 1 ? at + 1 : "")
           : "")));
+  };
+  var head = function (k, text) {
+    return h("th", { className: COLS[k].num ? "num" : "" }, sortButton(k, text));
   };
 
   drawOutcomes(view);
 
   var tbody = h("tbody", {});
   var win = windowed(tbody, {
-    count: view.length, height: 38, scroller: window, tag: "tr", cols: 21,
+    count: view.length, height: 38, scroller: window, tag: "tr", cols: 17,
     row: function (n) { return tableRow(view[n], n, view); },
   });
 
@@ -2033,10 +2124,10 @@ function drawMine() {
           },
         })),
         h("th", { className: "num", title: "Its place in the order shown" }, "#"),
-        head("model"), head("provider"), head("context"), head("abilities"),
-        head("tools"), head("thinking"), head("images"),
+        h("th", { className: "m" }, sortButton("model"), sortButton("provider")),
+        head("context"), head("abilities", "Can"),
         head("input"), head("output"),
-        head("coding"), head("webdev"), head("vision"), head("from"),
+        head("coding"), head("webdev", "Web"), head("vision"), head("from"),
         head("record"), head("tried"), head("used"), head("spent"), head("works"),
         h("th", {}, ""))),
       tbody)));
@@ -2081,6 +2172,18 @@ function spentCell(t) {
     u.priced ? spendText(u.cost) : h("span", { className: "no" }, "?"));
 }
 
+// Tool calls, thinking and images in one cell: a letter each, lit when the
+// model has it. The count is in the tooltip, and the column sorts by it.
+function abilityCell(t, d) {
+  var chip = function (key, letter, word) {
+    var v = COLS[key].get(t);
+    return h("span", { className: v === 1 || v === true ? "on" : "",
+      title: word + ": " + (v === -1 || v === null ? "models.dev does not list this model" : v ? "yes" : "no") }, letter);
+  };
+  return h("td", { title: d ? COLS.abilities.get(t) + " of 3: tool calls, thinking, images" : "models.dev does not list this model" },
+    h("div", { className: "abil" }, chip("tools", "T", "Tool calls"), chip("thinking", "R", "Thinking"), chip("images", "I", "Images")));
+}
+
 // One row of Your models. Built when it scrolls into view, so it reads the
 // state as it is then.
 function tableRow(t, n, view) {
@@ -2112,15 +2215,13 @@ function tableRow(t, n, view) {
             },
           })),
           h("td", { className: "num muted" }, String(n + 1)),
-          h("td", { className: "m", title: t.model }, t.model),
-          h("td", {}, t.name,
-            t.off ? h("span", { className: "tag", style: "margin-left:6px" }, "off") : null,
-            t.parked ? h("span", { className: "tag", style: "margin-left:6px" }, "parked") : null),
+          h("td", { className: "m", title: t.model + " \\u00b7 " + t.name },
+            h("div", {}, t.model),
+            h("div", { className: "sub" }, t.name,
+              t.off ? h("span", { className: "tag", style: "margin-left:6px" }, "off") : null,
+              t.parked ? h("span", { className: "tag", style: "margin-left:6px" }, "parked") : null)),
           h("td", { className: "num", title: d && d.context ? d.context.toLocaleString() + " tokens" + contextWhy(d) : "models.dev does not list this model" }, kTok(d && d.context)),
-          h("td", { className: "num" }, d ? COLS.abilities.get(t) + " of 3" : h("span", { className: "no" }, "?")),
-          h("td", {}, yesNo(COLS.tools.get(t))),
-          h("td", {}, yesNo(COLS.thinking.get(t))),
-          h("td", {}, yesNo(COLS.images.get(t))),
+          abilityCell(t, d),
           h("td", { className: "num" }, d && d.input !== undefined ? usd(d.input) : "-"),
           h("td", { className: "num" }, d && d.output !== undefined ? usd(d.output) : "-"),
           rankCell(t, "coding"), rankCell(t, "webdev"), rankCell(t, "vision"),
@@ -2219,8 +2320,10 @@ async function tryOne(t) {
 
 // A provider changed, so what its models said is stale: the server forgot,
 // and so does the page.
-function forgetTestsHere() {
-  TRIES = {};
+// Some results were dropped on the server (a provider changed): take the
+// ones that are left from there.
+async function forgetTestsHere() {
+  await loadTests();
   drawMine();
 }
 
@@ -2949,10 +3052,22 @@ async function showRequest(r) {
 // The proxy and this panel are one process, so a served request is pushed
 // here. The event only says that something happened; what it means is worked
 // out by refetching, which keeps one copy of that rule rather than two.
+var heardAt = Date.now();
+var wasOpen = false;
+var events = null;
 function listen() {
   var src;
   try { src = new EventSource("/api/events"); } catch (e) { return; }
+  events = src;
+  heardAt = Date.now();
+  src.addEventListener("open", function () {
+    // Back after a drop: whatever happened meanwhile was never sent, so the
+    // page asks for it rather than sitting on what it had.
+    if (wasOpen) catchUp();
+    wasOpen = true;
+  });
   src.addEventListener("message", function (e) {
+    heardAt = Date.now();
     // Anything that throws in here used to kill every later update silently,
     // and the page sat on correct numbers it never drew. The catch-up poll
     // covers a dropped stream; this covers a bad render.
@@ -2960,6 +3075,25 @@ function listen() {
       toast("Live updates hit a problem: " + err.message, true);
     });
   });
+}
+
+// A stream that died without a word (a sleeping laptop, a router that dropped
+// the connection) raises no error and reconnects to nothing. The server speaks
+// every twenty seconds, so a minute of quiet means it is gone: open another.
+setInterval(function () {
+  if (!events || Date.now() - heardAt < 60000) return;
+  events.close();
+  wasOpen = true;
+  listen();
+}, 15000);
+
+async function catchUp() {
+  try {
+    await Promise.all([loadRecord(), loadRequests(), loadTests()]);
+    try { USAGE = (await api("/api/usage")).usage || {}; } catch (e2) {}
+  } catch (e) { return; }
+  drawAll();
+  if (running) watchRun();
 }
 
 async function handleEvent(e) {
@@ -3052,8 +3186,13 @@ async function behaviorDialog() {
     h("option", { value: "retries" }, "Ask the same one again first (a busy or broken one)"),
     h("option", { value: "any" }, "Move on at once, retry nothing"));
   onFail.value = b.onFail;
+  var pick = h("select", {},
+    h("option", { value: "order" }, "Your order on Your models, top first"),
+    h("option", { value: "record" }, "A draw by each model's record"));
+  pick.value = b.pick || "order";
   var retries = h("input", { type: "number", min: "1", max: "20", step: "1", value: b.retries });
   var start = h("input", { type: "number", min: "5", max: "600", step: "1", value: b.replyStart });
+  var idle = h("input", { type: "number", min: "10", max: "1800", step: "1", value: b.replyIdle });
   var keep = h("input", { type: "checkbox", checked: Boolean(b.keepTrying) });
   var effort = h("select", {},
     h("option", { value: "default" }, "Send nothing"),
@@ -3096,9 +3235,11 @@ async function behaviorDialog() {
   openDialog([
     h("h2", {}, "Behavior"),
     h("div", { className: "fields" },
+      field("Which model is asked first", pick),
       field("If a model fails", onFail),
       field("Tries of one model", retries, "used by Ask the same one again, 1 to 20"),
       field("A reply must start within", start, "seconds, 5 to 600"),
+      field("A started reply may go quiet for", idle, "seconds, 10 to 1800, then it counts as stalled; never less than the one above"),
       check(keep, "Keep trying when every model is busy", "wait, then go round again, instead of giving Claude Code the error"),
       field("Reasoning effort", effort, "sent to models that take it"),
       check(fit, "Tilt the draw by public rankings", "a small nudge toward models people rate higher at coding, agent work and images; the record still decides"),
@@ -3114,7 +3255,7 @@ async function behaviorDialog() {
       h("button", { className: "primary", type: "button", onclick: async function () {
         try {
           await saveSettings({ behavior: {
-            onFail: onFail.value, retries: Number(retries.value), replyStart: Number(start.value),
+            pick: pick.value, onFail: onFail.value, retries: Number(retries.value), replyStart: Number(start.value), replyIdle: Number(idle.value),
             keepTrying: keep.checked, effort: effort.value, fit: fit.checked, stay: stay.checked,
             logDetail: detail.value, logDays: Number(days.value), remote: remote.checked,
           } });

@@ -102,6 +102,8 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
   let firstAt = null;
   const toolBlocksByOpenAIIndex = new Map();
   let finishReason = "stop";
+  let sawDone = false;
+  let finishSeen = false;
   let outputTokens = 0;
   let inputTokens = 0;
 
@@ -196,6 +198,7 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
 
     if (choice.finish_reason) {
       finishReason = choice.finish_reason;
+      finishSeen = true;
     }
   }
 
@@ -205,8 +208,8 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
 
   while (true) {
     const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    // The end: its last line too, even without a line break after it.
+    buffer += done ? decoder.decode() + "\n" : decoder.decode(value, { stream: true });
 
     const lines = buffer.split("\n");
     buffer = lines.pop();
@@ -215,13 +218,15 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) continue;
       const data = trimmed.slice(5).trim();
-      if (data === "[DONE]") continue;
+      if (data === "[DONE]") { sawDone = true; continue; }
       try {
         handleChunk(JSON.parse(data));
       } catch {
         // Skip malformed chunks rather than killing the stream.
       }
     }
+
+    if (done) break;
 
     // Going round in circles: stop it here. What has been sent cannot be
     // taken back, but the model is told to stop generating, and the reply
@@ -262,7 +267,12 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
   // "end_turn" makes it treat the turn as finished and silently drop the call.
   // Plenty of OpenAI-compatible backends send finish_reason "stop" (or omit it)
   // even while streaming tool calls, so trust the content over the upstream.
-  const stopReason = emittedToolUse ? "tool_use" : mapFinishReason(finishReason);
+  //
+  // A stream that closed with neither [DONE] nor a reason for ending was cut
+  // short by the connection: the reply may be cut. It ends as "max_tokens",
+  // which Claude Code answers by asking the model to carry on from there.
+  const cut = !looped && !sawDone && !finishSeen && (emitted.length > 0 || emittedToolUse);
+  const stopReason = emittedToolUse ? "tool_use" : cut ? "max_tokens" : mapFinishReason(finishReason);
 
   sendEvent(res, "message_delta", {
     type: "message_delta",
@@ -280,6 +290,7 @@ export async function streamOpenAIToAnthropic(upstream, res, requestedModel, bas
     // A tool call written out as text, which Claude Code cannot run.
     garbled: hadTools && !emittedToolUse && Boolean(leakedMarkup(emitted)),
     looped: looped?.sample ?? null,
+    cut,
     usage: usageSeen && { input: inputTokens, output: outputTokens, cached: cachedTokens, cost: usageSeen.cost },
     firstMs: firstAt,
     text: emitted,

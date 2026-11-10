@@ -38,7 +38,7 @@ Options
 The panel is where you add providers and pick models. The proxy is what
 Claude Code talks to, and it starts as soon as there is something to route to.
 
-  config   ~/.opencc/.env
+  config   ~/.opencc/config.json (HeartCode's format)
   record   ~/.opencc/stats.jsonl
 `);
   process.exit(0);
@@ -83,6 +83,7 @@ async function rememberPort(port) {
   // rest from the file.
   writeStoredConfig({
     providers: providersFromEnv(stored),
+    order: stored.__order,
     port: String(port),
     streaming: streamingFromEnv(stored),
     rank: rankFromEnv(stored),

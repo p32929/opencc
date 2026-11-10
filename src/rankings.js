@@ -4,6 +4,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { GLOBAL_CONFIG_DIR, RANKINGS_PATH } from './paths.js'
 import { readParquet } from './parquet.js'
+import { fetch } from './http.js' // not the built-in one: see http.js
 
 const FILE = RANKINGS_PATH
 const readJson = (file, fallback) => {

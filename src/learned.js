@@ -63,7 +63,7 @@ export const dropLearnedCache = () => {
 // Refusals a provider may make of one part of a request, learned when sending
 // it without that part works.
 export const QUIRKS = [
-  "noTemperature", "noEffort", "noStreamUsage", "noStream", "noImages", "noParallel", "simpleSchemas",
+  "noTemperature", "noEffort", "noThoughts", "noStreamUsage", "noStream", "noImages", "noParallel", "simpleSchemas",
 ];
 
 // The quirks still holding (learned within a day) for a model.
@@ -86,6 +86,7 @@ export function applyQuirks(req, quirks) {
     delete out.top_p;
   }
   if (quirks.noEffort) delete out.reasoning_effort;
+  if (quirks.noThoughts) delete out.extra_body;
   if (quirks.noStreamUsage) delete out.stream_options;
   if (quirks.noParallel) delete out.parallel_tool_calls;
   if (quirks.noStream) {
@@ -118,6 +119,7 @@ export function refusedPart(status, text, req, quirks = {}) {
   const imagesSent = !quirks.noImages && req.messages?.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"));
   if (/temperature|top_p/i.test(said) && ("temperature" in req || "top_p" in req) && !quirks.noTemperature) return "noTemperature";
   if (/reasoning_effort/.test(said) && "reasoning_effort" in req && !quirks.noEffort) return "noEffort";
+  if (/extra_body|thinking_config|include_thoughts/i.test(said) && req.extra_body && !quirks.noThoughts) return "noThoughts";
   if (/stream_options/.test(said) && req.stream_options && !quirks.noStreamUsage) return "noStreamUsage";
   if (/parallel_tool_calls/.test(said) && req.parallel_tool_calls && !quirks.noParallel) return "noParallel";
   if (/stream/i.test(said) && req.stream && !quirks.noStream) return "noStream";

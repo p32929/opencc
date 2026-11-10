@@ -366,3 +366,99 @@ test("the running panel refuses a foreign name, a foreign site and another devic
     child.kill();
   }
 });
+
+test("test results are kept across a restart, and a provider's go when it changes", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const home = mkdtempSync(join(tmpdir(), "opencc-tests-"));
+  const here = new URL(".", import.meta.url).pathname;
+  const script = join(home, "run.mjs");
+  writeFileSync(script, `
+    import { tests, loadTests, forgetTests, saveTests } from "${join(here, "testrun.js")}";
+    import { readFileSync } from "node:fs";
+    import { TESTS_PATH } from "${join(here, "paths.js")}";
+    const phase = process.argv[2];
+    if (phase === "write") {
+      tests["a|m1"] = { ok: true, ms: 5, at: 1 };
+      tests["a|m2"] = { ok: false, status: 404, at: 2 };
+      tests["b|m1"] = { ok: true, ms: 7, toolsOk: false, at: 3 };
+      saveTests();
+      await new Promise((r) => setTimeout(r, 700));
+    } else {
+      loadTests();
+      const before = Object.keys(tests).sort();
+      forgetTests("a");
+      await new Promise((r) => setTimeout(r, 700));
+      console.log(JSON.stringify({ before, after: Object.keys(JSON.parse(readFileSync(TESTS_PATH, "utf8"))), tools: tests["b|m1"].toolsOk }));
+    }
+  `);
+  const env = { ...process.env, HOME: home };
+  execFileSync(process.execPath, [script, "write"], { env });
+  const out = JSON.parse(execFileSync(process.execPath, [script, "read"], { env }).toString());
+  assert.deepEqual(out.before, ["a|m1", "a|m2", "b|m1"], "what was tested before the restart is there");
+  assert.deepEqual(out.after, ["b/m1"], "one provider's results go, the others stay, on disk too, in HeartCode's \"provider/model\" form");
+  assert.equal(out.tools, false);
+});
+
+test("HeartCode's config.json is read as it is, and written back in its shape", async () => {
+  const { mkdtempSync, writeFileSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const home = mkdtempSync(join(tmpdir(), "opencc-heartcfg-"));
+  mkdirSync(join(home, ".opencc"));
+  writeFileSync(join(home, ".opencc", "config.json"), JSON.stringify({
+    providers: { b: { baseUrl: "https://b.test/v1", apiKey: "kb" }, a: { baseUrl: "https://a.test/v1", apiKey: "ka", off: true, models: ["hand"] } },
+    provider: "b", model: "first",
+    rotation: { on: "retries", retries: 3, next: "first", then: [{ provider: "a", model: "second" }, { provider: "b", model: "third" }, { provider: "gone", model: "x" }] },
+    testTimeout: 19, statusBar: [{ left: ["model"] }], telegram: { on: false },
+  }));
+  const here = new URL(".", import.meta.url).pathname;
+  const script = join(home, "run.mjs");
+  writeFileSync(script, `
+    import { loadConfig, setOrder, potAdd } from "${join(here, "providers.js")}";
+    import { readFileSync } from "node:fs";
+    const first = loadConfig();
+    setOrder([{ provider: "b", model: "third" }]);
+    potAdd([{ provider: "a", model: "newest" }]);
+    const second = loadConfig();
+    const file = JSON.parse(readFileSync(process.env.HOME + "/.opencc/config.json", "utf8"));
+    console.log(JSON.stringify({
+      names: first.providers.map((p) => p.name), off: first.providers.find((p) => p.name === "a").disabled,
+      added: first.providers.find((p) => p.name === "a").added, order: first.order.map((e) => e.provider + "/" + e.model),
+      onFail: first.behavior.onFail, retries: first.behavior.retries, test: first.testTimeout,
+      order2: second.order.map((e) => e.provider + "/" + e.model),
+      file: { provider: file.provider, model: file.model, then: file.rotation.then.map((e) => e.provider + "/" + e.model), on: file.rotation.on, bar: file.statusBar, tg: file.telegram, test: file.testTimeout },
+    }));
+  `);
+  const out = JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, HOME: home } }).toString());
+  assert.deepEqual(out.names, ["a", "b"]);
+  assert.equal(out.off, true, "off is a provider's switch");
+  assert.deepEqual(out.added, ["hand"], "models: the ones added by name");
+  assert.deepEqual(out.order, ["b/first", "a/second", "b/third"], "the first, then the rest in order; a model of a provider that is gone is dropped");
+  assert.equal(out.onFail, "retries");
+  assert.equal(out.retries, 3);
+  assert.equal(out.test, 19);
+  assert.deepEqual(out.order2, ["b/third", "b/first", "a/second", "a/newest"], "saved order first, the rest after, new models last");
+  assert.equal(out.file.provider, "b");
+  assert.equal(out.file.model, "third");
+  assert.deepEqual(out.file.then, ["b/first", "a/second", "a/newest"]);
+  assert.equal(out.file.on, "retries");
+  assert.deepEqual(out.file.bar, [{ left: ["model"] }], "what HeartCode keeps there is left alone");
+  assert.deepEqual(out.file.tg, { on: false });
+  assert.equal(out.file.test, 19);
+});
+
+test("models are asked in your order when that is how they are picked", async () => {
+  const { chooseOrder } = await import("./stats.js");
+  const attempts = ["m3", "m1", "m2", "other"].map((model) => ({ provider: { baseUrl: "https://p.test/v1" }, model }));
+  const fixed = new Map([["m1", 0], ["m2", 1], ["m3", 2]].map(([m, n]) => [`https://p.test/v1\u0000${m}`, n]));
+  for (let i = 0; i < 5; i++) {
+    const got = chooseOrder(attempts, "text", { lookup: () => undefined, lookupOther: () => undefined, fixed });
+    assert.deepEqual(got.attempts.map((a) => a.model), ["m1", "m2", "m3", "other"], "the same every time, a model not in the list last");
+  }
+  const cooling = chooseOrder(attempts, "text", { lookup: () => undefined, lookupOther: () => undefined, fixed, catalogTooBig: (b, m) => m === "m1", chars: 10 });
+  assert.equal(cooling.attempts.at(-1).model, "m1", "one too small for the request goes behind");
+});

@@ -6,7 +6,7 @@ import { streamOpenAIToAnthropic, sendAnthropicAsStream, primeStream } from "./s
 import { DEFAULTS as BEHAVIOR_DEFAULTS, effortFor } from "./behavior.js";
 import { outage, isPage, retryAfterMs } from "./failures.js";
 import { applyQuirks, refusedPart, limitStated } from "./learned.js";
-import { leakedMarkup, tokensOf } from "./textfix.js";
+import { leakedMarkup, tokensOf, family } from "./textfix.js";
 import { renderTag, stripTags, tagMessage } from "./replytag.js";
 import { requirementsOf, describeNeeds, kindOf, chooseOrder, record, coolOff, cooledOffSuccessfully, coolingFor, verdictFor, isTooBig, TOO_BIG_VERDICT, STREAM_DIED_VERDICT } from "./stats.js";
 import { logRequest, saveDetail } from "./reqlog.js";
@@ -18,6 +18,7 @@ import { bonusFor } from "./fit.js";
 import { conversationKey, stickyFor, stick } from "./conversations.js";
 import { tooBigForCatalog, unfitFor, factsFor } from "./modelsdev.js";
 import { setupFor } from "./setup.js";
+import { fetch } from "./http.js"; // not the built-in one: see http.js
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -95,8 +96,6 @@ const providerWide = (status) => !status || [401, 402, 403, 407, 502, 503, 504].
 // backends, and cutting those off fails requests that would have succeeded.
 const UPSTREAM_TIMEOUT_MS = 300000;
 const TOTAL_DEADLINE_MS = 600000;
-// How long a streamed reply may go silent once it has started.
-const STREAM_IDLE_MS = 150000;
 
 // With less than this left on the deadline there is no point starting another
 // attempt: the slowest working models here answer in a minute, so a few
@@ -198,6 +197,15 @@ export async function callUpstream(
   let tokensMemo;
   const tokens = () => (tokensMemo ??= tokensOf(JSON.stringify(anthropicReq)));
 
+  // Your order, when that is how models are picked (the default): where each
+  // one stands in the list saved on Your models.
+  const fixed = behavior.pick === "order" && opts.order?.length
+    ? new Map(opts.order.flatMap((e, place) => {
+        const p = providers.find((x) => x.name === e.provider);
+        return p ? [[`${p.baseUrl}\u0000${e.model}`, place]] : [];
+      }))
+    : null;
+
   const order = () => {
     const ordered = stats.order(candidates, kind, {
       chars,
@@ -208,6 +216,7 @@ export async function callUpstream(
       rank,
       bonus: hooks.bonus,
       unfit: hooks.unfit && ((baseUrl, model) => hooks.unfit(baseUrl, model, needs)),
+      fixed,
     });
     // A conversation stays on the model that answered it, while that model is
     // available: the provider's prompt cache holds, and nothing is relearned.
@@ -427,6 +436,11 @@ export async function callUpstream(
     // other models: the next is from another provider. When every provider
     // has had its turn, the ones held back go in order.
     const down = new Set();
+    // Another version of a model that just failed, at the same provider
+    // (mistral-large-2411 after mistral-large-latest), would likely fail the
+    // same way: it goes back with the held ones.
+    const failedFamilies = new Set();
+    const familyKey = (provider, model) => `${provider.baseUrl}\u0000${family(model)}`;
     const queue = ordered.attempts.map((a) => ({ ...a, second: false }));
     const held = [];
 
@@ -434,7 +448,7 @@ export async function callUpstream(
       const { provider, model, second } = queue[q];
       const label = `attempt ${q + 1}/${queue.length} (${displayName(provider)}, ${model})${round ? ` round ${round + 1}` : ""}`;
 
-      if (!second && down.has(provider.baseUrl)) {
+      if (!second && (down.has(provider.baseUrl) || failedFamilies.has(familyKey(provider, model)))) {
         held.push({ provider, model, second: true });
       } else {
         const remaining = deadline - Date.now();
@@ -460,7 +474,7 @@ export async function callUpstream(
           if (streamUpstream) {
             const startedAt = Date.now();
             try {
-              upstream = await primeStream(upstream, { startMs: behavior.replyStart * 1000, idleMs: opts.idleMs ?? STREAM_IDLE_MS });
+              upstream = await primeStream(upstream, { startMs: behavior.replyStart * 1000, idleMs: opts.idleMs ?? behavior.replyIdle * 1000 });
             } catch (err) {
               const status = err.status ?? 0;
               stats.record({ baseUrl, model, kind, status, chars, verdict: err.empty ? "empty" : undefined });
@@ -472,6 +486,7 @@ export async function callUpstream(
               lastStatus = status || 502;
               allHard &&= !outage({ status });
               if (providerWide(status)) down.add(baseUrl);
+              failedFamilies.add(familyKey(provider, model));
               continue;
             }
           }
@@ -549,6 +564,7 @@ export async function callUpstream(
         allHard &&= !fault.soft;
         longestAsk = Math.max(longestAsk, fault.asked ?? 0);
         if (providerWide(fault.status)) down.add(provider.baseUrl);
+        failedFamilies.add(familyKey(provider, model));
       }
 
       // Every provider has had its turn: the held-back models go now.
@@ -646,6 +662,7 @@ async function handleMessages(anthropicReq, res) {
       signal: gone.signal,
       hooks: liveHooks(behavior, needs, chars),
       preferred: conversation ? stickyFor(conversation) : null,
+      order: live.order,
     },
   );
 
@@ -693,6 +710,7 @@ async function handleMessages(anthropicReq, res) {
         { thinks: result.thinks, hadTools: needs.tools },
       );
       const spent = result.report(verdictFor(anthropicReq, sent), sent);
+      if (sent.cut) console.error(`[opencc]   ${result.model}: the stream ended without [DONE] or a finish reason, so the reply may be cut off`);
       logRequest(keep({
         ...logged, served, status: 200, ms: Date.now() - startedAt,
         firstMs: sent.firstMs ? sent.firstMs - startedAt : undefined, place: where, usage: sent.usage, cost: spent?.cost,

@@ -108,8 +108,25 @@ A model that doesn't start answering within **A reply must start within**
 (default 60 s, 5 to 600), or answers with an error inside a 200, or ends the
 stream with nothing in it, is passed over and the next model goes on, before
 Claude Code has been sent anything. A keep-alive ping does not count as
-starting. Once started, a stream that goes silent for 150 s fails instead of
-hanging.
+starting. Once started, a stream that goes quiet for **A started reply may go
+quiet for** (default 150 s, 10 to 1800, never less than the wait above: a
+pause mid-reply has the same causes as a slow start) fails instead of hanging.
+
+**A stream cut short.** A reply that closes with neither `[DONE]` nor a
+reason for ending was cut by the connection. It is counted against the model
+and ends as `max_tokens`, which Claude Code answers by asking the model to
+carry on from there. A last line with no line break after it still counts.
+
+**Another version of a model that failed** (`mistral-large-latest`, then
+`mistral-large-2411`, at the same provider) would likely fail the same way: it
+goes to the back with the held-back ones, and is still tried at the end.
+
+**Requests go out over HTTP/1.1** (`http.js`), not Node's built-in `fetch`.
+That one speaks HTTP/2 when a server offers it, and puts every request to a
+host on one connection; when that connection dies without a word, every later
+request waits on it and none is ever sent, which looked like every model
+behind one gateway "not answering" for hours. Here each request has a socket
+of its own, and one that is stopped takes its socket with it.
 
 **A reply that loops** (the last 200 characters said six times within 12,000)
 is cut and the model told to stop generating. What was sent can't be taken
@@ -273,12 +290,19 @@ Testing runs on the server, every provider at once, **Test lanes** models at
 a time from each. A provider that answers 429 drops to one lane, waits, and
 its models go back on the queue — a rate limit is not a verdict on a model.
 A model that has not answered within **Test timeout** counts as a failure.
+A model that says it calls tools (models.dev, or one nobody has described) is
+also given a small job with one: a `write_file` tool and "create notes.txt
+containing hello". It passes by calling it with those arguments. The Works?
+cell then reads `✓ 1.2s · ✗ tools`, with why on hover, when it answers but
+cannot do that; a model that fails that is a poor choice for Claude Code.
 
 Each provider keeps its own model list in `~/.opencc/model-lists.json`, so
 leaving the panel and coming back does not fetch them all again. Editing a
 provider, or switching its list on or off, drops that provider's list. Test
-results are not kept: they are what is true now, and they are cleared when
-the panel starts and for every model a run covers.
+results are kept in `~/.opencc/model-tests.json` with the time each was
+taken, so a restart does not mean testing everything again. A run replaces the
+result of every model it covers, and a provider that is edited loses its
+models' results.
 
 **Providers** works the way HeartCode's does. Each provider has a unique
 name, an on/off switch and a list switch (off: only the models you add by
@@ -333,14 +357,46 @@ Forgets all results. Providers, models and keys stay. The old file is saved as
 
 ## Config file
 
-The panel writes `~/.opencc/.env`. A local `.env` overrides it. Providers
-are numbered: first has no suffix, then `_2`, `_3`.
+The panel writes `~/.opencc/config.json`, in **HeartCode's own format**, so
+you can copy HeartCode's `~/.heart/config.json` here (or the other way) and it
+works as it is: the providers, your models, and the order they are asked in.
+
+```json
+{
+  "providers": { "groq": { "baseUrl": "https://…", "apiKey": "…", "off": true, "list": false, "models": ["added-by-name"] } },
+  "provider": "groq", "model": "openai/gpt-oss-20b",
+  "rotation": { "on": "failure", "retries": 2, "next": "first",
+                "then": [{ "provider": "mistral", "model": "mistral-large-4" }] },
+  "testTimeout": 19, "replyStart": 60, "replyIdle": 150,
+  "opencc": { "port": "9753", "behavior": { "pick": "record" } }
+}
+```
+
+- `provider` and `model` are the first of your models, `rotation.then` the
+  rest. That is the order requests ask for them in. **Save list** on Your
+  models writes the list as it is shown (always there; the sort and filters stay); a model that can't take the request or is cooling off
+  goes behind the others, and a failure goes on to the next.
+- `off` switches a provider off, `list: false` stops asking it for its model
+  list, `models` are the ones added by name.
+- `rotation.on` is `failure` or `retries` (ask the same one again first, up to
+  `retries` times), as in HeartCode.
+- What only opencc has is under `opencc`: its port, `streaming: false`, the
+  provider `rank`, `testLanes`, `replyTag`, `parked` models and the other
+  behavior settings. Everything else in the file (HeartCode's status bar,
+  Telegram…) is left as it is.
+- `model-tests.json` is HeartCode's format too (`"provider/model"` to its
+  result), and `model-lists.json` is the same file.
+
+An older `~/.opencc/.env` is read as it was until the first save, then it
+becomes `config.json` and the old file is kept as `.env.before-config-json`.
+A local `.env` in the folder you start in still overrides what it names.
+These are the keys it takes, which are also what Behavior and the panel set:
 
 | Key | Meaning |
 |---|---|
 | `OPENAI_BASE_URL` | provider address |
 | `OPENAI_API_KEY` | optional |
-| `MODELS` | comma separated; order does not matter |
+| `MODELS` | comma separated |
 | `PROVIDER_NAME` | optional label |
 | `PROVIDER_DISABLED` | `true` to skip it |
 | `PROVIDER_MODELS_DISABLED` | models to skip, comma separated |
@@ -349,9 +405,11 @@ are numbered: first has no suffix, then `_2`, `_3`.
 | `TEST_LANES` | models tested at once per provider, default 4 |
 | `PROVIDER_RANK` | providers you prefer, best first, by base URL |
 | `REPLY_TAG` | label put in front of each reply, e.g. `[{provider}-{model}]` |
+| `PICK` | `order` (default): your order, top first; `record`: a draw by the record |
 | `ON_FAIL` | `failure` (default), `retries` or `any` |
 | `RETRIES` | tries of one model for `retries`, 1 to 20, default 2 |
 | `REPLY_START` | seconds a streamed reply may take to start, default 60 |
+| `REPLY_IDLE` | seconds a started reply may go quiet, default 150, never under `REPLY_START` |
 | `KEEP_TRYING` | `on`: when everything is busy, wait and go round again |
 | `EFFORT` | `low`, `medium`, `high` or `follow`; default sends nothing |
 | `BEST_FIT` | `on`: tilt the draw by public rankings |
@@ -359,8 +417,6 @@ are numbered: first has no suffix, then `_2`, `_3`.
 | `LOG_DETAIL` | `full` keeps whole requests and replies; default `summary` |
 | `LOG_DAYS` | days `full` detail is kept, default 3 |
 | `PANEL_REMOTE` | `on`: panel answers other devices on your network, with its key |
-
-Only what differs from the default is written.
 
 Old configs with `BIG_MODEL` and `SMALL_MODEL` still work. Both become one
 `MODELS` list.
@@ -373,6 +429,53 @@ OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
 ```
 
 ## Changelog
+
+### 5.2.0 - 2026-11-10
+
+- **Models are asked in your order**, top first, as in HeartCode (before, the
+  order on the page meant nothing and a draw by the record decided). Sort a
+  column and press **Save list** (always there), or tick some and **Move to the top**. The
+  draw is still there as `PICK=record` / Behavior → Which model is asked first.
+- **Config in HeartCode's format**: `~/.opencc/config.json`, so HeartCode's file
+  can be copied in as it is, and test results in its `provider/model` form too.
+  An old `.env` is read until the first save, then kept as
+  `.env.before-config-json`.
+
+- **Test results are kept** between restarts (`model-tests.json`), with their
+  time on hover, so filtering by result works after a restart too.
+
+From HeartCode's 0.1.43 to 0.1.62, the parts that belong in a proxy.
+
+- **HTTP/1.1 requests** to providers, models.dev, the rankings and npm (see
+  "When a model fails or is slow").
+- **Stalled** is a setting now: how long a started reply may go quiet (150 s
+  by default, 10 to 1800), kept at or above the start wait.
+- **A stream cut short** is noticed, counted against the model and ended as
+  `max_tokens`; the last line of a stream is read even without a line break.
+- **Gemini's thinking**: with an effort set, Google's own Gemini is asked for
+  its thoughts and the `<thought>` block is taken out of the reply, like
+  `<think>`. A provider that refuses the field has it left out and learned.
+- **Another version of a failed model** at the same provider goes to the back.
+- **The tool-call check** in Test and Test all, shown in Works?.
+- **Model lists** wait a minute rather than ten seconds, and a vLLM list that
+  is a bare array is read.
+- A test's reply preview no longer shows a model's thinking.
+- **Your models fits the screen**: the model's name sits over its provider,
+  tool calls, thinking and images are three letters in one **Can** column
+  (the count is in the tooltip, and the column sorts by it), and everything is
+  a little tighter. No sideways scrolling at 1280 px and wider.
+- **Live updates heal themselves**: the panel's event stream now says
+  something every twenty seconds. A page that hears nothing for a minute
+  opens a new stream, and one that reconnects asks for what it missed
+  (results, requests, the record) instead of waiting for the next event.
+
+**Not copied from HeartCode 0.1.43 to 0.1.62**: the orchestrator and best-fit
+pick (HeartCode removed them itself in 0.1.53), helpers, plans, reviews, page
+checks and everything else about an agent's work, which a proxy does not do;
+trying the best-ranked untried model next after a failure (opencc's order is
+the record plus a small ranking tilt, and a failure should not undo that);
+Tests-wait following Give up (opencc's ten-second test is a quick check and
+lowering real work's wait from it would be a surprise).
 
 ### 5.1.2 - 2026-11-03
 
@@ -486,7 +589,7 @@ is one request log, summary or full.
   holds six connections to one origin, so thirty-six lanes were six: 54
   models took 101s from the page against 8s from outside it.
 - Test results show in the table as they land, with progress above it, and
-  are cleared when the panel starts and for each model a run covers.
+  are kept between restarts, with the time each was taken.
 - Provider model lists are kept on disk.
 
 **Fixed**

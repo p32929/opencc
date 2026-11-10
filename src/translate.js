@@ -223,6 +223,9 @@ export function toOpenAIRequest(anthropicReq, model, baseUrl, stream = undefined
     request.stream_options = { include_usage: true };
   }
   if (effort) request.reasoning_effort = effort;
+  // Google's own Gemini sends its thinking only when asked, in <thought> tags
+  // (taken out of the reply like <think>).
+  if (effort && /^(models\/)?gemini/.test(model)) request.extra_body = { google: { thinking_config: { include_thoughts: true } } };
 
   if (can.vision === false) {
     for (const m of request.messages) {

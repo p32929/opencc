@@ -6,6 +6,11 @@ import { join } from "node:path";
 export const GLOBAL_CONFIG_DIR = join(homedir(), ".opencc");
 export const GLOBAL_CONFIG_PATH = join(GLOBAL_CONFIG_DIR, ".env");
 
+// Providers, your models in order, and the settings, in HeartCode's own
+// config.json format, so the file can be copied between the two. What only
+// opencc has lives under its "opencc" key, which HeartCode leaves alone.
+export const CONFIG_JSON_PATH = join(GLOBAL_CONFIG_DIR, "config.json");
+
 // Append-only, one JSON object per line. Newline-delimited rather than one
 // JSON document because several opencc processes write it at once: an append
 // is a single atomic write, where read-modify-write on a document would lose
@@ -31,10 +36,8 @@ export const LISTS_PATH = join(GLOBAL_CONFIG_DIR, "model-lists.json");
 // Where this used to be kept, keyed by address. Removed on start.
 export const OLD_LISTS_PATH = join(GLOBAL_CONFIG_DIR, "catalogues.json");
 
-// Where test results used to be kept. They are not any more: a result is
-// what is true right now, and one from an hour ago sitting beside one from
-// this second reads as a single set of numbers when it is two. The panel
-// removes this on start so an older version's file does not linger.
+// What each model answered when it was last tested, with the time. Kept so a
+// restart does not mean testing every model again.
 export const TESTS_PATH = join(GLOBAL_CONFIG_DIR, "model-tests.json");
 
 // What you have said about a model that models.dev gets wrong or does not

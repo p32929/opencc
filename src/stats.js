@@ -142,9 +142,10 @@ export const STREAM_DIED_VERDICT = "stream_died";
 export const LOOP_VERDICT = "loop";
 export const GARBLED_VERDICT = "garbled";
 
-export function verdictFor(anthropicReq, { blocks, toolUse, badArguments, looped, garbled }) {
+export function verdictFor(anthropicReq, { blocks, toolUse, badArguments, looped, garbled, cut }) {
   if (blocks === 0) return "empty";
   if (looped) return LOOP_VERDICT;
+  if (cut) return STREAM_DIED_VERDICT;
   if (garbled) return GARBLED_VERDICT;
   if (badArguments) return "bad_arguments";
 
@@ -699,8 +700,13 @@ export function chooseOrder(attempts, kind, {
   // request needs (no tool calls, no images). Behind the others that can,
   // ahead of the ones that cannot take the size.
   unfit = null,
+  // Map of `${baseUrl}\u0000${model}` to its place in your order. Given, the
+  // draw is not used: models go in that order (a model not in it, last),
+  // behind only what cannot take the request or is cooling off.
+  fixed = null,
 } = {}) {
   const prefer = preferenceOf(rank);
+  const placeOf = (baseUrl, model) => fixed.get(`${baseUrl}\u0000${model}`) ?? Infinity;
 
   const rows = attempts.map((attempt, position) => {
     const { baseUrl } = attempt.provider;
@@ -714,7 +720,9 @@ export function chooseOrder(attempts, kind, {
       cooling: coolingFor(baseUrl, attempt.model, now),
       tooSmall: tooSmallFor(entry, chars, catalogTooBig, baseUrl, attempt.model),
       unfit: Boolean(unfit?.(baseUrl, attempt.model)),
-      draw: betaSample(a, b, rng) - slowness(meanMs(entry)) + prefer(baseUrl) + (bonus?.(baseUrl, attempt.model) ?? 0),
+      draw: fixed
+        ? -Math.min(placeOf(baseUrl, attempt.model), 1e9)
+        : betaSample(a, b, rng) - slowness(meanMs(entry)) + prefer(baseUrl) + (bonus?.(baseUrl, attempt.model) ?? 0),
     };
   });
 
@@ -746,7 +754,8 @@ export function chooseOrder(attempts, kind, {
     // Enough to explain the head of the queue in one log line.
     head: rows.slice(0, 3).map((row) => {
       const mean = row.a / (row.a + row.b);
-      return `${row.attempt.model} ${Math.round(mean * 100)}%` + (row.cooling ? " (cooling)" : "");
+      const shown = fixed ? `#${placeOf(row.attempt.provider.baseUrl, row.attempt.model) + 1}` : `${Math.round(mean * 100)}%`;
+      return `${row.attempt.model} ${shown}` + (row.cooling ? " (cooling)" : "");
     }),
     cooling: rows.filter((row) => row.cooling > 0).length,
     tooSmall: rows.filter((row) => row.tooSmall).length,

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { GLOBAL_CONFIG_PATH } from "./paths.js";
 import { behaviorFromEnv } from "./behavior.js";
+import { readGlobalConfig } from "./heartfile.js";
 
 export function parseEnvFile(path) {
   if (!existsSync(path)) return {};
@@ -176,12 +176,13 @@ export function streamingFromEnv(values) {
 function readConfig() {
   // A project-local .env (running from inside a clone of this repo) always
   // wins over the global config `opencc init` writes.
-  const merged = { ...parseEnvFile(GLOBAL_CONFIG_PATH), ...parseEnvFile(".env") };
+  const merged = { ...readGlobalConfig(parseEnvFile), ...parseEnvFile(".env") };
 
   const streaming = streamingFromEnv(merged);
 
   return {
     providers: providersFromEnv(merged),
+    order: merged.__order ?? [],
     rank: rankFromEnv(merged),
     port: Number(merged.PORT || 3000),
     streaming,

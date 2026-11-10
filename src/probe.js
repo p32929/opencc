@@ -4,6 +4,7 @@
 // nothing about it (a proxy there may serve Gemini).
 import { windowOf } from "./providers.js";
 import { learnServer } from "./learned.js";
+import { fetch } from "./http.js"; // not the built-in one: see http.js
 
 const n = (x) => (Number(x) > 0 ? Number(x) : undefined);
 
@@ -44,7 +45,7 @@ export async function contextSize(provider, model) {
     },
     async () => {
       const d = await getJson(provider, base + "/models");
-      const m = (d.data ?? d.models ?? []).find((x) => x.id === model || x.name === model);
+      const m = (Array.isArray(d) ? d : (d.data ?? d.models ?? [])).find((x) => x.id === model || x.name === model);
       return { size: n(windowOf(m)), server: m?.owned_by === "vllm" || m?.max_model_len ? "vllm" : null };
     },
   ];

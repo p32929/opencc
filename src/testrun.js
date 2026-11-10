@@ -7,16 +7,53 @@
 // Every provider at once, a few models at a time from each. A provider that
 // says it is busy (429) is not giving a verdict on the model: it drops to one
 // lane, waits as long as it asks, and the model goes back on the queue.
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { bus } from "./events.js";
+import { GLOBAL_CONFIG_DIR, TESTS_PATH } from "./paths.js";
 import { record } from "./stats.js";
 import { loadConfig, tryModel } from "./providers.js";
+import { factsFor } from "./modelsdev.js";
 
-// Test results are what is true right now, not a record. They are cleared
-// when the panel starts, again for every model a run covers, and whenever a
-// provider changes, because a result from an hour ago sitting beside one from
-// this second reads as one set of numbers and is not. The record in
-// stats.jsonl is what remembers, and it is separate.
+// What each model answered when it was last tested, kept in model-tests.json
+// in HeartCode's format ("provider/model" to its result), so the file can be
+// copied between the two, so a restart does not mean testing everything again. Each result carries
+// the time it was taken, and the page shows it. A model a run covers loses
+// its old result first, and so does every model of a provider that changes,
+// because that result is about something else now. The record in stats.jsonl
+// is what remembers how requests went, and it is separate.
 export const tests = {};
+
+// Read once, when the panel starts. A file that is missing or unreadable is
+// no results, not an error.
+export function loadTests() {
+  try {
+    const saved = JSON.parse(readFileSync(TESTS_PATH, "utf8"));
+    for (const [key, value] of Object.entries(saved)) {
+      // HeartCode's file: "provider/model", the same as here but for the slash.
+      const at = key.indexOf("/");
+      if (at > 0 && value && typeof value === "object" && typeof value.ok === "boolean") tests[testKey(key.slice(0, at), key.slice(at + 1))] = value;
+    }
+  } catch {
+    // none yet
+  }
+}
+
+// Written a moment after the last change, so a run's hundreds of results are
+// one write, not hundreds.
+let saving = null;
+export function saveTests() {
+  if (saving) return;
+  saving = setTimeout(() => {
+    saving = null;
+    try {
+      mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true });
+      writeFileSync(TESTS_PATH, JSON.stringify(Object.fromEntries(Object.entries(tests).map(([key, value]) => [key.replace("|", "/"), value]))));
+    } catch {
+      // A full disk should not take a test run down with it.
+    }
+  }, 500);
+  saving.unref?.();
+}
 // By provider NAME, not address: two providers can share an address (the same
 // gateway with two keys) and their results are not the same results.
 export const testKey = (providerName, model) => `${providerName}|${model}`;
@@ -36,8 +73,12 @@ export const onRunEnd = (fn) => {
   afterRun = fn;
 };
 
-export function forgetTests() {
-  for (const key of Object.keys(tests)) delete tests[key];
+// Everything, or only these providers' (by name).
+export function forgetTests(...providerNames) {
+  for (const key of Object.keys(tests)) {
+    if (!providerNames.length || providerNames.some((name) => key.startsWith(`${name}|`))) delete tests[key];
+  }
+  saveTests();
   bus.emit("testsforgotten");
 }
 
@@ -46,7 +87,8 @@ export function forgetTests() {
 async function tryOne(provider, model, timeoutMs) {
   inFlight += 1;
   try {
-    const outcome = await tryModel(provider, model, timeoutMs);
+    // A model said to call tools is also asked to do a small job with one.
+    const outcome = await tryModel(provider, model, timeoutMs, { tools: factsFor(provider.baseUrl, model)?.tools !== false });
     record({
       baseUrl: provider.baseUrl, model, kind: "text", status: outcome.status, ms: outcome.ms,
       // A 200 that said nothing is not a success, whatever the status line says.
@@ -68,6 +110,7 @@ export async function testOne(providerName, model) {
   const outcome = await tryOne(provider, model, live.testTimeout * 1000);
   const key = testKey(provider.name, model);
   tests[key] = { ...outcome, at: Date.now() };
+  saveTests();
   bus.emit("tested", { key, result: tests[key] });
   return tests[key];
 }
@@ -153,6 +196,7 @@ export async function startRun(items) {
     // Whatever this model said last time goes now, so the counts under the
     // strip are this run's and nothing else's.
     delete tests[testKey(provider.name, t.model)];
+    saveTests();
 
     if (!run.provs.has(provider.name)) {
       run.provs.set(provider.name, {
@@ -223,6 +267,7 @@ export async function startRun(items) {
       }
 
       tests[key] = { ...outcome, at: Date.now() };
+      saveTests();
       run.done += 1;
       if (outcome.ok) run.good += 1;
       bus.emit("tested", { key, result: tests[key] });

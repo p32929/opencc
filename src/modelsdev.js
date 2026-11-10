@@ -14,6 +14,7 @@ import { dirname } from "node:path";
 import { GLOBAL_CONFIG_DIR, MODELS_DEV_PATH } from "./paths.js";
 import { withSetup } from "./setup.js";
 import { windowFor, ratioOf } from "./learned.js";
+import { fetch } from "./http.js"; // not the built-in one: see http.js
 
 const URL_DEFAULT = "https://models.dev/api.json";
 

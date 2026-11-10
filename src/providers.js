@@ -6,10 +6,12 @@
 // Ported from HeartCode's settings server, because providers disagree about
 // all of this and HeartCode already learned how.
 import { readStoredConfig, writeStoredConfig } from "./configStore.js";
-import { behaviorFromEnv, changeBehavior } from "./behavior.js";
+import { behaviorFromEnv, changeBehavior, fitTimes } from "./behavior.js";
 import {
   providersFromEnv, streamingFromEnv, rankFromEnv, testTimeoutFromEnv, testLanesFromEnv,
 } from "./config.js";
+import { fetch } from "./http.js"; // not the built-in one: see http.js
+import { stripThink } from "./textfix.js";
 
 // --- names and addresses ---------------------------------------------------
 
@@ -153,7 +155,8 @@ export function reasonFrom(body) {
 }
 
 // The provider's own model list: the raw entries, or an error that says why.
-export async function fetchModelEntries(provider, timeout = 10000) {
+// A minute to answer: some lists are big and the server behind them slow.
+export async function fetchModelEntries(provider, timeout = 60000) {
   const res = await fetch(`${root(provider)}/models`, {
     headers: authHeaders(provider),
     signal: AbortSignal.timeout(timeout),
@@ -224,7 +227,7 @@ export async function hello(provider, model, timeoutMs) {
 async function readStream(res) {
   const decoder = new TextDecoder();
   let buffer = "";
-  const out = { content: "", reasoning: "", tools: 0, tokens: undefined };
+  const out = { content: "", reasoning: "", tools: 0, calls: [], tokens: undefined };
 
   const take = (line) => {
     if (!line.startsWith("data:")) return;
@@ -240,6 +243,13 @@ async function readStream(res) {
     if (typeof delta.content === "string") out.content += delta.content;
     out.reasoning += delta.reasoning_content ?? delta.reasoning ?? "";
     if (delta.tool_calls?.length) out.tools += delta.tool_calls.length;
+    // The calls themselves, put together from the pieces they arrive in.
+    for (const piece of delta.tool_calls ?? []) {
+      const at = piece.index ?? out.calls.length - 1;
+      const call = (out.calls[Math.max(at, 0)] ??= { name: "", arguments: "" });
+      call.name += piece.function?.name ?? "";
+      call.arguments += piece.function?.arguments ?? "";
+    }
     if (chunk.usage?.completion_tokens) out.tokens = chunk.usage.completion_tokens;
   };
 
@@ -255,6 +265,73 @@ async function readStream(res) {
   return out;
 }
 
+// A model said to call tools: can it do a small job with one? It is given a
+// write_file tool and asked for a file; it passes when it calls it with a
+// path ending in notes.txt and content containing "hello". { toolsOk,
+// toolsWhy }, or nothing when it did not answer in time (no verdict).
+const CHECK_TOOL = {
+  type: "function",
+  function: {
+    name: "write_file",
+    description: "Write a file with the given text.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string" }, content: { type: "string" } },
+      required: ["path", "content"],
+    },
+  },
+};
+
+export async function toolCheck(provider, model, timeoutMs) {
+  const clip = (text, n) => (String(text).length > n ? `${String(text).slice(0, n)}…` : String(text));
+  try {
+    const res = await fetch(`${root(provider)}/chat/completions`, {
+      method: "POST", headers: authHeaders(provider),
+      body: JSON.stringify({
+        model, stream: true, tools: [CHECK_TOOL],
+        messages: [{ role: "user", content: "Create the file notes.txt containing exactly: hello" }],
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { toolsOk: false, toolsWhy: `a request with tools failed: ${res.status} ${reasonFrom(text)}`.trim() };
+    }
+    let content;
+    let calls;
+    if (/json/i.test(res.headers.get("content-type") ?? "")) {
+      const message = (await res.json().catch(() => null))?.choices?.[0]?.message ?? {};
+      content = message.content ?? "";
+      calls = (message.tool_calls ?? []).map((c) => ({ name: c.function?.name, arguments: c.function?.arguments ?? "" }));
+    } else {
+      const read = await readStream(res);
+      content = read.content;
+      calls = read.calls;
+    }
+    const call = calls.find((c) => c?.name === "write_file");
+    if (!call) {
+      return {
+        toolsOk: false,
+        toolsWhy: calls.length
+          ? `it called ${calls[0].name} instead of write_file`
+          : `it answered in text instead of calling the tool: "${clip(String(content).trim(), 80)}"`,
+      };
+    }
+    let given;
+    try {
+      given = JSON.parse(call.arguments || "{}");
+    } catch {
+      return { toolsOk: false, toolsWhy: `its tool call isn't valid JSON: ${clip(call.arguments, 80)}` };
+    }
+    return /notes\.txt$/.test(String(given.path ?? "")) && /hello/i.test(String(given.content ?? ""))
+      ? { toolsOk: true }
+      : { toolsOk: false, toolsWhy: `wrong arguments: ${clip(call.arguments, 100)}` };
+  } catch (err) {
+    if (err.name === "TimeoutError") return {};
+    return { toolsOk: false, toolsWhy: `a request with tools failed: ${err.cause?.code || err.message}` };
+  }
+}
+
 // One short message to a model, to see that it really answers: the key, the
 // access to it, its name, the server itself. Never throws.
 //
@@ -262,7 +339,7 @@ async function readStream(res) {
 // request that makes no difference; with a hundred in flight a buffered reply
 // holds its connection until the provider has written all of it, and a
 // hundred of those through one gateway queue behind each other.
-export async function tryModel(provider, model, timeoutMs) {
+export async function tryModel(provider, model, timeoutMs, { tools: tools_ = false } = {}) {
   const body = {
     model,
     messages: [{ role: "user", content: "Reply with just the word OK." }],
@@ -316,7 +393,7 @@ export async function tryModel(provider, model, timeoutMs) {
         error: `it answered with nothing${tokens ? ` (${tokens} tokens it said it wrote)` : ""}`,
       };
     }
-    return { ok: true, status: res.status, ms, reply: reply.slice(0, 80) };
+    return { ok: true, status: res.status, ms, reply: stripThink(reply).slice(0, 80), ...(tools_ && await toolCheck(provider, model, timeoutMs)) };
   } catch (err) {
     const ms = Date.now() - startedAt;
     if (err.name === "TimeoutError") {
@@ -418,6 +495,7 @@ export function loadConfig() {
 
   return {
     providers,
+    order: stored.__order ?? [],
     port: stored.PORT || "3000",
     streaming: streamingFromEnv(stored),
     rank: rankFromEnv(stored),
@@ -426,6 +504,17 @@ export function loadConfig() {
     replyTag: (stored.REPLY_TAG || "").trim(),
     behavior: behaviorFromEnv(stored),
   };
+}
+
+// Your models in the order shown first, the rest after them in the order they
+// had. Used by "Save list" and "Move to top".
+export function setOrder(items) {
+  return edit((cfg) => {
+    const ids = new Set(cfg.providers.flatMap((p) => p.models.map((m) => `${p.name}\u0000${m}`)));
+    const given = (items ?? []).filter((e) => e && ids.has(`${e.provider}\u0000${e.model}`));
+    cfg.order = [...given, ...cfg.order];
+    return given.length;
+  });
 }
 
 export function edit(mutate) {
@@ -573,12 +662,17 @@ export function potPark(provider, model, parked) {
 // The settings that are not about a provider.
 export function saveSettings(input) {
   return edit((cfg) => {
+    let notes = [];
     if (input.port !== undefined) cfg.port = String(input.port || "3000");
     if (input.streaming !== undefined) cfg.streaming = input.streaming !== false;
     if (Array.isArray(input.rank)) cfg.rank = input.rank;
     if (input.testTimeout !== undefined) cfg.testTimeout = testTimeoutFromEnv({ TEST_TIMEOUT: input.testTimeout });
-    if (input.behavior && typeof input.behavior === "object") cfg.behavior = changeBehavior(cfg.behavior, input.behavior);
+    if (input.behavior && typeof input.behavior === "object") {
+      cfg.behavior = changeBehavior(cfg.behavior, input.behavior);
+      notes = fitTimes(cfg.behavior, input.behavior);
+    }
     if (input.replyTag !== undefined) cfg.replyTag = String(input.replyTag ?? "").replace(/[\r\n]+/g, " ").trim().slice(0, 200);
     if (input.testLanes !== undefined) cfg.testLanes = testLanesFromEnv({ TEST_LANES: input.testLanes });
+    return notes;
   });
 }

@@ -20,13 +20,13 @@ import { displayName } from "./config.js";
 import {
   mask, loadConfig, fetchModelEntries, entryDetails, hello, measureContext,
   saveProvider, deleteProvider, setProviderOn, setProviderList, setAdded,
-  potAdd, potRemove, potPark, saveSettings,
+  potAdd, potRemove, potPark, saveSettings, setOrder,
 } from "./providers.js";
 import { allStats, successRate, coolingFor, resetStats } from "./stats.js";
 import { loadCatalog, factsFor, catalogAge, catalogSize } from "./modelsdev.js";
 import { saveSetup, saveMeasured, forgetSetup, setupFor } from "./setup.js";
 import {
-  tests, runState, startRun, stopRun, running, testOne, forgetTests, onRunEnd,
+  tests, loadTests, runState, startRun, stopRun, running, testOne, forgetTests, onRunEnd,
 } from "./testrun.js";
 import { listRequests, clearRequests, readDetail, KEEP } from "./reqlog.js";
 import { authorize, panelLinks } from "./access.js";
@@ -91,10 +91,9 @@ const writeJson = (path, value) => {
   }
 };
 
-// Test results are not kept (see testrun.js), and neither is the file an
-// older version kept them in. The model lists it used to keep by address are
-// replaced by the ones kept by name.
-rmSync(TESTS_PATH, { force: true });
+// Test results are kept (see testrun.js). The model lists it used to keep by
+// address are replaced by the ones kept by name.
+loadTests();
 rmSync(OLD_LISTS_PATH, { force: true });
 
 // Each provider's model list, kept after it is loaded:
@@ -146,6 +145,7 @@ function stateOf() {
   const cfg = loadConfig();
   return {
     providers: cfg.providers.map(shown),
+    order: cfg.order,
     port: cfg.port,
     streaming: cfg.streaming,
     rank: cfg.rank,
@@ -297,7 +297,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         const body = await readBody(req);
         const done = await saveProvider(body);
         forgetList(done.name, ...(done.was ? [done.was] : []));
-        forgetTests();
+        forgetTests(done.name, ...(done.was ? [done.was] : []));
         json(res, 200, { ...stateOf(), saved: done.name });
         await changed();
         return;
@@ -308,7 +308,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         const gone = loadConfig().providers.find((p) => p.name === name);
         deleteProvider(name);
         forgetList(name);
-        forgetTests();
+        forgetTests(name);
         // What was said about its models went with it.
         for (const model of gone?.models ?? []) forgetSetup(gone.baseUrl, model);
         json(res, 200, stateOf());
@@ -369,9 +369,20 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         return;
       }
 
-      if (req.method === "POST" && path === "/api/settings") {
-        saveSettings(await readBody(req));
+      // Your models in the order shown first, the rest after them: the order
+      // they are asked in.
+      if (req.method === "POST" && path === "/api/order") {
+        const { items } = await readBody(req);
+        if (!Array.isArray(items)) throw new Error("items: a list of { provider, model }");
+        setOrder(items);
         json(res, 200, stateOf());
+        await changed();
+        return;
+      }
+
+      if (req.method === "POST" && path === "/api/settings") {
+        const notes = saveSettings(await readBody(req));
+        json(res, 200, { ...stateOf(), notes });
         return;
       }
 
@@ -638,11 +649,10 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
         };
         for (const [name, fn] of Object.entries(handlers)) bus.on(name, fn);
 
-        // Proxies and browsers drop an idle event stream; a comment line every
-        // twenty seconds keeps it open and costs nothing.
-        const beat = setInterval(() => {
-          if (!res.writableEnded) res.write(": beat\n\n");
-        }, 20000);
+        // Proxies and browsers drop an idle event stream; a line every twenty
+        // seconds keeps it open and costs nothing. A real message rather than
+        // a comment, so the page can tell a quiet stream from a dead one.
+        const beat = setInterval(() => send("beat"), 20000);
 
         req.on("close", () => {
           clearInterval(beat);

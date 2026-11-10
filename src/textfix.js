@@ -4,24 +4,41 @@ import { createHash } from "node:crypto";
 // --- thinking written into the reply ---------------------------------------
 
 // Removes the thinking some models put in the normal content: a <think> block
-// the reply starts with (still open: all of it so far). A reply that only
-// mentions the tag later keeps its text. A closing tag with no opening one
-// counts only for a model that thinks (some leave the opening out).
+// the reply starts with (<thought> from Gemini; still open: all of it so
+// far). A reply that only mentions the tag later keeps its text. A closing
+// tag with no opening one counts only for a model that thinks (some leave the
+// opening out).
 export function stripThink(text, thinks = false) {
   const t = String(text ?? "");
-  const lead = /^\s*<think>[\s\S]*?(<\/think>|$)/.exec(t);
+  const lead = /^\s*<(think|thought)>[\s\S]*?(<\/\1>|$)/.exec(t);
   if (lead) return t.slice(lead[0].length).trimStart();
   const close = thinks && !t.includes("<think>") ? t.indexOf("</think>") : -1;
   return close !== -1 ? t.slice(close + 8).trimStart() : t;
 }
 
-// What can be shown so far while streaming: holds back a half-received "<think>".
+// What can be shown so far while streaming: holds back a half-received
+// "<think>" or "<thought>".
 export function visible(full, thinks = false) {
   const v = stripThink(full, thinks);
-  for (let k = 7; k > 0; k--) {
-    if (v.endsWith("<think>".slice(0, k))) return v.slice(0, -k);
+  for (const tag of ["<thought>", "<think>"]) {
+    for (let k = tag.length - 1; k > 0; k--) {
+      if (v.endsWith(tag.slice(0, k)) && v.trim() === tag.slice(0, k)) return v.slice(0, -k);
+    }
   }
   return v;
+}
+
+// --- one model, written differently ----------------------------------------
+
+// A model's name without its version: its date, "latest", "preview"
+// ("mistral-large-2411" and "mistral-large-latest" are "mistral-large").
+export function family(model) {
+  let f = String(model).split("/").pop().toLowerCase();
+  for (let was; was !== f;) {
+    was = f;
+    f = f.replace(/[-_:@.]?(latest|preview|exp|\d{4}(-\d{2}){0,2}|\d{6,8})$/, "");
+  }
+  return f;
 }
 
 // --- a reply going round in circles ----------------------------------------

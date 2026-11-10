@@ -7,10 +7,11 @@ import { callUpstream } from "./server.js";
 import { streamOpenAIToAnthropic, primeStream } from "./stream.js";
 import { refusedPart, applyQuirks, limitStated, windowFor } from "./learned.js";
 import { outage, unusable, isPage, retryAfterMs } from "./failures.js";
-import { stripThink, visible, loopStart, leakedMarkup, callId, simpleSchema, est, tokensOf } from "./textfix.js";
-import { effortFor, behaviorFromEnv, behaviorToEnv, changeBehavior, DEFAULTS } from "./behavior.js";
+import { stripThink, visible, loopStart, leakedMarkup, callId, simpleSchema, est, tokensOf, family } from "./textfix.js";
+import { effortFor, behaviorFromEnv, behaviorToEnv, changeBehavior, fitTimes, DEFAULTS } from "./behavior.js";
 import { toOpenAIRequest, toAnthropicResponse } from "./translate.js";
 import { renderTag } from "./replytag.js";
+import { verdictFor } from "./stats.js";
 
 const NO_STATS = {
   order: (attempts) => ({ attempts, head: [], cooling: 0 }),
@@ -387,7 +388,11 @@ test("thinking is taken out of a reply however it is written", () => {
   assert.equal(stripThink("no opening</think>answer", true), "answer");
   assert.equal(stripThink("no opening</think>answer", false), "no opening</think>answer");
   assert.equal(visible("<think>still going"), "");
-  assert.equal(visible("done <thi"), "done ");
+  assert.equal(visible("<thi"), "", "a tag half received at the start is held back");
+  assert.equal(visible("done <thi"), "done <thi", "a tag can only open a reply, so later it is just text");
+  assert.equal(stripThink("<thought>planning</thought>answer"), "answer", "Gemini writes <thought>");
+  assert.equal(visible("<thought>still going"), "");
+  assert.equal(visible("<thou"), "");
   const reply = toAnthropicResponse({ choices: [{ message: { content: "<think>x</think>hello" }, finish_reason: "stop" }] }, "m", "u");
   assert.equal(reply.content[0].text, "hello");
 });
@@ -454,4 +459,106 @@ test("behavior settings read, validate, and write only what differs", () => {
 
 test("the label still works with the new walk", () => {
   assert.equal(renderTag("[{model}]", { provider: "p", model: "m", requested: "r" }), "[m] ");
+});
+
+// --- what Heart 0.1.43 to 0.1.62 learned ---------------------------------
+
+test("a model's name without its version", () => {
+  assert.equal(family("mistral-large-2411"), "mistral-large");
+  assert.equal(family("mistral-large-latest"), "mistral-large");
+  assert.equal(family("models/gemini-2.5-flash-preview"), "gemini-2.5-flash");
+  assert.equal(family("google/gemma-4-31b-it:free"), "gemma-4-31b-it:free", "a size or a tag is not a version");
+  assert.equal(family("voxtral-small-2507"), "voxtral-small");
+});
+
+test("another version of a model that just failed waits until the others have had a turn", async (t) => {
+  const calls = stub(t, (c) => (c.body.model === "mistral-large-latest" ? fail(500) : c.body.model === "other" ? ok() : fail(500)));
+  const r = await walk(REQ, [PROVIDER("one", "mistral-large-latest", "mistral-large-2411", "other")], { behavior: { onFail: "any" } });
+  assert.deepEqual(calls.map((c) => c.body.model), ["mistral-large-latest", "other"]);
+  assert.equal(r.model, "other");
+});
+
+test("a sibling version is still tried at the end rather than never", async (t) => {
+  const calls = stub(t, (c) => (c.body.model === "mistral-large-2411" ? ok() : fail(500)));
+  const r = await walk(REQ, [PROVIDER("one", "mistral-large-latest", "mistral-large-2411", "other")], { behavior: { onFail: "any" } });
+  assert.deepEqual(calls.map((c) => c.body.model), ["mistral-large-latest", "other", "mistral-large-2411"]);
+  assert.equal(r.model, "mistral-large-2411");
+});
+
+test("Gemini's thoughts are asked for with an effort, and taken out of the reply", async () => {
+  const withEffort = toOpenAIRequest(REQ, "models/gemini-3-flash-preview", "https://g.test", false, { effort: "low" });
+  assert.deepEqual(withEffort.extra_body, { google: { thinking_config: { include_thoughts: true } } });
+  assert.equal("extra_body" in toOpenAIRequest(REQ, "models/gemini-3-flash-preview", "https://g.test", false, {}), false, "nothing without an effort");
+  assert.equal("extra_body" in toOpenAIRequest(REQ, "gpt-oss-120b", "https://g.test", false, { effort: "low" }), false, "and only for Gemini");
+  assert.equal(refusedPart(400, "Unknown name \"extra_body\"", withEffort), "noThoughts");
+  assert.equal("extra_body" in applyQuirks(withEffort, { noThoughts: true }), false);
+  const res = fakeRes();
+  await streamOpenAIToAnthropic({ body: sse(
+    { choices: [{ delta: { content: "<thou" } }] }, { choices: [{ delta: { content: "ght>hmm</thought>Hello" }, finish_reason: "stop" }] },
+  ) }, res, "m", "http://x");
+  assert.equal(events(res).filter((e) => e.delta?.type === "text_delta").map((e) => e.delta.text).join(""), "Hello");
+});
+
+test("the last line of a stream counts without a line break after it", async () => {
+  const res = fakeRes();
+  const body = new ReadableStream({
+    start(c) {
+      c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "all of it" }, finish_reason: "stop" }] })}`));
+      c.close();
+    },
+  });
+  const sent = await streamOpenAIToAnthropic({ body }, res, "m", "http://x");
+  assert.equal(sent.text, "all of it");
+  assert.equal(sent.cut, false, "it said why it ended");
+});
+
+test("a stream that closes with neither [DONE] nor a reason may be cut, and says so", async () => {
+  const res = fakeRes();
+  const body = new ReadableStream({
+    start(c) {
+      c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "half a sen" } }] })}\n\n`));
+      c.close();
+    },
+  });
+  const sent = await streamOpenAIToAnthropic({ body }, res, "m", "http://x");
+  assert.equal(sent.cut, true);
+  assert.equal(verdictFor(REQ, sent), "stream_died");
+  assert.equal(events(res).find((e) => e.type === "message_delta").delta.stop_reason, "max_tokens", "Claude Code carries on from there");
+  const whole = await streamOpenAIToAnthropic({ body: sse({ choices: [{ delta: { content: "ok" } }] }) }, fakeRes(), "m", "http://x");
+  assert.equal(whole.cut, false, "[DONE] is enough");
+});
+
+test("a model that says it calls tools is asked to do a small job with one", async (t) => {
+  const { toolCheck } = await import("./providers.js");
+  const provider = { baseUrl: "https://t.test/v1", apiKey: "k", name: "t" };
+  const calls = (name, args) => [{ choices: [{ delta: { tool_calls: [{ index: 0, function: { name, arguments: args.slice(0, 5) } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(5) } }] } }] }];
+  const answer = (chunks) => ({ ok: true, status: 200, headers: new Headers({ "content-type": "text/event-stream" }), body: sse(...chunks) });
+  stub(t, () => answer(calls("write_file", '{"path":"notes.txt","content":"hello"}')));
+  assert.deepEqual(await toolCheck(provider, "m", 1000), { toolsOk: true }, "pieces of one call are put together");
+  stub(t, () => answer([{ choices: [{ delta: { content: "Sure, I will create it." } }] }]));
+  const text = await toolCheck(provider, "m", 1000);
+  assert.equal(text.toolsOk, false);
+  assert.match(text.toolsWhy, /text instead of calling the tool/);
+  stub(t, () => answer(calls("write_file", '{"path":"other.txt","content":"hello"}')));
+  assert.match((await toolCheck(provider, "m", 1000)).toolsWhy, /wrong arguments/);
+  stub(t, () => answer(calls("run_command", '{"command":"ls"}')));
+  assert.match((await toolCheck(provider, "m", 1000)).toolsWhy, /instead of write_file/);
+  stub(t, () => fail(400, "tools are not supported"));
+  assert.match((await toolCheck(provider, "m", 1000)).toolsWhy, /^a request with tools failed: 400/);
+});
+
+test("a reply may go quiet no less than a model may take to start", () => {
+  assert.equal(behaviorFromEnv({}).replyIdle, 150);
+  assert.equal(behaviorFromEnv({ REPLY_IDLE: "1" }).replyIdle, 10, "clamped");
+  assert.deepEqual(behaviorToEnv({ ...DEFAULTS, replyIdle: 200 }), ["REPLY_IDLE=200"]);
+  const raised = { ...DEFAULTS, replyStart: 300 };
+  assert.equal(fitTimes(raised, { replyStart: 300 }).length, 1);
+  assert.equal(raised.replyIdle, 300, "the one just set stays, the other moves");
+  const lowered = { ...DEFAULTS, replyIdle: 20 };
+  assert.equal(fitTimes(lowered, { replyIdle: 20 }).length, 1);
+  assert.equal(lowered.replyStart, 20);
+  assert.deepEqual(fitTimes({ ...DEFAULTS }, { replyStart: 60 }), [], "nothing to say when they agree");
+  assert.equal(changeBehavior(DEFAULTS, { replyIdle: 400 }).replyIdle, 400);
+  assert.throws(() => changeBehavior(DEFAULTS, { replyIdle: 5 }), /replyIdle/);
 });
