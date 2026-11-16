@@ -56,8 +56,9 @@ Claude Code flags still work: `opencc claude --continue`.
 
 ## How it works
 
-All models from all providers go into one list. The order you type does not
-matter.
+All models from all providers go into one list, **Your models**, in the order
+you save with **Save list**. This is HeartCode's way of picking, and the same
+`config.json` works in both.
 
 Each request is filed by what it needed: **tools**, **image** or **document**
 (and **text** for the rare request carrying none of them). opencc saves the
@@ -66,15 +67,41 @@ status code. Every request it serves is also logged to
 `~/.opencc/requests.jsonl`, the last 100, which is what the Requests page
 shows.
 
-It then picks a model with
-[Thompson sampling](https://en.wikipedia.org/wiki/Thompson_sampling):
+**Which model is asked**
 
-- Good record: picked often.
-- Never tried: gets a fair chance.
-- Bad record: picked rarely, but still tested sometimes.
+1. The **first** is the first of your models, #1 on the page. If it has failed
+   most of its recent work (its track record, below) it is skipped for the
+   first of your models that has not.
+2. When it fails, the next is **the best-ranked of the rest** (the best share of
+   [LMArena](https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset)'s
+   coding, web app, agent and hardest-prompt rankings, so #5 of 200 beats #50
+   of 200), not simply the next one down your list. A model that keeps doing
+   well moves up and one that keeps failing moves down (its score x0.3 when it
+   never failed, x1.7 when it always does); a model with a good record that
+   isn't ranked comes before the other unranked; the unranked stay in your
+   order.
+3. Whatever cannot take the request goes behind all of them, each group in
+   that same order: a model whose window is too small for it, one known not to
+   do something it needs (tool calls, images), one that was just rate-limited
+   or unreachable.
+4. A provider that answered with an error (400 or above) is not asked again
+   through its other models until the other providers have had a turn. When all
+   have, what was held back goes in order.
 
-So the work spreads over all models that answer. Five requests in a row usually
-go to five different models.
+**Track record** (`~/.opencc/records.json`, HeartCode's file and shape, on by
+default, **Behavior** can switch it off): a whole reply counts as done; no
+answer, a refused key, a plan needed or a server error counts against the
+model (a rate limit does not, and neither does a request too big for it); a
+reply that was empty, going round in circles, a tool call written out as text
+or broken arguments counts half; one that died part way counts in full. Older
+events fade, so a model that got better shows it. It needs about four recent
+events before it says anything, and answers bring a model back.
+
+The old way, Thompson sampling over the record in `stats.jsonl` (a good record
+is picked often, a model never tried gets a fair chance, work spreads over
+everything that answers), is **Behavior → Which model is asked first → A draw
+by each model's record**, or `PICK=record`. The record in `stats.jsonl` still
+decides the cool-offs below either way.
 
 Other rules:
 
@@ -84,7 +111,7 @@ Other rules:
   a bigger one.
 - Old results count less. Half life is four days.
 - A 429 or a timeout puts the model at the back for 15 to 60 seconds.
-- If a model fails, the next one in the list is tried.
+- If a model fails, the next one is the best-ranked of the rest (above).
 - 5xx: one retry. 4xx: move on.
 - A 200 that came back empty, or with tool arguments nothing can parse, is
   not served. The next model is tried instead.
@@ -105,11 +132,11 @@ default unless it says so.
 
 **A reply must start.** A streamed reply is held until its first real chunk.
 A model that doesn't start answering within **A reply must start within**
-(default 60 s, 5 to 600), or answers with an error inside a 200, or ends the
+(default 45 s, 5 to 600), or answers with an error inside a 200, or ends the
 stream with nothing in it, is passed over and the next model goes on, before
 Claude Code has been sent anything. A keep-alive ping does not count as
 starting. Once started, a stream that goes quiet for **A started reply may go
-quiet for** (default 150 s, 10 to 1800, never less than the wait above: a
+quiet for** (default 60 s, 10 to 1800, never less than the wait above: a
 pause mid-reply has the same causes as a slow start) fails instead of hanging.
 
 **A stream cut short.** A reply that closes with neither `[DONE]` nor a
@@ -142,11 +169,11 @@ that's possible, and it counts against the model when it isn't.
 | Ask the same one again first | for a rate limit, an outage or a timeout, up to **Tries of one model** (1 to 20), waiting as long as the provider said (`Retry-After`, or Gemini's `retryDelay`) |
 | Move on, retry nothing | never asks one model twice |
 
-A provider whose key is refused (401, 402, 403), that can't be reached, or
-whose gateway is down, is not asked again through its other models until the
-other providers have had a turn. A 429 or a 404 is about one model, so its
-provider keeps its place. A 403 that is a web page comes from a gateway and
-counts as an outage.
+A provider that answered with an error (400 or above, a 429 too) is not asked
+again through its other models until the other providers have had a turn, as in
+HeartCode; one that could not be reached at all gave no answer, so it isn't
+held back (its cool-off and track record handle it). A 403 that is a web page
+comes from a gateway and counts as an outage.
 
 **Keep trying when every model is busy** (off by default) waits, then goes
 round again until the ten-minute deadline or until Claude Code goes away,
@@ -289,7 +316,7 @@ answered, which one replied. Filter to failures or fallbacks.
 Testing runs on the server, every provider at once, **Test lanes** models at
 a time from each. A provider that answers 429 drops to one lane, waits, and
 its models go back on the queue — a rate limit is not a verdict on a model.
-A model that has not answered within **Test timeout** counts as a failure.
+A model that has not answered within **Test timeout** (a minute by default, and never less than the time a reply may take to start) counts as a failure.
 A model that says it calls tools (models.dev, or one nobody has described) is
 also given a small job with one: a `write_file` tool and "create notes.txt
 containing hello". It passes by calling it with those arguments. The Works?
@@ -367,7 +394,7 @@ works as it is: the providers, your models, and the order they are asked in.
   "provider": "groq", "model": "openai/gpt-oss-20b",
   "rotation": { "on": "failure", "retries": 2, "next": "first",
                 "then": [{ "provider": "mistral", "model": "mistral-large-4" }] },
-  "testTimeout": 19, "replyStart": 60, "replyIdle": 150,
+  "testTimeout": 60, "replyStart": 45, "replyIdle": 60,
   "opencc": { "port": "9753", "behavior": { "pick": "record" } }
 }
 ```
@@ -401,15 +428,16 @@ These are the keys it takes, which are also what Behavior and the panel set:
 | `PROVIDER_DISABLED` | `true` to skip it |
 | `PROVIDER_MODELS_DISABLED` | models to skip, comma separated |
 | `PORT` `STREAMING` | global settings |
-| `TEST_TIMEOUT` | seconds the panel's Test waits for a model, default 10 |
+| `TEST_TIMEOUT` | seconds the panel's Test waits for a model, default 60, never under `REPLY_START` |
 | `TEST_LANES` | models tested at once per provider, default 4 |
 | `PROVIDER_RANK` | providers you prefer, best first, by base URL |
 | `REPLY_TAG` | label put in front of each reply, e.g. `[{provider}-{model}]` |
 | `PICK` | `order` (default): your order, top first; `record`: a draw by the record |
 | `ON_FAIL` | `failure` (default), `retries` or `any` |
 | `RETRIES` | tries of one model for `retries`, 1 to 20, default 2 |
-| `REPLY_START` | seconds a streamed reply may take to start, default 60 |
-| `REPLY_IDLE` | seconds a started reply may go quiet, default 150, never under `REPLY_START` |
+| `REPLY_START` | seconds a streamed reply may take to start, default 45 |
+| `REPLY_IDLE` | seconds a started reply may go quiet, default 60, never under `REPLY_START` |
+| `TRACK_RECORD` | `off`: keep no track record and don't let it move a model (`trackRecord: false` in `config.json`) |
 | `KEEP_TRYING` | `on`: when everything is busy, wait and go round again |
 | `EFFORT` | `low`, `medium`, `high` or `follow`; default sends nothing |
 | `BEST_FIT` | `on`: tilt the draw by public rankings |
@@ -430,6 +458,36 @@ OPENCC_E2E=1 node --test src/e2e.test.js # real API calls
 
 ## Changelog
 
+### 5.2.1 - 2026-11-16
+
+From HeartCode's 0.1.63 to 0.1.67, the parts that pick and time models.
+
+- **The pick is HeartCode's**: the first of your models (skipping one that has
+  failed most of its recent work), then, after a failure, the best-ranked of the
+  rest by LMArena's coding, web app, agent and hardest-prompt places moved by
+  each model's track record, the unranked in your order (before, the next one
+  down the list). See "How it works".
+- **Track record** (`records.json`, on by default): replies and failures per
+  model, fading with time; a poor model doesn't come first. A *poor* tag and a
+  *Failing lately* state filter on Your models; Reset record clears it.
+- **An error from a provider** (400 and above, 429 too) sends the next ask to
+  another provider, as HeartCode does (before, only a refused key or an outage
+  did).
+- **Check models**: one button on Your models that fetches model info and the
+  rankings, then tests the models shown (HeartCode 0.1.68).
+- **Time limits set for free models**: a reply must start within 45 s (was 60),
+  a started reply may go quiet for 60 s (was 150), a test waits a minute (was
+  10) and never less than a reply may take to start; changing one moves the
+  others that would contradict it and says so.
+
+**Not copied from HeartCode 0.1.63 to 0.1.67**: helpers picked by job and
+speed, the done tool, notifications, loops with steps in between, protected
+`.heartcode` files, `--system-prompt` and `--logs` (an agent's work, not a
+proxy's). *Keep trying when every model is busy* stays off by default:
+HeartCode waits for an outage until you press Esc, but Claude Code retries a
+failed request itself, and a proxy that holds it for up to ten minutes looks
+frozen.
+
 ### 5.2.0 - 2026-11-10
 
 - **Models are asked in your order**, top first, as in HeartCode (before, the
@@ -448,7 +506,7 @@ From HeartCode's 0.1.43 to 0.1.62, the parts that belong in a proxy.
 
 - **HTTP/1.1 requests** to providers, models.dev, the rankings and npm (see
   "When a model fails or is slow").
-- **Stalled** is a setting now: how long a started reply may go quiet (150 s
+- **Stalled** is a setting now: how long a started reply may go quiet (60 s
   by default, 10 to 1800), kept at or above the start wait.
 - **A stream cut short** is noticed, counted against the model and ended as
   `max_tokens`; the last line of a stream is read even without a line break.
@@ -750,6 +808,10 @@ in a URL, key or model name surfaces during setup instead of mid-session.
 First release. Single provider, Big and Small model, streaming and tool calls.
 
 ## Contributing
+
+In a clone, `git config core.hooksPath .githooks` turns on a pre-commit hook (no
+packages) that bumps the patch version in `package.json` on every commit, unless
+the commit already changes it. `git commit --no-verify` skips it.
 
 Contributions are warmly welcomed and greatly appreciated! Whether it's a bug fix, new feature, or improvement, your input helps make this project better for everyone.
 

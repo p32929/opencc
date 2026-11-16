@@ -3,7 +3,7 @@
 // own HOME, so no test touches the real ~/.opencc.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -461,4 +461,76 @@ test("models are asked in your order when that is how they are picked", async ()
   }
   const cooling = chooseOrder(attempts, "text", { lookup: () => undefined, lookupOther: () => undefined, fixed, catalogTooBig: (b, m) => m === "m1", chars: 10 });
   assert.equal(cooling.attempts.at(-1).model, "m1", "one too small for the request goes behind");
+});
+
+test("HeartCode's pick: the first of your models, then the best-ranked, a poor record moving a model down", async () => {
+  const { chooseOrder } = await import("./stats.js");
+  const url = "https://p.test/v1";
+  const names = ["first", "plain", "ranked", "poorRanked", "goodUnranked"];
+  const attempts = names.map((model) => ({ provider: { baseUrl: url, name: "p" }, model }));
+  const fixed = new Map(names.map((m, n) => [`${url}\u0000${m}`, n]));
+  const score = { ranked: 0.1, poorRanked: 0.05 * 1.7 * 1.4, goodUnranked: 1.1 }; // lower is better; no score: Infinity
+  const standing = ({ model }) => ({ score: score[model] ?? Infinity, poor: model === "poorRanked" });
+  const run = (extra = {}) => chooseOrder(attempts, "text", { lookup: () => undefined, lookupOther: () => undefined, fixed, standing, ...extra }).attempts.map((a) => a.model);
+  assert.deepEqual(run(), ["first", "ranked", "goodUnranked", "plain", "poorRanked"], "#1, then ranked, a good record before the other unranked, the poor one last");
+  const firstPoor = (a) => ({ score: Infinity, poor: a.model === "first" });
+  assert.equal(run({ standing: firstPoor })[0], "plain", "the first that has not been failing starts the request");
+  assert.equal(run({ catalogTooBig: (b, m) => m === "first", chars: 5 })[0], "plain", "one too small for it goes behind, whatever its place");
+});
+
+test("a model's track record builds from what happened, fades, and a model failing most of its work is poor", () => {
+  const home = mkdtempSync(join(tmpdir(), "opencc-record-"));
+  const here = dirname(new URL(import.meta.url).pathname);
+  const script = `
+    import { record, recordOf, unreliable, withRecord, recordView, failRate, forgetRecords } from "${join(here, "record.js")}";
+    const t = { provider: "p", model: "m" };
+    const out = {};
+    record(t, "no-answer"); record(t, "no-answer");
+    out.fewIsNotPoor = unreliable(t);
+    record(t, "no-answer"); record(t, "no-answer");
+    out.manyIsPoor = unreliable(t);
+    out.rate = Math.round(failRate(t) * 100);
+    out.rankedMoved = withRecord(t, 0.1) > 0.1;
+    out.unrankedStaysLast = withRecord(t, Infinity) === Infinity;
+    for (let i = 0; i < 12; i++) record(t, "done");
+    out.recovers = !unreliable(t);
+    out.betterNow = withRecord(t, 0.1) < 0.1;
+    out.view = recordView(t);
+    for (let i = 0; i < 4; i++) record({ provider: "p", model: "other" }, "done");
+    out.good = withRecord({ provider: "p", model: "other" }, Infinity) < 2;
+    out.few = withRecord({ provider: "p", model: "never" }, 0.2);
+    console.log(JSON.stringify(out));
+    forgetRecords();
+  `;
+  const file = join(home, "run.mjs");
+  writeFileSync(file, script);
+  const r = spawnSync(process.execPath, [file], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.fewIsNotPoor, false, "two failures are too little to tell");
+  assert.equal(out.manyIsPoor, true);
+  assert.ok(out.rate >= 70);
+  assert.equal(out.rankedMoved, true, "a model that fails moves down its ranking");
+  assert.equal(out.unrankedStaysLast, true);
+  assert.equal(out.recovers, true, "answers bring it back");
+  assert.equal(out.betterNow, true);
+  assert.equal(out.view.poor, false);
+  assert.equal(out.good, true, "an unranked model that never failed comes before the other unranked");
+  assert.equal(out.few, 0.2, "no record: unchanged");
+});
+
+test("the waits keep to HeartCode's rule: a test waits at least as long as a reply may take to start", async () => {
+  const { fitTest, DEFAULTS } = await import("./behavior.js");
+  const a = { testTimeout: 60, behavior: { ...DEFAULTS, replyStart: 120 } };
+  const raised = fitTest(a, { behavior: { replyStart: 120 } });
+  assert.equal(a.testTimeout, 120, "the one just set stays, the other moves");
+  assert.equal(raised.notes.length, 1);
+  const b = { testTimeout: 20, behavior: { ...DEFAULTS, replyStart: 45 } };
+  const lowered = fitTest(b, { testTimeout: 20 });
+  assert.equal(b.behavior.replyStart, 20);
+  assert.equal(lowered.movedStart, true);
+  const c = { testTimeout: 2, behavior: { ...DEFAULTS, replyStart: 45 } };
+  fitTest(c, { testTimeout: 2 });
+  assert.deepEqual([c.testTimeout, c.behavior.replyStart], [5, 5], "never under the shortest a reply may take to start");
+  assert.deepEqual(fitTest({ testTimeout: 60, behavior: { ...DEFAULTS } }, { testTimeout: 60 }).notes, []);
+  assert.deepEqual([DEFAULTS.replyStart, DEFAULTS.replyIdle], [45, 60], "set for free models out of the box");
 });

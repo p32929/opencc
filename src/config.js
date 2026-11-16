@@ -132,9 +132,9 @@ export function rankFromEnv(values) {
 // This is the panel's budget only. A real request carries a large tool set
 // and legitimately runs to minutes, which is why the proxy has its own far
 // longer timeout and this must never be wired to it.
-export const DEFAULT_TEST_TIMEOUT = 10;
+export const DEFAULT_TEST_TIMEOUT = 60;
 const MIN_TEST_TIMEOUT = 1;
-const MAX_TEST_TIMEOUT = 300;
+const MAX_TEST_TIMEOUT = 600;
 
 export function testTimeoutFromEnv(values) {
   // An empty value means the key is there but says nothing, which is the

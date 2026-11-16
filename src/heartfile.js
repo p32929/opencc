@@ -9,6 +9,7 @@
 //               then: the rest of your models, in order, which is the order
 //               they are asked in
 //   testTimeout, replyStart, replyIdle   seconds
+//   trackRecord   false: no track record is kept or used (default on)
 //
 // What only opencc has (its port, streaming, the provider ranking, the reply
 // label, the other behavior settings, parked models) is under "opencc", which
@@ -74,6 +75,7 @@ export function envFromJson(json) {
   put(ENV.replyIdle, json.replyIdle);
   for (const k of ["pick", "effort", "logDetail", "logDays"]) put(ENV[k], b[k]);
   for (const k of ["keepTrying", "remote", "fit", "stay"]) if (typeof b[k] === "boolean") env[ENV[k]] = bool(b[k]);
+  if (json.trackRecord === false) env[ENV.trackRecord] = "off";
   return env;
 }
 
@@ -137,6 +139,7 @@ export function writeConfigJson({ providers, order, port, streaming = true, rank
   keep("testTimeout", testTimeout, defaults.testTimeout);
   keep("replyStart", b.replyStart, DEFAULTS.replyStart);
   keep("replyIdle", b.replyIdle, DEFAULTS.replyIdle);
+  b.trackRecord ? delete json.trackRecord : (json.trackRecord = false); // HeartCode's own key
 
   const x = {};
   if (port) x.port = String(port);

@@ -134,3 +134,9 @@ export function rankIn(model, key, data) {
   const best = at.reduce((a, b) => (b.rank < a.rank ? b : a))
   return { rank: best.rank, of: list.length, as: best.name, score: best.score, votes: best.votes }
 }
+
+// How good a model is, by its best share of the rankings that matter for coding work (coding, web
+// apps, long real tasks, hard prompts): #5 of 200 is 0.025; lower is better, Infinity when it's in none
+export function scoreOf(model, data = loadRankings()) {
+  return Math.min(...['text:coding', 'webdev:webdev', 'agent:overall', 'text:hard_prompts'].map((l) => rankIn(model, l, data)).filter(Boolean).map((r) => r.rank / r.of), Infinity)
+}

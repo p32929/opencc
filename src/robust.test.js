@@ -175,11 +175,18 @@ test("a provider whose key is refused is not asked again through its other model
   assert.equal(r.model, "d");
 });
 
-test("a rate-limited model does not hold back its provider's other models", async (t) => {
+test("a rate-limited model holds back its provider's other models until the other providers have had a turn", async (t) => {
   const calls = stub(t, (c) => (c.body.model === "a" ? fail(429) : ok()));
   const r = await walk(REQ, [PROVIDER("one", "a", "b"), PROVIDER("two", "c")]);
+  assert.equal(r.model, "c", "HeartCode's rule: an error from a provider sends the next ask to another one");
+  assert.deepEqual(calls.map((c) => c.body.model), ["a", "c"]);
+});
+
+test("a provider that cannot be reached is not 'down': it did not answer with an error", async (t) => {
+  const calls = stub(t, (c) => (c.body.model === "a" ? (() => { throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }); })() : ok()));
+  const r = await walk(REQ, [PROVIDER("one", "a", "b"), PROVIDER("two", "c")], { behavior: { onFail: "any" } });
   assert.equal(r.model, "b");
-  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map((c) => c.body.model), ["a", "b"]);
 });
 
 test("held-back models are tried at the end rather than never", async (t) => {
@@ -471,15 +478,17 @@ test("a model's name without its version", () => {
   assert.equal(family("voxtral-small-2507"), "voxtral-small");
 });
 
+const refused = () => { throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }); };
+
 test("another version of a model that just failed waits until the others have had a turn", async (t) => {
-  const calls = stub(t, (c) => (c.body.model === "mistral-large-latest" ? fail(500) : c.body.model === "other" ? ok() : fail(500)));
+  const calls = stub(t, (c) => (c.body.model === "mistral-large-latest" ? refused() : c.body.model === "other" ? ok() : refused()));
   const r = await walk(REQ, [PROVIDER("one", "mistral-large-latest", "mistral-large-2411", "other")], { behavior: { onFail: "any" } });
   assert.deepEqual(calls.map((c) => c.body.model), ["mistral-large-latest", "other"]);
   assert.equal(r.model, "other");
 });
 
 test("a sibling version is still tried at the end rather than never", async (t) => {
-  const calls = stub(t, (c) => (c.body.model === "mistral-large-2411" ? ok() : fail(500)));
+  const calls = stub(t, (c) => (c.body.model === "mistral-large-2411" ? ok() : refused()));
   const r = await walk(REQ, [PROVIDER("one", "mistral-large-latest", "mistral-large-2411", "other")], { behavior: { onFail: "any" } });
   assert.deepEqual(calls.map((c) => c.body.model), ["mistral-large-latest", "other", "mistral-large-2411"]);
   assert.equal(r.model, "mistral-large-2411");
@@ -549,7 +558,8 @@ test("a model that says it calls tools is asked to do a small job with one", asy
 });
 
 test("a reply may go quiet no less than a model may take to start", () => {
-  assert.equal(behaviorFromEnv({}).replyIdle, 150);
+  assert.equal(behaviorFromEnv({}).replyIdle, 60);
+  assert.equal(behaviorFromEnv({}).replyStart, 45);
   assert.equal(behaviorFromEnv({ REPLY_IDLE: "1" }).replyIdle, 10, "clamped");
   assert.deepEqual(behaviorToEnv({ ...DEFAULTS, replyIdle: 200 }), ["REPLY_IDLE=200"]);
   const raised = { ...DEFAULTS, replyStart: 300 };
@@ -558,7 +568,7 @@ test("a reply may go quiet no less than a model may take to start", () => {
   const lowered = { ...DEFAULTS, replyIdle: 20 };
   assert.equal(fitTimes(lowered, { replyIdle: 20 }).length, 1);
   assert.equal(lowered.replyStart, 20);
-  assert.deepEqual(fitTimes({ ...DEFAULTS }, { replyStart: 60 }), [], "nothing to say when they agree");
+  assert.deepEqual(fitTimes({ ...DEFAULTS, replyStart: 60, replyIdle: 60 }, { replyStart: 60 }), [], "nothing to say when they agree");
   assert.equal(changeBehavior(DEFAULTS, { replyIdle: 400 }).replyIdle, 400);
   assert.throws(() => changeBehavior(DEFAULTS, { replyIdle: 5 }), /replyIdle/);
 });

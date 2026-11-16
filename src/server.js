@@ -14,11 +14,13 @@ import { randomBytes } from "node:crypto";
 import { quirksOf, learnQuirk, learnLimit, learnFromUsage } from "./learned.js";
 import { addUsage } from "./usage.js";
 import { probeSoon } from "./probe.js";
-import { bonusFor } from "./fit.js";
+import { bonusFor, currentRankings } from "./fit.js";
 import { conversationKey, stickyFor, stick } from "./conversations.js";
 import { tooBigForCatalog, unfitFor, factsFor } from "./modelsdev.js";
 import { setupFor } from "./setup.js";
 import { fetch } from "./http.js"; // not the built-in one: see http.js
+import { record as recordEvent, unreliable, withRecord, useRecords } from "./record.js";
+import { scoreOf } from "./rankings.js";
 
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -82,12 +84,11 @@ const MAX_RETRY_WAIT_MS = 30000;
 // part out. More than this many in a row is not a quirk, it is a refusal.
 const MAX_QUIRK_RETRIES = 3;
 
-// A failure that says the whole provider is the problem, not one of its
-// models: no connection at all, a refused key, a gateway that is down. Its
-// other models are held back until the other providers have had a turn. A 429
-// or a 404 is about one model (free tiers limit each separately), so the
-// provider keeps its place for the rest.
-const providerWide = (status) => !status || [401, 402, 403, 407, 502, 503, 504].includes(status);
+// A provider that answered with an error (400 or above) is not asked again
+// through its other models until the other providers have had a turn: the
+// next one is from another provider. HeartCode's rule. No connection at all
+// is not an answer, so it does not count.
+const providerWide = (status) => status >= 400;
 
 // Per attempt, and for the whole walk. The deadline is what actually prevents
 // a hang — without it a bad run could work through every model before
@@ -217,6 +218,7 @@ export async function callUpstream(
       bonus: hooks.bonus,
       unfit: hooks.unfit && ((baseUrl, model) => hooks.unfit(baseUrl, model, needs)),
       fixed,
+      standing: hooks.standing,
     });
     // A conversation stays on the model that answered it, while that model is
     // available: the provider's prompt cache holds, and nothing is relearned.
@@ -400,6 +402,13 @@ export async function callUpstream(
       }
 
       console.error(`[opencc]   ${label} ${reason}`);
+      // Its track record: it did not answer, refused the key, needs a paid
+      // plan... A rate limit passes, a request too big for it is the
+      // request's fault, and a walk cut short or a client that left says
+      // nothing about the model.
+      if (!(networkError && (shortened || signal?.aborted)) && reportedStatus !== 429 && !(!networkError && isTooBig(reportedStatus, reportedText))) {
+        hooks.record?.(provider, model, "no-answer");
+      }
       trail.push({
         provider: displayName(provider),
         model,
@@ -480,6 +489,7 @@ export async function callUpstream(
               stats.record({ baseUrl, model, kind, status, chars, verdict: err.empty ? "empty" : undefined });
               const cool = stats.coolOff(baseUrl, model, status);
               if (cool) console.error(`[opencc]   ${label} cooling off for ${cool / 1000}s`);
+              if (status !== 429 && !signal?.aborted) hooks.record?.(provider, model, err.empty ? "bad-reply" : "no-answer");
               console.error(`[opencc]   ${label} ${err.message}, trying the next one`);
               failures.push(`${displayName(provider)}/${model}: ${err.message}`);
               trail.push({ provider: displayName(provider), model, status: status || headStatus, ms: Date.now() - startedAt + headMs, error: err.message });
@@ -507,6 +517,7 @@ export async function callUpstream(
               };
             } catch (err) {
               stats.record({ baseUrl, model, kind, status: headStatus, chars, verdict: "unreadable" });
+              hooks.record?.(provider, model, "bad-reply");
               failures.push(`${displayName(provider)}/${model}: reply was not JSON: ${err.message}`);
               console.error(`[opencc]   ${label} answered with something that is not JSON`);
               trail.push({ provider: displayName(provider), model, status: headStatus, ms: headMs, verdict: "unreadable", error: err.message });
@@ -523,6 +534,7 @@ export async function callUpstream(
             });
 
             stats.record({ baseUrl, model, kind, status: headStatus, ms: headMs, chars, verdict });
+            hooks.record?.(provider, model, verdict === "ok" ? "done" : "bad-reply");
 
             if (verdict !== "ok") {
               failures.push(`${displayName(provider)}/${model}: 200 but ${verdict}`);
@@ -550,6 +562,7 @@ export async function callUpstream(
                 baseUrl, model, kind, status: headStatus, ms: headMs, verdict, chars,
               });
               if (verdict === "ok") stats.settled?.(baseUrl, model);
+              hooks.record?.(provider, model, verdict === "ok" ? "done" : verdict === STREAM_DIED_VERDICT ? "handover" : "bad-reply");
               return sent?.usage ? finishUsage(baseUrl, model, sent.usage) : null;
             },
           };
@@ -609,6 +622,13 @@ function liveHooks(behavior, needs, chars) {
     quirksOf, learnQuirk, learnLimit, learnUsage: learnFromUsage,
     usage: (baseUrl, model, usage) => addUsage(baseUrl, model, usage),
     probe: probeSoon,
+    // Its track record (record.js): what happened with this model's reply,
+    // and where it stands now for being picked.
+    record: (provider, model, what) => recordEvent({ provider: displayName(provider), model }, what),
+    standing: ({ provider, model }) => {
+      const t = { provider: displayName(provider), model };
+      return { score: withRecord(t, scoreOf(model, currentRankings())), poor: unreliable(t) };
+    },
     bonus: behavior.fit ? bonusFor(needs, chars) : undefined,
     unfit: unfitFor,
     can: (baseUrl, model) => {
@@ -645,6 +665,7 @@ async function handleMessages(anthropicReq, res) {
   if (live.replyTag) anthropicReq = { ...anthropicReq, messages: stripTags(live.replyTag, anthropicReq.messages) };
 
   const behavior = live.behavior ?? BEHAVIOR_DEFAULTS;
+  useRecords(behavior);
   const needs = requirementsOf(anthropicReq);
 
   // Gone when the client is: nothing is left to answer, so no more models are

@@ -50,8 +50,10 @@ Claude Code talks to, and it starts as soon as there is something to route to.
 if (args.includes("--reset-stats")) {
   const { resetStats } = await import("./stats.js");
   const { resetUsage } = await import("./usage.js");
+  const { forgetRecords } = await import("./record.js");
   const { moved, previous } = resetStats();
   resetUsage();
+  forgetRecords();
   console.log("");
   console.log(moved
     ? `  Record reset. The old one is at ${previous}`

@@ -60,6 +60,10 @@ export const RANKINGS_PATH = join(GLOBAL_CONFIG_DIR, "rankings.json");
 // a day, then learned again if it still holds.
 export const LEARNED_PATH = join(GLOBAL_CONFIG_DIR, "model-learned.json");
 
+// Each model's track record from real requests (HeartCode's records.json, same
+// shape): what it answered and what it failed at. Used to pick, see record.js.
+export const RECORDS_PATH = join(GLOBAL_CONFIG_DIR, "records.json");
+
 // Tokens and money spent per model.
 export const USAGE_PATH = join(GLOBAL_CONFIG_DIR, "usage.json");
 

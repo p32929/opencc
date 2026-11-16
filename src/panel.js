@@ -35,6 +35,7 @@ import { behaviorFromEnv } from "./behavior.js";
 import { rankings, loadRankings, rankIn } from "./rankings.js";
 import { forgetRankingsCache } from "./fit.js";
 import { allUsage, resetUsage } from "./usage.js";
+import { recordView, forgetRecords, useRecords } from "./record.js";
 import { updateFor, checkForUpdate } from "./update.js";
 import { bus } from "./events.js";
 import { LISTS_PATH, OLD_LISTS_PATH, TESTS_PATH, PREFS_PATH, GLOBAL_CONFIG_DIR } from "./paths.js";
@@ -141,11 +142,25 @@ const shown = (p) => ({
   added: p.added,
 });
 
+function recordsOf(cfg) {
+  useRecords(cfg.behavior);
+  const out = {};
+  for (const p of cfg.providers) {
+    for (const model of p.models) {
+      const r = recordView({ provider: p.name, model });
+      if (r) out[`${p.name}/${model}`] = r;
+    }
+  }
+  return out;
+}
+
 function stateOf() {
   const cfg = loadConfig();
   return {
     providers: cfg.providers.map(shown),
     order: cfg.order,
+    // Each model's track record: { "provider/model": { done, failed, poor } }
+    records: recordsOf(cfg),
     port: cfg.port,
     streaming: cfg.streaming,
     rank: cfg.rank,
@@ -559,6 +574,7 @@ export async function runPanel({ port = DEFAULT_PANEL_PORT, onSave } = {}) {
       // again until real requests fill it back in.
       if (req.method === "POST" && path === "/api/stats/reset") {
         resetUsage();
+        forgetRecords();
         json(res, 200, resetStats());
         return;
       }

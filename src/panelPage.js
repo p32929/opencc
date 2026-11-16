@@ -424,7 +424,7 @@ export const page = () => `<!doctype html>
       </div>
       <div>
         <label for="ttl">Test timeout <span class="hint">seconds</span></label>
-        <input type="number" id="ttl" min="1" max="300" step="1">
+        <input type="number" id="ttl" min="1" max="600" step="1">
       </div>
       <div>
         <label for="lanes">Test lanes <span class="hint">per provider</span></label>
@@ -550,6 +550,7 @@ export const page = () => `<!doctype html>
           <option value="">State: any</option>
           <option value="live">In rotation</option>
           <option value="parked">Parked</option>
+          <option value="poor">Failing lately</option>
         </select>
         <span class="spacer"></span>
         <span id="f-count" class="meta"></span>
@@ -781,6 +782,10 @@ function byName(a, b) {
 // What this model has actually done, across every kind of request. This is
 // the number routing is drawn from, so it is the one column that is about
 // opencc rather than about models.dev.
+// Its track record, from real requests: what it answered and failed at (record.js).
+function trackOf(t) {
+  return (S.records || {})[t.i + "/" + t.model] || null;
+}
 function recOf(baseUrl, model) {
   var r = REC[key(baseUrl, model)] || {};
   var ok = 0, fail = 0;
@@ -1884,6 +1889,7 @@ function passes(t, skip) {
 
   if (FILTER.state === "live" && (t.off || t.parked)) return false;
   if (FILTER.state === "parked" && !t.parked) return false;
+  if (FILTER.state === "poor" && !(trackOf(t) && trackOf(t).poor)) return false;
 
   return true;
 }
@@ -2058,6 +2064,9 @@ function drawMine() {
       title: filtering() ? "Only the models these filters show" : "Every model in the pot",
       onclick: function () { testMany(view); } },
       filtering() ? "Test these " + view.length : "Test all") : null,
+    list.length ? h("button", { className: "sm primary", disabled: Boolean(running),
+      title: "One click, as in HeartCode: model info and the public rankings fetched again, then " + (filtering() ? "the models these filters show" : "every model") + " tested",
+      onclick: async function () { await updateInfo(); testMany(view); } }, "Check models") : null,
 
     // The list you are looking at, made into the list you keep. Narrow to
     // the ones that work, or that call tools, or that cost nothing, and this
@@ -2226,8 +2235,10 @@ function tableRow(t, n, view) {
           h("td", { className: "num" }, d && d.output !== undefined ? usd(d.output) : "-"),
           rankCell(t, "coding"), rankCell(t, "webdev"), rankCell(t, "vision"),
           h("td", {}, fromCell(t)),
-          h("td", { className: "num", title: r.total ? r.ok + " of " + r.total + " requests answered" : "Nothing has been sent to this model yet" },
-            r.pct === null ? h("span", { className: "no" }, "-") : (r.pct + "%")),
+          h("td", { className: "num", title: (r.total ? r.ok + " of " + r.total + " requests answered" : "Nothing has been sent to this model yet") +
+              (trackOf(t) ? "\\nTrack record: " + trackOf(t).done + " done, " + trackOf(t).failed + " failed" + (trackOf(t).poor ? ". It failed most of its recent work, so it does not come first while another can." : "") : "") },
+            r.pct === null ? h("span", { className: "no" }, "-") : (r.pct + "%"),
+            trackOf(t) && trackOf(t).poor ? h("span", { className: "tag warn", style: "margin-left:5px" }, "poor") : null),
           h("td", { className: "num" }, r.total || "-"),
           usedCell(t), spentCell(t),
           h("td", {}, worksCell(t)),
@@ -3171,7 +3182,7 @@ $("port").addEventListener("change", async function () {
 $("ttl").addEventListener("change", async function () {
   // Clamped here as well as on the server, so the box shows what was
   // actually kept rather than what was typed.
-  var n = Math.min(300, Math.max(1, Math.round(Number($("ttl").value) || 10)));
+  var n = Math.min(600, Math.max(1, Math.round(Number($("ttl").value) || 60)));
   $("ttl").value = n;
   await saveSettings({ testTimeout: n });
   toast("Tests give up after " + n + "s");
@@ -3194,6 +3205,7 @@ async function behaviorDialog() {
   var start = h("input", { type: "number", min: "5", max: "600", step: "1", value: b.replyStart });
   var idle = h("input", { type: "number", min: "10", max: "1800", step: "1", value: b.replyIdle });
   var keep = h("input", { type: "checkbox", checked: Boolean(b.keepTrying) });
+  var track = h("input", { type: "checkbox", checked: b.trackRecord !== false });
   var effort = h("select", {},
     h("option", { value: "default" }, "Send nothing"),
     h("option", { value: "follow" }, "Follow Claude Code's thinking setting"),
@@ -3240,6 +3252,7 @@ async function behaviorDialog() {
       field("Tries of one model", retries, "used by Ask the same one again, 1 to 20"),
       field("A reply must start within", start, "seconds, 5 to 600"),
       field("A started reply may go quiet for", idle, "seconds, 10 to 1800, then it counts as stalled; never less than the one above"),
+      check(track, "Keep each model's track record", "what it answered and failed at: after the first model fails, the next is the best-ranked, moved by its record, and one that failed most of its recent work does not come first"),
       check(keep, "Keep trying when every model is busy", "wait, then go round again, instead of giving Claude Code the error"),
       field("Reasoning effort", effort, "sent to models that take it"),
       check(fit, "Tilt the draw by public rankings", "a small nudge toward models people rate higher at coding, agent work and images; the record still decides"),
@@ -3256,7 +3269,7 @@ async function behaviorDialog() {
         try {
           await saveSettings({ behavior: {
             pick: pick.value, onFail: onFail.value, retries: Number(retries.value), replyStart: Number(start.value), replyIdle: Number(idle.value),
-            keepTrying: keep.checked, effort: effort.value, fit: fit.checked, stay: stay.checked,
+            keepTrying: keep.checked, trackRecord: track.checked, effort: effort.value, fit: fit.checked, stay: stay.checked,
             logDetail: detail.value, logDays: Number(days.value), remote: remote.checked,
           } });
           if (closeDialog) closeDialog();

@@ -701,9 +701,15 @@ export function chooseOrder(attempts, kind, {
   // ahead of the ones that cannot take the size.
   unfit = null,
   // Map of `${baseUrl}\u0000${model}` to its place in your order. Given, the
-  // draw is not used: models go in that order (a model not in it, last),
-  // behind only what cannot take the request or is cooling off.
+  // draw is not used. HeartCode's way: the first model is the first in your
+  // order, and the ones after it are the best-ranked (public rankings moved
+  // by each model's track record, see record.js), the unranked in your order.
+  // Behind all of them, what cannot take the request or is cooling off.
   fixed = null,
+  // (attempt) => { score, poor }: score is a ranking score moved by the
+  // record, lower is better, Infinity unranked; poor is a model that has
+  // failed most of its recent work, which does not come first.
+  standing = null,
 } = {}) {
   const prefer = preferenceOf(rank);
   const placeOf = (baseUrl, model) => fixed.get(`${baseUrl}\u0000${model}`) ?? Infinity;
@@ -720,8 +726,9 @@ export function chooseOrder(attempts, kind, {
       cooling: coolingFor(baseUrl, attempt.model, now),
       tooSmall: tooSmallFor(entry, chars, catalogTooBig, baseUrl, attempt.model),
       unfit: Boolean(unfit?.(baseUrl, attempt.model)),
+      ...(fixed && { place: placeOf(baseUrl, attempt.model), ...(standing?.(attempt) ?? {}) }),
       draw: fixed
-        ? -Math.min(placeOf(baseUrl, attempt.model), 1e9)
+        ? 0
         : betaSample(a, b, rng) - slowness(meanMs(entry)) + prefer(baseUrl) + (bonus?.(baseUrl, attempt.model) ?? 0),
     };
   });
@@ -739,15 +746,25 @@ export function chooseOrder(attempts, kind, {
   // Anything cooling off goes to the back, in order of when it frees up.
   // It is still reachable: if everything else fails, we would rather ask a
   // rate-limited model than give up.
-  rows.sort((x, y) =>
+  const tiers = (x, y) =>
     // A model too small for this request goes behind even a cooling one: the
     // cooling model will work in a minute, this one will never take this.
     (x.tooSmall ? 1 : 0) - (y.tooSmall ? 1 : 0) ||
     (x.unfit ? 1 : 0) - (y.unfit ? 1 : 0) ||
     (x.cooling === 0 ? 0 : 1) - (y.cooling === 0 ? 0 : 1) ||
-    x.cooling - y.cooling ||
-    y.draw - x.draw ||
-    x.position - y.position);
+    x.cooling - y.cooling;
+
+  if (fixed) {
+    // HeartCode's: the first of your models that has not been failing comes
+    // first; then the best-ranked of the rest, a poor record moving a model
+    // down and a good one up, the unranked in your order.
+    const byPlace = [...rows].sort((x, y) => tiers(x, y) || (x.poor ? 1 : 0) - (y.poor ? 1 : 0) || x.place - y.place || x.position - y.position);
+    const rest = byPlace.slice(1).sort((x, y) =>
+      tiers(x, y) || (x.poor ? 1 : 0) - (y.poor ? 1 : 0) || (x.score ?? Infinity) - (y.score ?? Infinity) || x.place - y.place || x.position - y.position);
+    rows.splice(0, rows.length, ...byPlace.slice(0, 1), ...rest);
+  } else {
+    rows.sort((x, y) => tiers(x, y) || y.draw - x.draw || x.position - y.position);
+  }
 
   return {
     attempts: rows.map((row) => row.attempt),

@@ -17,6 +17,9 @@
 //   pick        which model is asked first: "order" (default) goes down
 //               your models in the order saved on Your models, as HeartCode
 //               does; "record" draws by what the record says each has done
+//   trackRecord keep each model's record of replies and failures, and let it
+//               move a model up or down (record.js); a model that has failed
+//               most of its recent work does not come first
 //   keepTrying  when every model fails with something that may pass (a rate
 //               limit, an outage), wait and go round again until the
 //               deadline, instead of giving Claude Code the error
@@ -33,8 +36,9 @@
 export const DEFAULTS = {
   onFail: "failure",
   retries: 2,
-  replyStart: 60,
-  replyIdle: 150,
+  replyStart: 45,
+  replyIdle: 60,
+  trackRecord: true,
   pick: "order",
   keepTrying: false,
   effort: "default",
@@ -46,7 +50,7 @@ export const DEFAULTS = {
 };
 
 export const ENV = {
-  onFail: "ON_FAIL", retries: "RETRIES", replyStart: "REPLY_START", replyIdle: "REPLY_IDLE", pick: "PICK", keepTrying: "KEEP_TRYING", effort: "EFFORT",
+  onFail: "ON_FAIL", retries: "RETRIES", replyStart: "REPLY_START", replyIdle: "REPLY_IDLE", trackRecord: "TRACK_RECORD", pick: "PICK", keepTrying: "KEEP_TRYING", effort: "EFFORT",
   remote: "PANEL_REMOTE", fit: "BEST_FIT", stay: "STAY", logDetail: "LOG_DETAIL", logDays: "LOG_DAYS",
 };
 
@@ -74,6 +78,7 @@ export function behaviorFromEnv(values = {}) {
     replyIdle: whole(v("replyIdle"), 10, 1800, DEFAULTS.replyIdle),
     effort: oneOf(v("effort"), EFFORTS, DEFAULTS.effort),
     keepTrying: truthy(v("keepTrying")),
+    trackRecord: v("trackRecord") === undefined ? DEFAULTS.trackRecord : truthy(v("trackRecord")),
     remote: truthy(v("remote")),
     fit: truthy(v("fit")),
     stay: truthy(v("stay")),
@@ -104,7 +109,7 @@ export function changeBehavior(current, input = {}) {
     else if (k === "pick") PICKS.includes(v) ? (next.pick = v) : bad(`pick: ${PICKS.join(" or ")}`);
     else if (k === "effort") EFFORTS.includes(v) ? (next.effort = v) : bad(`effort: ${EFFORTS.join(", ")}`);
     else if (k === "logDetail") DETAILS.includes(v) ? (next.logDetail = v) : bad(`log detail: ${DETAILS.join(" or ")}`);
-    else if (k === "fit" || k === "stay" || k === "keepTrying" || k === "remote") typeof v === "boolean" ? (next[k] = v) : bad(`${k}: on or off`);
+    else if (k === "fit" || k === "stay" || k === "keepTrying" || k === "remote" || k === "trackRecord") typeof v === "boolean" ? (next[k] = v) : bad(`${k}: on or off`);
     else {
       const range = { retries: [1, 20], replyStart: [5, 600], replyIdle: [10, 1800], logDays: [1, 3650] }[k];
       Number.isInteger(v) && v >= range[0] && v <= range[1] ? (next[k] = v) : bad(`${k}: a whole number, ${range[0]} to ${range[1]}`);
@@ -128,6 +133,34 @@ export function fitTimes(b, input = {}) {
     notes.push(`A started reply may go quiet for raised to ${b.replyIdle} s too: it may pause at least as long as a model gets to start`);
   }
   return notes;
+}
+
+// A test waits at least as long as a model gets to start answering, or it would
+// call broken a model that real requests still wait for (HeartCode's rule).
+// `input` is what was just sent; the one just set stays and the other moves.
+// Changes `cfg` ({ testTimeout, behavior }); returns what moved, and whether
+// replyStart did.
+export function fitTest(cfg, input = {}) {
+  const notes = [];
+  const b = cfg.behavior;
+  let movedStart = false;
+  if (!(cfg.testTimeout < b.replyStart)) return { notes, movedStart };
+  if (input.testTimeout !== undefined) {
+    if (cfg.testTimeout >= 5) {
+      b.replyStart = cfg.testTimeout;
+      movedStart = true;
+      notes.push(`A reply must start within lowered to ${cfg.testTimeout} s too: real requests shouldn't wait longer for a model than its test does`);
+    } else {
+      cfg.testTimeout = 5;
+      b.replyStart = 5;
+      movedStart = true;
+      notes.push("Test timeout set to 5 s: the shortest a reply may take to start, and a test must wait at least as long");
+    }
+  } else {
+    cfg.testTimeout = b.replyStart;
+    notes.push(`Test timeout raised to ${b.replyStart} s too: a test should wait at least as long as a reply may take to start`);
+  }
+  return { notes, movedStart };
 }
 
 // Claude Code's thinking budget as a reasoning_effort, for effort "follow".

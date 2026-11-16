@@ -237,24 +237,25 @@ test("parses a comma-separated model list", () => {
   assert.deepEqual(p.models, ["first", "second", "third"], "trimmed, blanks dropped");
 });
 
-test("tries each model of a provider before moving to the next provider", async (t) => {
+test("a provider that answered with an error is not asked again through its other models until the others have had a turn", async (t) => {
   const realFetch = globalThis.fetch;
   t.after(() => (globalThis.fetch = realFetch));
 
-  // first two models of provider one fail, its third works
-  const seen = stubFetch([429, 429, 200]);
+  // HeartCode's rule: the first model of provider one fails (429), so the next
+  // one is from provider two, which works.
+  const seen = stubFetch([429, 200]);
 
   const result = await up(REQ, [
     { baseUrl: "https://one.test/v1", apiKey: "k", models: ["m1", "m2", "m3"], name: "one" },
     { baseUrl: "https://two.test/v1", apiKey: "k", models: ["other"], name: "two" },
   ]);
 
-  assert.equal(result.provider.name, "one", "stays on a provider that still has models left");
-  assert.equal(result.model, "m3");
-  assert.deepEqual(seen.map((s) => s.body.model), ["m1", "m2", "m3"]);
+  assert.equal(result.provider.name, "two");
+  assert.equal(result.model, "other");
+  assert.deepEqual(seen.map((s) => s.body.model), ["m1", "other"]);
 });
 
-test("moves to the next provider once a provider's models are exhausted", async (t) => {
+test("the held-back models of a provider go once every other provider has had its turn", async (t) => {
   const realFetch = globalThis.fetch;
   t.after(() => (globalThis.fetch = realFetch));
 
@@ -265,13 +266,9 @@ test("moves to the next provider once a provider's models are exhausted", async 
     { baseUrl: "https://two.test/v1", apiKey: "k", models: ["m3"], name: "two" },
   ]);
 
-  assert.equal(result.provider.name, "two");
-  assert.equal(result.model, "m3");
-  assert.deepEqual(seen.map((s) => s.url), [
-    "https://one.test/v1/chat/completions",
-    "https://one.test/v1/chat/completions",
-    "https://two.test/v1/chat/completions",
-  ]);
+  assert.equal(result.provider.name, "one");
+  assert.equal(result.model, "m2");
+  assert.deepEqual(seen.map((s) => s.body.model), ["m1", "m3", "m2"]);
 });
 
 // --- disabling a provider -------------------------------------------------
@@ -2048,21 +2045,21 @@ test("short sessions still bound the request log", async () => {
 
 // --- the test timeout ------------------------------------------------------
 
-test("the test timeout is read, clamped, and defaults to ten seconds", async () => {
+test("the test timeout is read, clamped, and defaults to a minute", async () => {
   const { testTimeoutFromEnv, DEFAULT_TEST_TIMEOUT } = await import("./config.js");
 
-  assert.equal(DEFAULT_TEST_TIMEOUT, 10);
-  assert.equal(testTimeoutFromEnv({}), 10, "absent means the default");
+  assert.equal(DEFAULT_TEST_TIMEOUT, 60);
+  assert.equal(testTimeoutFromEnv({}), 60, "absent means the default");
   assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "25" }), 25);
   assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "2.6" }), 3, "whole seconds");
 
   // Nonsense must not turn into no timeout at all, which is the one outcome
   // worth protecting against: a test that never gives up.
-  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "abc" }), 10);
-  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "" }), 10);
+  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "abc" }), 60);
+  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "" }), 60);
   assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "0" }), 1, "never zero");
   assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "-5" }), 1);
-  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "99999" }), 300, "and never unbounded");
+  assert.equal(testTimeoutFromEnv({ TEST_TIMEOUT: "99999" }), 600, "and never unbounded");
 });
 
 test("the test timeout survives the config file, and the default is not written", async () => {
@@ -2080,7 +2077,7 @@ test("the test timeout survives the config file, and the default is not written"
     const providers = [{ name: "a", baseUrl: "https://a.test/v1", apiKey: "", models: ["m"] }];
     writeStoredConfig({ providers, port: "9753", testTimeout: 30 });
     const changed = { value: testTimeoutFromEnv(readStoredConfig()), written: readStoredConfig().TEST_TIMEOUT };
-    writeStoredConfig({ providers, port: "9753", testTimeout: 10 });
+    writeStoredConfig({ providers, port: "9753", testTimeout: 60 });
     const asDefault = { value: testTimeoutFromEnv(readStoredConfig()), written: readStoredConfig().TEST_TIMEOUT };
     console.log(JSON.stringify({ changed, asDefault }));
   `);
@@ -2090,6 +2087,6 @@ test("the test timeout survives the config file, and the default is not written"
   assert.equal(out.changed.written, "30");
   // Back at the default it leaves the file, so the config stays a record of
   // what you changed rather than of every setting that exists.
-  assert.equal(out.asDefault.value, 10);
+  assert.equal(out.asDefault.value, 60);
   assert.equal(out.asDefault.written, undefined);
 });
