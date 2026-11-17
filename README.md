@@ -479,10 +479,4 @@ opencc leans on other people's work:
 3. [Reika](https://github.com/alexwkleung/reika), [OpenCode](https://github.com/anomalyco/opencode), [Cline](https://github.com/cline/cline), [OpenClaw](https://github.com/openclaw/openclaw) and [Pi](https://github.com/earendil-works/pi): other coding agents whose use cases and findings taught me a lot of what a proxy like this has to handle.
 4. Everyone who reported a bug, sent a pull request or starred the repository.
 
-## Share
-
-<a href="https://p32929.github.io/share/?repo=opencc"><picture><source media="(prefers-color-scheme: dark)" srcset="https://p32929.github.io/readme/share-dark.svg"><img src="https://p32929.github.io/readme/share-light.svg" alt="Share this with your friends in just a click" width="420"></picture></a>
-
-## Support
-
-<a href="https://p32929.github.io/support/"><picture><source media="(prefers-color-scheme: dark)" srcset="https://p32929.github.io/readme/support-dark.svg"><img src="https://p32929.github.io/readme/support-light.svg" alt="If you like my works and want to support me, feel free to support" width="420"></picture></a>
+<p><a href="https://p32929.github.io/share/?repo=opencc"><picture><source media="(prefers-color-scheme: dark)" srcset="https://p32929.github.io/readme/footer-share-dark.svg"><img src="https://p32929.github.io/readme/footer-share-light.svg" width="50%" align="top" alt="Share this project with your friends in one click"></picture></a><a href="https://p32929.github.io/support/"><picture><source media="(prefers-color-scheme: dark)" srcset="https://p32929.github.io/readme/footer-support-dark.svg"><img src="https://p32929.github.io/readme/footer-support-light.svg" width="50%" align="top" alt="If you like my work and want to support me, feel free to support"></picture></a><br><a href="https://openstore.pfay.workers.dev/add"><picture><source media="(prefers-color-scheme: dark)" srcset="https://p32929.github.io/readme/footer-join-dark.svg"><img src="https://p32929.github.io/readme/footer-join-light.svg" width="100%" align="top" alt="Put your own apps on OpenStore: free, your listing lives in your own repo"></picture></a></p>
